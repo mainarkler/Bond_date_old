@@ -1374,11 +1374,13 @@ if st.session_state["active_view"] == "sell_stres":
                         progress_bar.progress(idx / len(entries))
 
                 if results:
-                    st.markdown("#### Результаты ΔP")
                     combined_delta = []
+                    if not use_q_from_list:
+                        st.markdown("#### Результаты ΔP")
                     for isin, df_delta in results.items():
-                        st.markdown(f"**{isin}**")
-                        st.dataframe(df_delta, use_container_width=True)
+                        if not use_q_from_list:
+                            st.markdown(f"**{isin}**")
+                            st.dataframe(df_delta, use_container_width=True)
                         combined_delta.append(df_delta.assign(ISIN=isin))
 
                     combined_delta_df = pd.concat(combined_delta, ignore_index=True)
@@ -1510,11 +1512,13 @@ if st.session_state["active_view"] == "sell_stres":
                         progress_bar.progress(idx / len(entries))
 
                 if results:
-                    st.markdown("#### Результаты ΔP (Bond)")
                     combined_delta = []
+                    if not use_q_from_list_bond:
+                        st.markdown("#### Результаты ΔP (Bond)")
                     for isin, df_delta in results.items():
-                        st.markdown(f"**{isin}**")
-                        st.dataframe(df_delta, use_container_width=True)
+                        if not use_q_from_list_bond:
+                            st.markdown(f"**{isin}**")
+                            st.dataframe(df_delta, use_container_width=True)
                         combined_delta.append(df_delta.assign(ISIN=isin))
 
                     combined_delta_df = pd.concat(combined_delta, ignore_index=True)
