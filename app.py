@@ -11,6 +11,7 @@ from io import BytesIO, StringIO
 import numpy as np
 import pandas as pd
 import requests
+import sell_stress as ss
 import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -1268,6 +1269,25 @@ if st.session_state["active_view"] == "vm":
 # ---------------------------
 if st.session_state["active_view"] == "sell_stres":
     st.subheader("🧩 Sell_stres")
+
+    if "sell_stres_share_downloads" not in st.session_state:
+        st.session_state["sell_stres_share_downloads"] = None
+    if "sell_stres_share_show_tables" not in st.session_state:
+        st.session_state["sell_stres_share_show_tables"] = False
+    if "sell_stres_share_table_results" not in st.session_state:
+        st.session_state["sell_stres_share_table_results"] = {}
+    if "sell_stres_share_meta_table" not in st.session_state:
+        st.session_state["sell_stres_share_meta_table"] = None
+
+    if "sell_stres_bond_downloads" not in st.session_state:
+        st.session_state["sell_stres_bond_downloads"] = None
+    if "sell_stres_bond_show_tables" not in st.session_state:
+        st.session_state["sell_stres_bond_show_tables"] = False
+    if "sell_stres_bond_table_results" not in st.session_state:
+        st.session_state["sell_stres_bond_table_results"] = {}
+    if "sell_stres_bond_meta_table" not in st.session_state:
+        st.session_state["sell_stres_bond_meta_table"] = None
+
     share_tab, bond_tab = st.tabs(["Share", "Bond"])
 
     with share_tab:
@@ -1352,6 +1372,11 @@ if st.session_state["active_view"] == "sell_stres":
                 )
             if not entries:
                 st.error("Нет валидных ISIN для обработки.")
+            elif len(entries) > ss.MAX_SECURITIES_PER_RUN:
+                st.error(
+                    f"Слишком много бумаг за один запуск: {len(entries)}. "
+                    f"Лимит: {ss.MAX_SECURITIES_PER_RUN}."
+                )
             else:
                 meta_rows = []
                 results = {}
@@ -1360,8 +1385,10 @@ if st.session_state["active_view"] == "sell_stres":
                     for idx, entry in enumerate(entries, start=1):
                         isin = entry["ISIN"]
                         try:
-                            q_vector = build_q_vector(q_mode, entry["Q_MAX"])
-                            delta_df, meta = calculate_share_delta_p(
+                            q_vector = ss.build_q_vector(q_mode, entry["Q_MAX"])
+                            delta_df, meta = ss.calculate_share_delta_p(
+                                request_get=request_get,
+                                isin_to_secid=isin_to_secid,
                                 isin=isin,
                                 c_value=float(c_value),
                                 date_from=data_from.strftime("%Y-%m-%d"),
@@ -1373,37 +1400,79 @@ if st.session_state["active_view"] == "sell_stres":
                             st.error(f"{isin}: {exc}")
                         progress_bar.progress(idx / len(entries))
 
-                if results:
-                    combined_delta = []
-                    if not use_q_from_list:
-                        st.markdown("#### Результаты ΔP")
-                    for isin, df_delta in results.items():
-                        if not use_q_from_list:
-                            st.markdown(f"**{isin}**")
-                            st.dataframe(df_delta, use_container_width=True)
-                        combined_delta.append(df_delta.assign(ISIN=isin))
+                show_tables = len(entries) == 1 and not use_q_from_list
+                st.session_state["sell_stres_share_show_tables"] = show_tables
+                st.session_state["sell_stres_share_table_results"] = results if show_tables else {}
 
-                    combined_delta_df = pd.concat(combined_delta, ignore_index=True)
-                    combined_delta_df = combined_delta_df[["ISIN", "Q", "DeltaP"]]
-                    combined_delta_bytes = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        label="💾 Скачать общий ΔP CSV",
-                        data=combined_delta_bytes,
-                        file_name="sell_stres_share_deltaP_all.csv",
-                        mime="text/csv",
+                download_payload = {}
+                if results:
+                    combined_delta_df = pd.concat(
+                        [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
+                        ignore_index=True,
+                    )[["ISIN", "Q", "DeltaP"]]
+                    download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
+                    download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
+                        combined_delta_df, sheet_name="delta_p"
                     )
 
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
-                    st.markdown("#### Meta_mod")
-                    st.dataframe(meta_df, use_container_width=True)
-                    meta_bytes = meta_df.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        label="💾 Скачать общий Meta_mod CSV",
-                        data=meta_bytes,
-                        file_name="sell_stres_share_meta_all.csv",
-                        mime="text/csv",
-                    )
+                    download_payload["meta_csv"] = meta_df.to_csv(index=False).encode("utf-8-sig")
+                    download_payload["meta_xlsx"] = ss.dataframe_to_excel_bytes(meta_df, sheet_name="meta")
+                    if show_tables:
+                        st.session_state["sell_stres_share_meta_table"] = meta_df
+                    else:
+                        st.session_state["sell_stres_share_meta_table"] = None
+                else:
+                    st.session_state["sell_stres_share_meta_table"] = None
+
+                st.session_state["sell_stres_share_downloads"] = download_payload if download_payload else None
+
+        if st.session_state.get("sell_stres_share_show_tables") and st.session_state.get(
+            "sell_stres_share_table_results"
+        ):
+            st.markdown("#### Результаты ΔP")
+            for isin, df_delta in st.session_state["sell_stres_share_table_results"].items():
+                st.markdown(f"**{isin}**")
+                st.dataframe(df_delta, use_container_width=True)
+
+        share_meta_table = st.session_state.get("sell_stres_share_meta_table")
+        if share_meta_table is not None:
+            st.markdown("#### Meta_mod")
+            st.dataframe(share_meta_table, use_container_width=True)
+
+        share_downloads = st.session_state.get("sell_stres_share_downloads")
+        if share_downloads:
+            if "delta_csv" in share_downloads:
+                st.download_button(
+                    label="💾 Скачать общий ΔP CSV",
+                    data=share_downloads["delta_csv"],
+                    file_name="sell_stres_share_deltaP_all.csv",
+                    mime="text/csv",
+                    key="share_delta_csv_dl",
+                )
+                st.download_button(
+                    label="💾 Скачать общий ΔP Excel",
+                    data=share_downloads["delta_xlsx"],
+                    file_name="sell_stres_share_deltaP_all.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="share_delta_xlsx_dl",
+                )
+            if "meta_csv" in share_downloads:
+                st.download_button(
+                    label="💾 Скачать общий Meta_mod CSV",
+                    data=share_downloads["meta_csv"],
+                    file_name="sell_stres_share_meta_all.csv",
+                    mime="text/csv",
+                    key="share_meta_csv_dl",
+                )
+                st.download_button(
+                    label="💾 Скачать общий Meta_mod Excel",
+                    data=share_downloads["meta_xlsx"],
+                    file_name="sell_stres_share_meta_all.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="share_meta_xlsx_dl",
+                )
 
     with bond_tab:
         st.markdown("### Bond")
@@ -1436,7 +1505,7 @@ if st.session_state["active_view"] == "sell_stres":
         )
         bond_date_from = st.date_input(
             "Дата начала (data_from)",
-            value=datetime(2023, 1, 1).date(),
+            value=datetime(2024, 1, 1).date(),
             key="bond_date_from",
         )
         bond_q_max = st.number_input(
@@ -1489,6 +1558,11 @@ if st.session_state["active_view"] == "sell_stres":
                 )
             if not entries:
                 st.error("Нет валидных ISIN для обработки.")
+            elif len(entries) > ss.MAX_SECURITIES_PER_RUN:
+                st.error(
+                    f"Слишком много бумаг за один запуск: {len(entries)}. "
+                    f"Лимит: {ss.MAX_SECURITIES_PER_RUN}."
+                )
             else:
                 meta_rows = []
                 results = {}
@@ -1497,7 +1571,8 @@ if st.session_state["active_view"] == "sell_stres":
                     for idx, entry in enumerate(entries, start=1):
                         isin = entry["ISIN"]
                         try:
-                            delta_df, meta = calculate_bond_delta_p(
+                            delta_df, meta = ss.calculate_bond_delta_p(
+                                request_get=request_get,
                                 secid=isin,
                                 c_value=float(bond_c_value),
                                 date_from=bond_date_from.strftime("%Y-%m-%d"),
@@ -1511,24 +1586,19 @@ if st.session_state["active_view"] == "sell_stres":
                             st.error(f"{isin}: {exc}")
                         progress_bar.progress(idx / len(entries))
 
-                if results:
-                    combined_delta = []
-                    if not use_q_from_list_bond:
-                        st.markdown("#### Результаты ΔP (Bond)")
-                    for isin, df_delta in results.items():
-                        if not use_q_from_list_bond:
-                            st.markdown(f"**{isin}**")
-                            st.dataframe(df_delta, use_container_width=True)
-                        combined_delta.append(df_delta.assign(ISIN=isin))
+                show_tables = len(entries) == 1 and not use_q_from_list_bond
+                st.session_state["sell_stres_bond_show_tables"] = show_tables
+                st.session_state["sell_stres_bond_table_results"] = results if show_tables else {}
 
-                    combined_delta_df = pd.concat(combined_delta, ignore_index=True)
-                    combined_delta_df = combined_delta_df[["ISIN", "Q", "DeltaP_pct"]]
-                    combined_delta_bytes = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        label="💾 Скачать общий ΔP CSV (Bond)",
-                        data=combined_delta_bytes,
-                        file_name="sell_stres_bond_deltaP_all.csv",
-                        mime="text/csv",
+                download_payload = {}
+                if results:
+                    combined_delta_df = pd.concat(
+                        [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
+                        ignore_index=True,
+                    )[["ISIN", "Q", "DeltaP_pct"]]
+                    download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
+                    download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
+                        combined_delta_df, sheet_name="delta_p"
                     )
 
                 if meta_rows:
@@ -1536,15 +1606,62 @@ if st.session_state["active_view"] == "sell_stres":
                         meta_rows,
                         columns=["ISIN", "T", "SigmaY", "MDTV", "Price", "YTM", "Dmod"],
                     )
-                    st.markdown("#### Meta_mod (Bond)")
-                    st.dataframe(meta_df, use_container_width=True)
-                    meta_bytes = meta_df.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        label="💾 Скачать общий Meta_mod CSV (Bond)",
-                        data=meta_bytes,
-                        file_name="sell_stres_bond_meta_all.csv",
-                        mime="text/csv",
-                    )
+                    download_payload["meta_csv"] = meta_df.to_csv(index=False).encode("utf-8-sig")
+                    download_payload["meta_xlsx"] = ss.dataframe_to_excel_bytes(meta_df, sheet_name="meta")
+                    if show_tables:
+                        st.session_state["sell_stres_bond_meta_table"] = meta_df
+                    else:
+                        st.session_state["sell_stres_bond_meta_table"] = None
+                else:
+                    st.session_state["sell_stres_bond_meta_table"] = None
+
+                st.session_state["sell_stres_bond_downloads"] = download_payload if download_payload else None
+
+        if st.session_state.get("sell_stres_bond_show_tables") and st.session_state.get(
+            "sell_stres_bond_table_results"
+        ):
+            st.markdown("#### Результаты ΔP (Bond)")
+            for isin, df_delta in st.session_state["sell_stres_bond_table_results"].items():
+                st.markdown(f"**{isin}**")
+                st.dataframe(df_delta, use_container_width=True)
+
+        bond_meta_table = st.session_state.get("sell_stres_bond_meta_table")
+        if bond_meta_table is not None:
+            st.markdown("#### Meta_mod (Bond)")
+            st.dataframe(bond_meta_table, use_container_width=True)
+
+        bond_downloads = st.session_state.get("sell_stres_bond_downloads")
+        if bond_downloads:
+            if "delta_csv" in bond_downloads:
+                st.download_button(
+                    label="💾 Скачать общий ΔP CSV (Bond)",
+                    data=bond_downloads["delta_csv"],
+                    file_name="sell_stres_bond_deltaP_all.csv",
+                    mime="text/csv",
+                    key="bond_delta_csv_dl",
+                )
+                st.download_button(
+                    label="💾 Скачать общий ΔP Excel (Bond)",
+                    data=bond_downloads["delta_xlsx"],
+                    file_name="sell_stres_bond_deltaP_all.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="bond_delta_xlsx_dl",
+                )
+            if "meta_csv" in bond_downloads:
+                st.download_button(
+                    label="💾 Скачать общий Meta_mod CSV (Bond)",
+                    data=bond_downloads["meta_csv"],
+                    file_name="sell_stres_bond_meta_all.csv",
+                    mime="text/csv",
+                    key="bond_meta_csv_dl",
+                )
+                st.download_button(
+                    label="💾 Скачать общий Meta_mod Excel (Bond)",
+                    data=bond_downloads["meta_xlsx"],
+                    file_name="sell_stres_bond_meta_all.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="bond_meta_xlsx_dl",
+                )
 
     st.stop()
 
