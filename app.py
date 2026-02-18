@@ -1414,6 +1414,12 @@ if st.session_state["active_view"] == "sell_stres":
                     download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
                         combined_delta_df, sheet_name="delta_p"
                     )
+                    st.download_button(
+                        label="💾 Скачать общий ΔP Excel",
+                        data=ss.dataframe_to_excel_bytes(combined_delta_df, sheet_name="delta_p"),
+                        file_name="sell_stres_share_deltaP_all.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
 
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
@@ -1599,6 +1605,12 @@ if st.session_state["active_view"] == "sell_stres":
                     download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
                         combined_delta_df, sheet_name="delta_p"
+                    )
+                    st.download_button(
+                        label="💾 Скачать общий ΔP Excel (Bond)",
+                        data=ss.dataframe_to_excel_bytes(combined_delta_df, sheet_name="delta_p"),
+                        file_name="sell_stres_bond_deltaP_all.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
 
                 if meta_rows:
