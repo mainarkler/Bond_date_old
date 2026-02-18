@@ -1375,16 +1375,21 @@ if st.session_state["active_view"] == "sell_stres":
 
                 if results:
                     st.markdown("#### Результаты ΔP")
+                    combined_delta = []
                     for isin, df_delta in results.items():
                         st.markdown(f"**{isin}**")
                         st.dataframe(df_delta, use_container_width=True)
-                        csv_bytes = df_delta.to_csv(index=False).encode("utf-8-sig")
-                        st.download_button(
-                            label=f"💾 Скачать ΔP CSV ({isin})",
-                            data=csv_bytes,
-                            file_name=f"{isin}_deltaP.csv",
-                            mime="text/csv",
-                        )
+                        combined_delta.append(df_delta.assign(ISIN=isin))
+
+                    combined_delta_df = pd.concat(combined_delta, ignore_index=True)
+                    combined_delta_df = combined_delta_df[["ISIN", "Q", "DeltaP"]]
+                    combined_delta_bytes = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        label="💾 Скачать общий ΔP CSV",
+                        data=combined_delta_bytes,
+                        file_name="sell_stres_share_deltaP_all.csv",
+                        mime="text/csv",
+                    )
 
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
@@ -1392,9 +1397,9 @@ if st.session_state["active_view"] == "sell_stres":
                     st.dataframe(meta_df, use_container_width=True)
                     meta_bytes = meta_df.to_csv(index=False).encode("utf-8-sig")
                     st.download_button(
-                        label="💾 Скачать Meta_mod CSV",
+                        label="💾 Скачать общий Meta_mod CSV",
                         data=meta_bytes,
-                        file_name="Meta_mod.csv",
+                        file_name="sell_stres_share_meta_all.csv",
                         mime="text/csv",
                     )
 
@@ -1506,16 +1511,21 @@ if st.session_state["active_view"] == "sell_stres":
 
                 if results:
                     st.markdown("#### Результаты ΔP (Bond)")
+                    combined_delta = []
                     for isin, df_delta in results.items():
                         st.markdown(f"**{isin}**")
                         st.dataframe(df_delta, use_container_width=True)
-                        csv_bytes = df_delta.to_csv(index=False).encode("utf-8-sig")
-                        st.download_button(
-                            label=f"💾 Скачать ΔP CSV ({isin})",
-                            data=csv_bytes,
-                            file_name=f"{isin}_bond_deltaP.csv",
-                            mime="text/csv",
-                        )
+                        combined_delta.append(df_delta.assign(ISIN=isin))
+
+                    combined_delta_df = pd.concat(combined_delta, ignore_index=True)
+                    combined_delta_df = combined_delta_df[["ISIN", "Q", "DeltaP_pct"]]
+                    combined_delta_bytes = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        label="💾 Скачать общий ΔP CSV (Bond)",
+                        data=combined_delta_bytes,
+                        file_name="sell_stres_bond_deltaP_all.csv",
+                        mime="text/csv",
+                    )
 
                 if meta_rows:
                     meta_df = pd.DataFrame(
@@ -1526,9 +1536,9 @@ if st.session_state["active_view"] == "sell_stres":
                     st.dataframe(meta_df, use_container_width=True)
                     meta_bytes = meta_df.to_csv(index=False).encode("utf-8-sig")
                     st.download_button(
-                        label="💾 Скачать Meta_mod CSV (Bond)",
+                        label="💾 Скачать общий Meta_mod CSV (Bond)",
                         data=meta_bytes,
-                        file_name="Meta_mod_bond.csv",
+                        file_name="sell_stres_bond_meta_all.csv",
                         mime="text/csv",
                     )
 
