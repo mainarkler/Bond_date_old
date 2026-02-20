@@ -11,7 +11,7 @@ BASE_SHARE_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets
 BASE_BOND_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/bonds/securities"
 
 MAX_PAGINATION_PAGES = 2000
-MAX_SECURITIES_PER_RUN = 200
+MAX_SECURITIES_PER_RUN = 1000
 MAX_Q_POINTS_PER_SECURITY = 1000
 
 
