@@ -96,7 +96,7 @@ if st.session_state["active_view"] == "home":
             trigger_rerun()
     index_col, _ = st.columns(2)
     with index_col:
-        st.markdown("### 🧾 Весы индекса MOEX")
+        st.markdown("### 🧾 Состав индекса")
         st.caption("Загрузка состава индекса по датам и построение матрицы весов.")
         if st.button("Открыть", key="open_index_analytics", use_container_width=True):
             st.session_state["active_view"] = "index_analytics"
