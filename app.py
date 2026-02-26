@@ -13,6 +13,7 @@ import pandas as pd
 import requests
 import sell_stress as ss
 import streamlit as st
+import index_analytics as ia
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -93,6 +94,13 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_sell_stres", use_container_width=True):
             st.session_state["active_view"] = "sell_stres"
             trigger_rerun()
+    index_col, _ = st.columns(2)
+    with index_col:
+        st.markdown("### 🧾 Весы индекса MOEX")
+        st.caption("Загрузка состава индекса по датам и построение матрицы весов.")
+        if st.button("Открыть", key="open_index_analytics", use_container_width=True):
+            st.session_state["active_view"] = "index_analytics"
+            trigger_rerun()
     st.stop()
 
 # ---------------------------
@@ -120,6 +128,13 @@ def request_get(url: str, timeout: int = 15, params=None):
     response = HTTP_SESSION.get(url, timeout=timeout, params=params)
     response.raise_for_status()
     return response
+
+
+def open_index_analytics_sheet():
+    ia.render_index_analytics_view(
+        request_get=request_get,
+        dataframe_to_excel_bytes=ss.dataframe_to_excel_bytes,
+    )
 
 
 # ---------------------------
@@ -1675,6 +1690,13 @@ if st.session_state["active_view"] == "sell_stres":
                     key="bond_meta_xlsx_dl",
                 )
 
+    st.stop()
+
+# ---------------------------
+# Index analytics view
+# ---------------------------
+if st.session_state["active_view"] == "index_analytics":
+    open_index_analytics_sheet()
     st.stop()
 
 # ---------------------------
