@@ -67,7 +67,7 @@ if st.session_state["active_view"] != "home":
         trigger_rerun()
 
 if st.session_state["active_view"] == "home":
-    st.subheader("🏠 Главное меню")
+    st.subheader("")
     top_left, top_right = st.columns(2)
     with top_left:
         st.markdown("### Претрейд РЕПО")
