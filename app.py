@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import numpy as np
 import pandas as pd
@@ -160,23 +160,24 @@ def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
 
 
 def build_compose_link(service: str, recipients: list[str], subject: str, body: str) -> str:
+    query_string = lambda params: urlencode(params, quote_via=quote)
     to_field = ",".join(recipients)
     if service == "Почтовый клиент по умолчанию":
-        return f"mailto:{to_field}?{urlencode({'subject': subject, 'body': body})}"
+        return f"mailto:{to_field}?{query_string({'subject': subject, 'body': body})}"
     if service == "Gmail":
-        return "https://mail.google.com/mail/?" + urlencode(
+        return "https://mail.google.com/mail/?" + query_string(
             {"view": "cm", "fs": "1", "to": to_field, "su": subject, "body": body}
         )
     if service == "Outlook Web":
-        return "https://outlook.office.com/mail/deeplink/compose?" + urlencode(
+        return "https://outlook.office.com/mail/deeplink/compose?" + query_string(
             {"to": to_field, "subject": subject, "body": body}
         )
     if service == "Yandex Mail":
-        return "https://mail.yandex.ru/compose?" + urlencode(
+        return "https://mail.yandex.ru/compose?" + query_string(
             {"to": to_field, "subject": subject, "body": body}
         )
     return "https://e.mail.ru/compose/?" + urlencode(
-        {"To": to_field, "Subject": subject, "Body": body}
+        {"To": to_field, "Subject": subject, "Body": body}, quote_via=quote
     )
 
 
@@ -185,7 +186,8 @@ def render_email_compose_section(report_title: str, key_prefix: str):
     st.subheader("📧 Отправка отчёта по почте")
     st.caption(
         "Выберите сервис и адреса — приложение откроет черновик письма. "
-        "Вложение добавляется вручную из скачанного файла отчёта."
+        "Вложение добавляется вручную из скачанного файла отчёта. "
+        "Стандартная подпись почтового клиента добавляется автоматически."
     )
 
     mail_service = st.selectbox(
@@ -206,7 +208,6 @@ def render_email_compose_section(report_title: str, key_prefix: str):
             "Коллеги, добрый день!\n\n"
             f"Направляю {report_title.lower()}.\n"
             "Пожалуйста, см. вложенный файл.\n\n"
-            "С уважением."
         ),
         height=180,
         key=f"{key_prefix}_body",
