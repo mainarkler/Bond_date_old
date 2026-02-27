@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -77,7 +78,7 @@ def _normalize_snapshot_df(raw_df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["Date", "Weight"])
 
 
-def _extract_prev_date(cursor_df: pd.DataFrame) -> pd.Timestamp | None:
+def _extract_prev_date(cursor_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     if cursor_df.empty:
         return None
 
@@ -90,11 +91,11 @@ def _extract_prev_date(cursor_df: pd.DataFrame) -> pd.Timestamp | None:
     return None
 
 
-def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> tuple[int, int]:
+def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> Tuple[int, int]:
     if cursor_df.empty:
         return fetched_count, fetched_count
 
-    def _get_int(columns: tuple[str, ...], default: int) -> int:
+    def _get_int(columns: Tuple[str, ...], default: int) -> int:
         for col in columns:
             if col in cursor_df.columns:
                 value = pd.to_numeric(cursor_df[col].iloc[0], errors="coerce")
@@ -108,21 +109,21 @@ def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> 
 
 
 @st.cache_data(ttl=1800)
-def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
     url = (
         "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
         f"{index_name}.json"
     )
 
     start = 0
-    chunks: list[pd.DataFrame] = []
+    chunks: List[pd.DataFrame] = []
     prev_date = None
     total = None
 
     while True:
         response = _request_get_func(
             url,
-            timeout=30,
+            timeout=60,
             params={"iss.meta": "off", "limit": 100, "date": date_str, "start": start},
         )
         js = response.json()
@@ -161,8 +162,8 @@ def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> 
 def fetch_index_weights(
     request_get,
     index_name: str,
-    date_from: str | None = None,
-    date_to: str | None = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
 ) -> pd.DataFrame:
     index_name = str(index_name).strip().upper()
     if not index_name:
@@ -182,8 +183,8 @@ def fetch_index_weights(
 
     single_date_mode = start_dt == end_dt
 
-    collected: list[pd.DataFrame] = []
-    seen_dates: set[pd.Timestamp] = set()
+    collected: List[pd.DataFrame] = []
+    seen_dates: Set[pd.Timestamp] = set()
 
     current_dt = end_dt
     while True:
@@ -317,13 +318,15 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     if current_df is None:
         return
 
+    last_index_code = st.session_state.get("index_last_code", "IMOEX").upper()
+
     st.markdown("#### Таблица состава")
     st.dataframe(current_df, use_container_width=True)
 
     st.download_button(
         label="💾 Скачать таблицу (CSV)",
         data=current_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"index_weights_{st.session_state.get('index_last_code', 'IMOEX').upper()}.csv",
+        file_name=f"index_weights_{last_index_code}.csv",
         mime="text/csv",
         key="index_weights_csv_dl",
     )
@@ -347,7 +350,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     st.download_button(
         label="💾 Скачать матрицу (Excel)",
         data=dataframe_to_excel_bytes(matrix_df, sheet_name="index_matrix"),
-        file_name=f"index_weight_matrix_{st.session_state.get('index_last_code', 'IMOEX').upper()}.xlsx",
+        file_name=f"index_weight_matrix_{last_index_code}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="index_matrix_xlsx_dl",
     )
