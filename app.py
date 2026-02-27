@@ -3,10 +3,10 @@ import math
 import re
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
+from urllib.parse import urlencode
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,8 @@ if "last_file_name" not in st.session_state:
     st.session_state["last_file_name"] = None
 if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"
+if "vm_last_report" not in st.session_state:
+    st.session_state["vm_last_report"] = None
 
 # ---------------------------
 # Main navigation
@@ -135,6 +137,96 @@ def open_index_analytics_sheet():
         request_get=request_get,
         dataframe_to_excel_bytes=ss.dataframe_to_excel_bytes,
     )
+
+
+def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
+    chunks = re.split(r"[;,\s]+", raw_recipients.strip()) if raw_recipients else []
+    unique = []
+    seen = set()
+    email_pattern = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+    invalid = []
+    for item in chunks:
+        email = item.strip()
+        if not email:
+            continue
+        if email in seen:
+            continue
+        seen.add(email)
+        if email_pattern.match(email):
+            unique.append(email)
+        else:
+            invalid.append(email)
+    return unique, invalid
+
+
+def build_compose_link(service: str, recipients: list[str], subject: str, body: str) -> str:
+    to_field = ",".join(recipients)
+    if service == "Почтовый клиент по умолчанию":
+        return f"mailto:{to_field}?{urlencode({'subject': subject, 'body': body})}"
+    if service == "Gmail":
+        return "https://mail.google.com/mail/?" + urlencode(
+            {"view": "cm", "fs": "1", "to": to_field, "su": subject, "body": body}
+        )
+    if service == "Outlook Web":
+        return "https://outlook.office.com/mail/deeplink/compose?" + urlencode(
+            {"to": to_field, "subject": subject, "body": body}
+        )
+    if service == "Yandex Mail":
+        return "https://mail.yandex.ru/compose?" + urlencode(
+            {"to": to_field, "subject": subject, "body": body}
+        )
+    return "https://e.mail.ru/compose/?" + urlencode(
+        {"To": to_field, "Subject": subject, "Body": body}
+    )
+
+
+def render_email_compose_section(report_title: str, key_prefix: str):
+    st.markdown("---")
+    st.subheader("📧 Отправка отчёта по почте")
+    st.caption(
+        "Выберите сервис и адреса — приложение откроет черновик письма. "
+        "Вложение добавляется вручную из скачанного файла отчёта."
+    )
+
+    mail_service = st.selectbox(
+        "Почтовый сервис",
+        ["Почтовый клиент по умолчанию", "Gmail", "Outlook Web", "Yandex Mail", "Mail.ru"],
+        key=f"{key_prefix}_service",
+    )
+    recipients_raw = st.text_area(
+        "Адреса получателей (через запятую, точку с запятой или перенос строки)",
+        placeholder="user1@example.com; user2@example.com",
+        key=f"{key_prefix}_recipients",
+    )
+    default_subject = f"{report_title} на {datetime.today().strftime('%d.%m.%Y')}"
+    mail_subject = st.text_input("Тема письма", value=default_subject, key=f"{key_prefix}_subject")
+    mail_body = st.text_area(
+        "Текст письма",
+        value=(
+            "Коллеги, добрый день!\n\n"
+            f"Направляю {report_title.lower()}.\n"
+            "Пожалуйста, см. вложенный файл.\n\n"
+            "С уважением."
+        ),
+        height=180,
+        key=f"{key_prefix}_body",
+    )
+
+    if st.button("Сгенерировать письмо", key=f"{key_prefix}_generate"):
+        recipients, invalid_recipients = parse_email_list(recipients_raw)
+        if invalid_recipients:
+            st.error(
+                "Некорректные адреса: "
+                + ", ".join(invalid_recipients[:10])
+                + ("..." if len(invalid_recipients) > 10 else "")
+            )
+        if not recipients:
+            st.warning("Укажите хотя бы один корректный email получателя.")
+        if recipients:
+            compose_link = build_compose_link(mail_service, recipients, mail_subject.strip(), mail_body.strip())
+            st.success(f"Черновик подготовлен для {len(recipients)} получателя(ей).")
+            st.link_button("Открыть письмо в выбранном сервисе", compose_link)
+            st.code(compose_link, language="text")
 
 
 # ---------------------------
@@ -1082,9 +1174,9 @@ def get_bond_schedule(isin: str):
 
 
 # ---------------------------
-# Parallel fetch with safe progress updates
+# Sequential fetch with safe progress updates
 # ---------------------------
-def fetch_isins_parallel(isins, max_workers=10, show_progress=True):
+def fetch_isins(isins, show_progress=True):
     results = []
     total = len(isins)
     if total == 0:
@@ -1100,40 +1192,35 @@ def fetch_isins_parallel(isins, max_workers=10, show_progress=True):
             progress_bar = None
             progress_text = None
 
-    completed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_isin = {executor.submit(get_bond_data, isin): isin for isin in isins}
-        for future in as_completed(future_to_isin):
-            isin = future_to_isin[future]
+    for idx, isin in enumerate(isins, start=1):
+        try:
+            data = get_bond_data(isin)
+        except Exception:
+            data = {
+                "ISIN": isin,
+                "Код эмитента": "",
+                "Наименование инструмента": "",
+                "Дата погашения": None,
+                "Дата оферты Put": None,
+                "Дата оферты Call": None,
+                "Дата фиксации купона": None,
+                "Дата купона": None,
+                "Валюта купона": "",
+                "Купон в валюте": "",
+                "Купон в Руб": "",
+                "Купон %": "",
+            }
+        results.append(data)
+        if progress_bar:
             try:
-                data = future.result()
+                progress_bar.progress(idx / total)
             except Exception:
-                data = {
-                    "ISIN": isin,
-                    "Код эмитента": "",
-                    "Наименование инструмента": "",
-                    "Дата погашения": None,
-                    "Дата оферты Put": None,
-                    "Дата оферты Call": None,
-                    "Дата фиксации купона": None,
-                    "Дата купона": None,
-                    "Валюта купона": "",
-                    "Купон в валюте": "",
-                    "Купон в Руб": "",
-                    "Купон %": "",
-                }
-            results.append(data)
-            completed += 1
-            if progress_bar:
-                try:
-                    progress_bar.progress(completed / total)
-                except Exception:
-                    pass
-            if progress_text:
-                try:
-                    progress_text.text(f"Обработано {completed}/{total} ISIN")
-                except Exception:
-                    pass
+                pass
+        if progress_text:
+            try:
+                progress_text.text(f"Обработано {idx}/{total} ISIN")
+            except Exception:
+                pass
     try:
         time.sleep(0.12)
     except Exception:
@@ -1182,63 +1269,57 @@ if st.session_state["active_view"] == "calendar":
         if not entries:
             st.error("Нет валидных ISIN для построения календаря.")
         else:
-            max_workers = st.sidebar.slider("Параллельных потоков (workers)", 2, 40, 10, key="calendar_workers")
             timeline_data = {}
             all_dates = set()
             with st.spinner("Загружаем расписание выплат..."):
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_entry = {
-                        executor.submit(get_bond_schedule, entry["ISIN"]): entry for entry in entries
-                    }
-                    for future in as_completed(future_to_entry):
-                        entry = future_to_entry[future]
-                        isin = entry["ISIN"]
-                        amount = entry["Amount"]
-                        try:
-                            schedule = future.result()
-                        except Exception:
-                            schedule = {}
-                        row = {}
-                        today = datetime.today().date()
-                        maturity_date = None
-                        for key in ("Дата погашения", "Дата оферты Put", "Дата оферты Call"):
-                            event_date = schedule.get(key)
-                            if event_date:
-                                try:
-                                    parsed_date = pd.to_datetime(event_date).date()
-                                except Exception:
-                                    parsed_date = None
-                                if parsed_date and (maturity_date is None or parsed_date < maturity_date):
-                                    maturity_date = parsed_date
-                                if parsed_date and parsed_date >= today:
-                                    all_dates.add(event_date)
-
-                        for date, value in schedule.get("Купоны", {}).items():
+                for entry in entries:
+                    isin = entry["ISIN"]
+                    amount = entry["Amount"]
+                    try:
+                        schedule = get_bond_schedule(isin)
+                    except Exception:
+                        schedule = {}
+                    row = {}
+                    today = datetime.today().date()
+                    maturity_date = None
+                    for key in ("Дата погашения", "Дата оферты Put", "Дата оферты Call"):
+                        event_date = schedule.get(key)
+                        if event_date:
                             try:
-                                coupon_date = pd.to_datetime(date).date()
+                                parsed_date = pd.to_datetime(event_date).date()
                             except Exception:
-                                continue
-                            if coupon_date < today:
-                                continue
-                            if maturity_date and coupon_date > maturity_date:
-                                continue
-                            all_dates.add(date)
-                            if value is None:
-                                continue
-                            scaled = value * amount
-                            row[date] = row.get(date, 0) + scaled
+                                parsed_date = None
+                            if parsed_date and (maturity_date is None or parsed_date < maturity_date):
+                                maturity_date = parsed_date
+                            if parsed_date and parsed_date >= today:
+                                all_dates.add(event_date)
 
-                        facevalue = schedule.get("Номинал")
-                        for key in ("Дата погашения", "Дата оферты Put", "Дата оферты Call"):
-                            event_date = schedule.get(key)
-                            if event_date and facevalue is not None:
-                                try:
-                                    parsed_date = pd.to_datetime(event_date).date()
-                                except Exception:
-                                    parsed_date = None
-                                if parsed_date and parsed_date >= today:
-                                    row[event_date] = row.get(event_date, 0) + facevalue * amount
-                        timeline_data[isin] = row
+                    for date, value in schedule.get("Купоны", {}).items():
+                        try:
+                            coupon_date = pd.to_datetime(date).date()
+                        except Exception:
+                            continue
+                        if coupon_date < today:
+                            continue
+                        if maturity_date and coupon_date > maturity_date:
+                            continue
+                        all_dates.add(date)
+                        if value is None:
+                            continue
+                        scaled = value * amount
+                        row[date] = row.get(date, 0) + scaled
+
+                    facevalue = schedule.get("Номинал")
+                    for key in ("Дата погашения", "Дата оферты Put", "Дата оферты Call"):
+                        event_date = schedule.get(key)
+                        if event_date and facevalue is not None:
+                            try:
+                                parsed_date = pd.to_datetime(event_date).date()
+                            except Exception:
+                                parsed_date = None
+                            if parsed_date and parsed_date >= today:
+                                row[event_date] = row.get(event_date, 0) + facevalue * amount
+                    timeline_data[isin] = row
 
             sorted_dates = sorted(all_dates)
             df_timeline = pd.DataFrame(index=[e["ISIN"] for e in entries], columns=sorted_dates, dtype=float)
@@ -1246,6 +1327,29 @@ if st.session_state["active_view"] == "calendar":
                 for date, value in row.items():
                     df_timeline.loc[isin, date] = value
             st.dataframe(df_timeline, use_container_width=True)
+
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_timeline.to_excel(writer, sheet_name="calendar")
+            calendar_xlsx = output.getvalue()
+            calendar_csv = df_timeline.to_csv(index=True).encode("utf-8-sig")
+
+            st.download_button(
+                label="💾 Скачать календарь (Excel)",
+                data=calendar_xlsx,
+                file_name="bond_calendar.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="calendar_xlsx_dl",
+            )
+            st.download_button(
+                label="💾 Скачать календарь (CSV)",
+                data=calendar_csv,
+                file_name="bond_calendar.csv",
+                mime="text/csv",
+                key="calendar_csv_dl",
+            )
+
+            render_email_compose_section("Календарь выплат", "calendar_report")
     st.stop()
 
 # ---------------------------
@@ -1276,23 +1380,57 @@ if st.session_state["active_view"] == "vm":
             try:
                 vm_data = fetch_vm_data(trade_name.strip(), st.session_state.get("forts_contracts"))
                 position_vm = vm_data["VM"] * quantity
-                st.markdown(f"**Инструмент:** {vm_data['TRADE_NAME']}")
-                st.markdown(f"**SECID:** {vm_data['SECID']}")
-                st.markdown(f"**Дата клиринга:** {vm_data['TRADEDATE']}")
-                st.markdown(
-                    f"**Расчетная цена последнего клиринга:** {vm_data['LAST_SETTLE_PRICE']}"
-                )
-                st.markdown(f"**Последняя цена:** {vm_data['TODAY_PRICE']}")
-                st.markdown(f"**Multiplier:** {vm_data['MULTIPLIER']}")
-                st.markdown(f"**Вариационная маржа за день:** {vm_data['VM']:.2f}")
-                st.markdown(f"**Маржа позиции (VM × Кол-во):** {position_vm:.2f}")
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
                 limit_sum = (0.05 * vm_data["TODAY_PRICE"] * quantity * usd_rub) + position_vm
-                st.markdown(f"**Сумма ограничения:** {limit_sum:.2f}")
-                st.caption(f"USD/RUB: {usd_rub_data['usd_rub']} на {usd_rub_data['date']}")
+                st.session_state["vm_last_report"] = {
+                    "TRADE_NAME": vm_data["TRADE_NAME"],
+                    "SECID": vm_data["SECID"],
+                    "TRADEDATE": vm_data["TRADEDATE"],
+                    "LAST_SETTLE_PRICE": vm_data["LAST_SETTLE_PRICE"],
+                    "TODAY_PRICE": vm_data["TODAY_PRICE"],
+                    "MULTIPLIER": vm_data["MULTIPLIER"],
+                    "VM": vm_data["VM"],
+                    "QUANTITY": quantity,
+                    "POSITION_VM": position_vm,
+                    "USD_RUB": usd_rub_data["usd_rub"],
+                    "USD_RUB_DATE": usd_rub_data["date"],
+                    "LIMIT_SUM": limit_sum,
+                }
             except Exception as exc:
                 st.error(str(exc))
+
+    vm_report = st.session_state.get("vm_last_report")
+    if vm_report:
+        st.markdown(f"**Инструмент:** {vm_report['TRADE_NAME']}")
+        st.markdown(f"**SECID:** {vm_report['SECID']}")
+        st.markdown(f"**Дата клиринга:** {vm_report['TRADEDATE']}")
+        st.markdown(f"**Расчетная цена последнего клиринга:** {vm_report['LAST_SETTLE_PRICE']}")
+        st.markdown(f"**Последняя цена:** {vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
+        st.markdown(f"**Вариационная маржа за день:** {vm_report['VM']:.2f}")
+        st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
+        st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
+        st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
+
+        vm_df = pd.DataFrame([vm_report])
+        st.download_button(
+            label="💾 Скачать VM (Excel)",
+            data=ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report"),
+            file_name="vm_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="vm_report_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать VM (CSV)",
+            data=vm_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="vm_report.csv",
+            mime="text/csv",
+            key="vm_report_csv_dl",
+        )
+
+        render_email_compose_section("VM отчёт", "vm_report")
+
     st.stop()
 
 # ---------------------------
@@ -1494,6 +1632,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
                 )
+            render_email_compose_section("Sell_stres Share отчёт", "share_report")
 
     with bond_tab:
         st.markdown("### Bond")
@@ -1689,6 +1828,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="bond_meta_xlsx_dl",
                 )
+            render_email_compose_section("Sell_stres Bond отчёт", "bond_report")
 
     st.stop()
 
@@ -1768,9 +1908,8 @@ with tab2:
             if not isins:
                 st.error("Нет валидных ISIN для обработки.")
             else:
-                max_workers = st.sidebar.slider("Параллельных потоков (workers)", 2, 40, 10)
                 with st.spinner("Запрос данных..."):
-                    results = fetch_isins_parallel(isins, max_workers=max_workers, show_progress=True)
+                    results = fetch_isins(isins, show_progress=True)
                 st.session_state["results"] = pd.DataFrame(results)
                 st.success("✅ Данные успешно получены!")
 
@@ -1821,9 +1960,8 @@ if uploaded_file:
 
         st.write(f"Найдено {len(isins)} валидных уникальных ISIN для обработки.")
         if isins:
-            max_workers = st.sidebar.slider("Параллельных потоков (workers)", 2, 40, 10)
             with st.spinner("Запрос данных по файлу..."):
-                results = fetch_isins_parallel(isins, max_workers=max_workers, show_progress=True)
+                results = fetch_isins(isins, show_progress=True)
             st.session_state["results"] = pd.DataFrame(results)
             st.success("✅ Данные успешно получены из файла!")
 
@@ -1923,6 +2061,7 @@ if st.session_state["results"] is not None:
     def to_csv_bytes(df: pd.DataFrame):
         return df.to_csv(index=False).encode("utf-8-sig")
 
+
     st.download_button(
         label="💾 Скачать результат (Excel)",
         data=to_excel_bytes(df_show),
@@ -1935,5 +2074,7 @@ if st.session_state["results"] is not None:
         file_name="bond_data.csv",
         mime="text/csv",
     )
+
+    render_email_compose_section("Отчёт по облигациям", "repo_report")
 else:
     st.info("👆 Загрузите файл или введите ISIN-ы вручную.")
