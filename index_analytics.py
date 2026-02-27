@@ -5,7 +5,7 @@ import streamlit as st
 
 
 @st.cache_data(ttl=1800)
-def ticker_to_isin_cached(ticker: str, _request_get_func) -> str | None:
+def ticker_to_isin_cached(ticker: str, _request_get_func) -> Optional[str]:
     secid = str(ticker).strip().upper()
     if not secid:
         return None
