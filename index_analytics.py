@@ -39,17 +39,8 @@ def ticker_to_isin_cached(ticker: str, _request_get_func) -> str | None:
     return str(isin).strip().upper() if pd.notna(isin) and str(isin).strip() else None
 
 
-def fetch_index_weights(request_get, index_name: str, date_from: str | None = None, date_to: str | None = None) -> pd.DataFrame:
-    index_name = str(index_name).strip().upper()
-    if not index_name:
-        raise ValueError("Укажите код индекса, например IMOEX")
-
-    url = (
-        "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
-        f"{index_name}.xml"
-    )
-    response = request_get(url, timeout=60, params={"iss.meta": "off", "limit": 10000})
-    root = ET.fromstring(response.content)
+def _parse_index_rows(xml_bytes: bytes) -> pd.DataFrame:
+    root = ET.fromstring(xml_bytes)
     rows = [node.attrib for node in root.findall(".//row")]
 
     if not rows:
@@ -60,20 +51,72 @@ def fetch_index_weights(request_get, index_name: str, date_from: str | None = No
         return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
 
     df["Date"] = pd.to_datetime(df["tradedate"], errors="coerce")
-    if date_from:
-        df = df[df["Date"] >= pd.to_datetime(date_from)]
-    if date_to:
-        df = df[df["Date"] <= pd.to_datetime(date_to)]
-
     ticker_col = "ticker" if "ticker" in df.columns else "secids"
     if ticker_col not in df.columns:
         df["Tiker"] = ""
     else:
         df["Tiker"] = df[ticker_col].astype(str).str.strip().str.upper()
 
-    df["ISIN"] = df["Tiker"].apply(lambda t: ticker_to_isin_cached(t, request_get))
     df["Weight"] = pd.to_numeric(df.get("weight"), errors="coerce")
-    df = df.dropna(subset=["Date", "Weight"])
+    return df.dropna(subset=["Date", "Weight"])
+
+
+@st.cache_data(ttl=1800)
+def _fetch_index_rows_for_date(index_name: str, date_str: str, _request_get_func) -> pd.DataFrame:
+    url = (
+        "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
+        f"{index_name}.xml"
+    )
+
+    for date_param_name in ("date", "tradedate"):
+        response = _request_get_func(
+            url,
+            timeout=60,
+            params={"iss.meta": "off", "limit": 10000, date_param_name: date_str},
+        )
+        parsed = _parse_index_rows(response.content)
+        if not parsed.empty:
+            return parsed
+
+    return pd.DataFrame(columns=["Date", "Tiker", "Weight"])
+
+
+def fetch_index_weights(request_get, index_name: str, date_from: str | None = None, date_to: str | None = None) -> pd.DataFrame:
+    index_name = str(index_name).strip().upper()
+    if not index_name:
+        raise ValueError("Укажите код индекса, например IMOEX")
+
+    if date_from and date_to:
+        start_dt = pd.to_datetime(date_from)
+        end_dt = pd.to_datetime(date_to)
+        dates = pd.date_range(start=start_dt, end=end_dt, freq="D")
+        date_frames = []
+        for single_date in dates:
+            fetched = _fetch_index_rows_for_date(
+                index_name=index_name,
+                date_str=single_date.strftime("%Y-%m-%d"),
+                _request_get_func=request_get,
+            )
+            if fetched.empty:
+                continue
+            fetched = fetched[fetched["Date"].dt.date == single_date.date()]
+            if not fetched.empty:
+                date_frames.append(fetched)
+
+        if date_frames:
+            df = pd.concat(date_frames, ignore_index=True)
+        else:
+            return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+    else:
+        url = (
+            "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
+            f"{index_name}.xml"
+        )
+        response = request_get(url, timeout=60, params={"iss.meta": "off", "limit": 10000})
+        df = _parse_index_rows(response.content)
+
+    df["ISIN"] = df["Tiker"].apply(lambda t: ticker_to_isin_cached(t, request_get))
+    df = df.drop_duplicates(subset=["Date", "Tiker"], keep="last")
 
     out = df[["Date", "ISIN", "Tiker", "Weight"]].copy()
     out["Date"] = out["Date"].dt.date
