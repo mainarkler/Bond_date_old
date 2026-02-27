@@ -122,7 +122,7 @@ def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> 
     while True:
         response = _request_get_func(
             url,
-            timeout=60,
+            timeout=30,
             params={"iss.meta": "off", "limit": 100, "date": date_str, "start": start},
         )
         js = response.json()
