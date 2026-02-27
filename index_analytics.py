@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-import xml.etree.ElementTree as ET
 
 import pandas as pd
 import streamlit as st
@@ -43,12 +42,18 @@ def _parse_index_rows(xml_bytes: bytes) -> pd.DataFrame:
     root = ET.fromstring(xml_bytes)
     rows = [node.attrib for node in root.findall(".//row")]
 
-    if not rows:
-        return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+    start = 0
+    chunks: list[pd.DataFrame] = []
+    prev_date = None
+    total = None
 
-    df = pd.DataFrame(rows)
-    if "tradedate" not in df.columns:
-        return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+    while True:
+        response = _request_get_func(
+            url,
+            timeout=60,
+            params={"iss.meta": "off", "limit": 100, "date": date_str, "start": start},
+        )
+        js = response.json()
 
     df["Date"] = pd.to_datetime(df["tradedate"], errors="coerce")
     ticker_col = "ticker" if "ticker" in df.columns else "secids"
