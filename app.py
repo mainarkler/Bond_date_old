@@ -89,7 +89,7 @@ if st.session_state["active_view"] == "home":
             st.session_state["active_view"] = "vm"
             trigger_rerun()
     with bottom_right:
-        st.markdown("### 🧩 Sell_stres")
+        st.markdown("### 🧩 Sell_stress")
         st.caption("Оценка рыночного давления для акций и облигаций.")
         if st.button("Открыть", key="open_sell_stres", use_container_width=True):
             st.session_state["active_view"] = "sell_stres"
