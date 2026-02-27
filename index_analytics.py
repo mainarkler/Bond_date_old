@@ -252,10 +252,6 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     if "index_last_code" not in st.session_state:
         st.session_state["index_last_code"] = "IMOEX"
 
-    st.subheader("🧾 Весы индекса MOEX")
-    st.markdown(
-        "Загрузка данных из ISS MOEX `/statistics/engines/stock/markets/index/analytics/{INDEX}` "
-        "с фильтром по дате и связкой тикер → ISIN."
     )
 
     idx_col1, idx_col2 = st.columns([1.4, 1])
@@ -303,7 +299,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         if date_from > date_to:
             st.error("Дата 'с' не может быть больше даты 'по'.")
         else:
-            with st.spinner("Запрашиваем данные MOEX..."):
+            with st.spinner("Формируется..."):
                 try:
                     df_index = fetch_index_weights(
                         request_get=request_get,
@@ -335,7 +331,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         key="index_weights_csv_dl",
     )
 
-    if st.button("Сформировать матрицу: строки — тикеры, столбцы — даты", key="build_index_weight_matrix"):
+    if st.button("Сформировать таблицу именения весов", key="build_index_weight_matrix"):
         matrix_df = current_df.pivot_table(
             index="Tiker",
             columns="Date",
