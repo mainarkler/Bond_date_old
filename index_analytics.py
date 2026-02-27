@@ -45,6 +45,10 @@ def ticker_to_isin_cached(ticker: str, _request_get_func) -> Optional[str]:
     return str(isin).strip().upper() if pd.notna(isin) and str(isin).strip() else None
 
 
+def _empty_index_weights_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+
+
 def _to_df(block: dict) -> pd.DataFrame:
     if not isinstance(block, dict):
         return pd.DataFrame()
@@ -224,7 +228,7 @@ def fetch_index_weights(
         current_dt = prev_dt
 
     if not collected:
-        return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+        return _empty_index_weights_df()
 
     df = pd.concat(collected, ignore_index=True)
     if single_date_mode:
@@ -239,7 +243,7 @@ def fetch_index_weights(
         df = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
 
     if df.empty:
-        return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+        return _empty_index_weights_df()
 
     df = df.drop_duplicates(subset=["Date", "Tiker"], keep="last")
     df["ISIN"] = df["Tiker"].apply(lambda t: ticker_to_isin_cached(t, request_get))
@@ -258,7 +262,8 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     if "index_last_code" not in st.session_state:
         st.session_state["index_last_code"] = "IMOEX"
 
-    )
+    st.subheader("🧾 Весы индекса MOEX")
+    st.markdown(INDEX_ANALYTICS_HELP_TEXT)
 
     idx_col1, idx_col2 = st.columns([1.4, 1])
     with idx_col1:
@@ -276,6 +281,8 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
             help="По умолчанию загружается состав на одну дату.",
             key="idx_use_period",
         )
+
+    st.caption("Если код индекса не указан, используется IMOEX.")
 
     if load_period:
         date_col1, date_col2 = st.columns(2)
