@@ -21,7 +21,7 @@ from urllib3.util.retry import Retry
 # Streamlit page setup
 # ---------------------------
 st.set_page_config(page_title="РЕПО претрейд", page_icon="📈", layout="wide")
-st.title("📈 stat bord")
+st.title("Stat bord")
 
 # ---------------------------
 # Session state defaults
@@ -70,33 +70,33 @@ if st.session_state["active_view"] == "home":
     st.subheader("🏠 Главное меню")
     top_left, top_right = st.columns(2)
     with top_left:
-        st.markdown("### 📈 Претрейд РЕПО")
+        st.markdown("### Претрейд РЕПО")
         st.caption("Анализ ISIN и ключевых дат бумаг для сделок РЕПО.")
         if st.button("Открыть", key="open_repo", use_container_width=True):
             st.session_state["active_view"] = "repo"
             trigger_rerun()
     with top_right:
-        st.markdown("### 📅 Календарь выплат")
+        st.markdown("### Календарь выплат")
         st.caption("Загрузка портфеля и построение календаря купонов и погашений.")
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
-        st.markdown("### 🧮 Расчет VM")
+        st.markdown("### Расчет VM")
         st.caption("Расчет вариационной маржи по фьючерсам FORTS.")
         if st.button("Открыть", key="open_vm", use_container_width=True):
             st.session_state["active_view"] = "vm"
             trigger_rerun()
     with bottom_right:
-        st.markdown("### 🧩 Sell_stress")
+        st.markdown("### Sell_stress")
         st.caption("Оценка рыночного давления для акций и облигаций.")
         if st.button("Открыть", key="open_sell_stres", use_container_width=True):
             st.session_state["active_view"] = "sell_stres"
             trigger_rerun()
     index_col, _ = st.columns(2)
     with index_col:
-        st.markdown("### 🧾 Состав индекса")
+        st.markdown("### Состав индекса")
         st.caption("Загрузка состава индекса по датам и построение матрицы весов.")
         if st.button("Открыть", key="open_index_analytics", use_container_width=True):
             st.session_state["active_view"] = "index_analytics"
