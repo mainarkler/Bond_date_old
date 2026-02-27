@@ -5,6 +5,12 @@ import pandas as pd
 import streamlit as st
 
 
+INDEX_ANALYTICS_HELP_TEXT = (
+    "Загрузка данных из ISS MOEX `/statistics/engines/stock/markets/index/analytics/{INDEX}` "
+    "с фильтром по дате и связкой тикер → ISIN."
+)
+
+
 @st.cache_data(ttl=1800)
 def ticker_to_isin_cached(ticker: str, _request_get_func) -> Optional[str]:
     secid = str(ticker).strip().upper()
@@ -354,3 +360,4 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="index_matrix_xlsx_dl",
     )
+
