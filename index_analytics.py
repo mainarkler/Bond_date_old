@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from typing import List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -78,7 +77,7 @@ def _normalize_snapshot_df(raw_df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["Date", "Weight"])
 
 
-def _extract_prev_date(cursor_df: pd.DataFrame) -> Optional[pd.Timestamp]:
+def _extract_prev_date(cursor_df: pd.DataFrame) -> pd.Timestamp | None:
     if cursor_df.empty:
         return None
 
@@ -91,11 +90,11 @@ def _extract_prev_date(cursor_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     return None
 
 
-def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> Tuple[int, int]:
+def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> tuple[int, int]:
     if cursor_df.empty:
         return fetched_count, fetched_count
 
-    def _get_int(columns: Tuple[str, ...], default: int) -> int:
+    def _get_int(columns: tuple[str, ...], default: int) -> int:
         for col in columns:
             if col in cursor_df.columns:
                 value = pd.to_numeric(cursor_df[col].iloc[0], errors="coerce")
@@ -109,14 +108,14 @@ def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> 
 
 
 @st.cache_data(ttl=1800)
-def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> tuple[pd.DataFrame, pd.Timestamp | None]:
     url = (
         "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
         f"{index_name}.json"
     )
 
     start = 0
-    chunks: List[pd.DataFrame] = []
+    chunks: list[pd.DataFrame] = []
     prev_date = None
     total = None
 
@@ -162,8 +161,8 @@ def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> 
 def fetch_index_weights(
     request_get,
     index_name: str,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> pd.DataFrame:
     index_name = str(index_name).strip().upper()
     if not index_name:
@@ -183,8 +182,8 @@ def fetch_index_weights(
 
     single_date_mode = start_dt == end_dt
 
-    collected: List[pd.DataFrame] = []
-    seen_dates: Set[pd.Timestamp] = set()
+    collected: list[pd.DataFrame] = []
+    seen_dates: set[pd.Timestamp] = set()
 
     current_dt = end_dt
     while True:
@@ -252,10 +251,6 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     if "index_last_code" not in st.session_state:
         st.session_state["index_last_code"] = "IMOEX"
 
-    st.subheader("🧾 Весы индекса MOEX")
-    st.markdown(
-        "Загрузка данных из ISS MOEX `/statistics/engines/stock/markets/index/analytics/{INDEX}` "
-        "с фильтром по дате и связкой тикер → ISIN."
     )
 
     idx_col1, idx_col2 = st.columns([1.4, 1])
@@ -303,7 +298,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         if date_from > date_to:
             st.error("Дата 'с' не может быть больше даты 'по'.")
         else:
-            with st.spinner("Запрашиваем данные MOEX..."):
+            with st.spinner("Формируется..."):
                 try:
                     df_index = fetch_index_weights(
                         request_get=request_get,
@@ -333,7 +328,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         key="index_weights_csv_dl",
     )
 
-    if st.button("Сформировать матрицу: строки — тикеры, столбцы — даты", key="build_index_weight_matrix"):
+    if st.button("Сформировать таблицу именения весов", key="build_index_weight_matrix"):
         matrix_df = current_df.pivot_table(
             index="Tiker",
             columns="Date",
