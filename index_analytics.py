@@ -234,6 +234,8 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         st.session_state["index_matrix_df"] = None
     if "index_weight_matrix" not in st.session_state:
         st.session_state["index_weight_matrix"] = None
+    if "index_last_code" not in st.session_state:
+        st.session_state["index_last_code"] = "IMOEX"
 
     st.subheader("🧾 Весы индекса MOEX")
     st.markdown(
@@ -241,15 +243,48 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         "с фильтром по дате и связкой тикер → ISIN."
     )
 
-    idx_col1, idx_col2, idx_col3 = st.columns([1.2, 1, 1])
+    idx_col1, idx_col2 = st.columns([1.4, 1])
     with idx_col1:
-        index_code = st.text_input("Код индекса", value="IMOEX", help="Например: IMOEX, RTSI")
+        index_code = st.text_input(
+            "Код индекса",
+            value="",
+            placeholder="IMOEX",
+            help="Например: IMOEX, RTSI",
+            key="idx_code_input",
+        )
     with idx_col2:
-        date_from = st.date_input("Дата с", value=datetime.today().date() - timedelta(days=30), key="idx_date_from")
-    with idx_col3:
-        date_to = st.date_input("Дата по", value=datetime.today().date(), key="idx_date_to")
+        load_period = st.checkbox(
+            "Загружать за период",
+            value=False,
+            help="По умолчанию загружается состав на одну дату.",
+            key="idx_use_period",
+        )
+
+    if load_period:
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            date_from = st.date_input(
+                "Дата с",
+                value=datetime.today().date() - timedelta(days=30),
+                key="idx_date_from",
+            )
+        with date_col2:
+            date_to = st.date_input(
+                "Дата по",
+                value=datetime.today().date(),
+                key="idx_date_to",
+            )
+    else:
+        single_date = st.date_input(
+            "Дата",
+            value=datetime.today().date(),
+            key="idx_single_date",
+        )
+        date_from = single_date
+        date_to = single_date
 
     if st.button("Загрузить данные индекса", key="load_index_analytics"):
+        index_code = (index_code or "IMOEX").strip().upper()
         if date_from > date_to:
             st.error("Дата 'с' не может быть больше даты 'по'.")
         else:
@@ -263,6 +298,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
                     )
                     st.session_state["index_matrix_df"] = df_index
                     st.session_state["index_weight_matrix"] = None
+                    st.session_state["index_last_code"] = index_code
                     st.success(f"Загружено строк: {len(df_index)}")
                 except Exception as exc:
                     st.error(f"Ошибка загрузки индекса: {exc}")
@@ -277,7 +313,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     st.download_button(
         label="💾 Скачать таблицу (CSV)",
         data=current_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"index_weights_{index_code.upper()}.csv",
+        file_name=f"index_weights_{st.session_state.get('index_last_code', 'IMOEX').upper()}.csv",
         mime="text/csv",
         key="index_weights_csv_dl",
     )
@@ -301,7 +337,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     st.download_button(
         label="💾 Скачать матрицу (Excel)",
         data=dataframe_to_excel_bytes(matrix_df, sheet_name="index_matrix"),
-        file_name=f"index_weight_matrix_{index_code.upper()}.xlsx",
+        file_name=f"index_weight_matrix_{st.session_state.get('index_last_code', 'IMOEX').upper()}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="index_matrix_xlsx_dl",
     )
