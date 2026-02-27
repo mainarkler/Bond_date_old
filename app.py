@@ -161,11 +161,12 @@ def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
 
 
 def build_compose_link(service: str, recipients: list[str], cc_recipients: list[str], subject: str, body: str) -> str:
-    query_string = lambda params: urlencode(params, quote_via=quote)
+    query_string = lambda params: urlencode({k: v for k, v in params.items() if v}, quote_via=quote)
     to_field = ",".join(recipients)
     cc_field = ",".join(cc_recipients)
     if service == "Почтовый клиент по умолчанию":
-        return f"mailto:{to_field}?{query_string({'cc': cc_field, 'subject': subject, 'body': body})}"
+        mailto_params = query_string({"cc": cc_field, "subject": subject, "body": body})
+        return f"mailto:{to_field}" + (f"?{mailto_params}" if mailto_params else "")
     if service == "Gmail":
         return "https://mail.google.com/mail/?" + query_string(
             {"view": "cm", "fs": "1", "to": to_field, "cc": cc_field, "su": subject, "body": body}
@@ -178,8 +179,8 @@ def build_compose_link(service: str, recipients: list[str], cc_recipients: list[
         return "https://mail.yandex.ru/compose?" + query_string(
             {"to": to_field, "cc": cc_field, "subject": subject, "body": body}
         )
-    return "https://e.mail.ru/compose/?" + urlencode(
-        {"To": to_field, "Cc": cc_field, "Subject": subject, "Body": body}, quote_via=quote
+    return "https://e.mail.ru/compose/?" + query_string(
+        {"To": to_field, "Cc": cc_field, "Subject": subject, "Body": body}
     )
 
 
