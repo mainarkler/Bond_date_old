@@ -5,9 +5,7 @@ import pandas as pd
 import streamlit as st
 
 
-#INDEX_ANALYTICS_HELP_TEXT = (
-
-#)
+INDEX_ANALYTICS_HELP_TEXT = 
 
 
 @st.cache_data(ttl=1800)
