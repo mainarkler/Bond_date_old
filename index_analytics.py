@@ -344,7 +344,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         key="index_weights_csv_dl",
     )
 
-    if st.button("Сформировать матрицу: строки — тикеры, столбцы — даты", key="build_index_weight_matrix"):
+    if st.button("Сформировать таблицу именения весов", key="build_index_weight_matrix"):
         matrix_df = current_df.pivot_table(
             index="Tiker",
             columns="Date",
