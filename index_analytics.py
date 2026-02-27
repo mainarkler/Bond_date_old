@@ -38,81 +38,9 @@ def ticker_to_isin_cached(ticker: str, _request_get_func) -> str | None:
     return str(isin).strip().upper() if pd.notna(isin) and str(isin).strip() else None
 
 
-def _to_df(block: dict) -> pd.DataFrame:
-    if not isinstance(block, dict):
-        return pd.DataFrame()
-
-    rows = block.get("data", [])
-    cols = block.get("columns", [])
-    if not rows or not cols:
-        return pd.DataFrame()
-
-    return pd.DataFrame(rows, columns=cols)
-
-
-def _normalize_snapshot_df(raw_df: pd.DataFrame) -> pd.DataFrame:
-    if raw_df.empty:
-        return pd.DataFrame(columns=["Date", "Tiker", "Weight"])
-
-    date_col = "tradedate" if "tradedate" in raw_df.columns else "TRADEDATE"
-    weight_col = "weight" if "weight" in raw_df.columns else "WEIGHT"
-
-    if date_col not in raw_df.columns or weight_col not in raw_df.columns:
-        return pd.DataFrame(columns=["Date", "Tiker", "Weight"])
-
-    ticker_col = None
-    for col in ("ticker", "secid", "shortname", "TICKER", "SECID"):
-        if col in raw_df.columns:
-            ticker_col = col
-            break
-
-    out = pd.DataFrame()
-    out["Date"] = pd.to_datetime(raw_df[date_col], errors="coerce")
-    if ticker_col is None:
-        out["Tiker"] = ""
-    else:
-        out["Tiker"] = raw_df[ticker_col].astype(str).str.strip().str.upper()
-
-    out["Weight"] = pd.to_numeric(raw_df[weight_col], errors="coerce")
-    return out.dropna(subset=["Date", "Weight"])
-
-
-def _extract_prev_date(cursor_df: pd.DataFrame) -> pd.Timestamp | None:
-    if cursor_df.empty:
-        return None
-
-    for col in ("PREV_DATE", "prev_date", "PREVDATE", "prevdate"):
-        if col in cursor_df.columns:
-            prev_value = cursor_df[col].iloc[0]
-            prev_dt = pd.to_datetime(prev_value, errors="coerce")
-            if pd.notna(prev_dt):
-                return prev_dt.normalize()
-    return None
-
-
-def _extract_total_and_pagesize(cursor_df: pd.DataFrame, fetched_count: int) -> tuple[int, int]:
-    if cursor_df.empty:
-        return fetched_count, fetched_count
-
-    def _get_int(columns: tuple[str, ...], default: int) -> int:
-        for col in columns:
-            if col in cursor_df.columns:
-                value = pd.to_numeric(cursor_df[col].iloc[0], errors="coerce")
-                if pd.notna(value):
-                    return int(value)
-        return default
-
-    total = _get_int(("TOTAL", "total"), fetched_count)
-    pagesize = _get_int(("PAGESIZE", "pagesize"), max(fetched_count, 1))
-    return max(total, fetched_count), max(pagesize, 1)
-
-
-@st.cache_data(ttl=1800)
-def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> tuple[pd.DataFrame, pd.Timestamp | None]:
-    url = (
-        "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
-        f"{index_name}.json"
-    )
+def _parse_index_rows(xml_bytes: bytes) -> pd.DataFrame:
+    root = ET.fromstring(xml_bytes)
+    rows = [node.attrib for node in root.findall(".//row")]
 
     start = 0
     chunks: list[pd.DataFrame] = []
@@ -127,98 +55,73 @@ def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> 
         )
         js = response.json()
 
-        analytics_df = _to_df(js.get("analytics", {}))
-        cursor_df = _to_df(js.get("analytics.cursor", {}))
+    df["Date"] = pd.to_datetime(df["tradedate"], errors="coerce")
+    ticker_col = "ticker" if "ticker" in df.columns else "secids"
+    if ticker_col not in df.columns:
+        df["Tiker"] = ""
+    else:
+        df["Tiker"] = df[ticker_col].astype(str).str.strip().str.upper()
 
-        normalized = _normalize_snapshot_df(analytics_df)
-        if not normalized.empty:
-            chunks.append(normalized)
-
-        if prev_date is None:
-            prev_date = _extract_prev_date(cursor_df)
-
-        fetched_now = len(analytics_df)
-        if total is None:
-            total, pagesize = _extract_total_and_pagesize(cursor_df, fetched_now)
-        else:
-            _, pagesize = _extract_total_and_pagesize(cursor_df, fetched_now)
-
-        if fetched_now == 0:
-            break
-
-        start += fetched_now
-        if start >= total or fetched_now < pagesize:
-            break
-
-    if not chunks:
-        return pd.DataFrame(columns=["Date", "Tiker", "Weight"]), prev_date
-
-    snapshot_df = pd.concat(chunks, ignore_index=True)
-    snapshot_df = snapshot_df.drop_duplicates(subset=["Date", "Tiker"], keep="last")
-    return snapshot_df, prev_date
+    df["Weight"] = pd.to_numeric(df.get("weight"), errors="coerce")
+    return df.dropna(subset=["Date", "Weight"])
 
 
-def fetch_index_weights(
-    request_get,
-    index_name: str,
-    date_from: str | None = None,
-    date_to: str | None = None,
-) -> pd.DataFrame:
+@st.cache_data(ttl=1800)
+def _fetch_index_rows_for_date(index_name: str, date_str: str, _request_get_func) -> pd.DataFrame:
+    url = (
+        "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
+        f"{index_name}.xml"
+    )
+
+    for date_param_name in ("date", "tradedate"):
+        response = _request_get_func(
+            url,
+            timeout=60,
+            params={"iss.meta": "off", "limit": 10000, date_param_name: date_str},
+        )
+        parsed = _parse_index_rows(response.content)
+        if not parsed.empty:
+            return parsed
+
+    return pd.DataFrame(columns=["Date", "Tiker", "Weight"])
+
+
+def fetch_index_weights(request_get, index_name: str, date_from: str | None = None, date_to: str | None = None) -> pd.DataFrame:
     index_name = str(index_name).strip().upper()
     if not index_name:
         raise ValueError("Укажите код индекса, например IMOEX")
 
-    end_dt = pd.to_datetime(date_to if date_to else datetime.today().date(), errors="coerce")
-    start_dt = pd.to_datetime(date_from if date_from else end_dt, errors="coerce")
+    if date_from and date_to:
+        start_dt = pd.to_datetime(date_from)
+        end_dt = pd.to_datetime(date_to)
+        dates = pd.date_range(start=start_dt, end=end_dt, freq="D")
+        date_frames = []
+        for single_date in dates:
+            fetched = _fetch_index_rows_for_date(
+                index_name=index_name,
+                date_str=single_date.strftime("%Y-%m-%d"),
+                _request_get_func=request_get,
+            )
+            if fetched.empty:
+                continue
+            fetched = fetched[fetched["Date"].dt.date == single_date.date()]
+            if not fetched.empty:
+                date_frames.append(fetched)
 
-    if pd.isna(start_dt) or pd.isna(end_dt):
-        raise ValueError("Некорректные даты периода")
-
-    start_dt = start_dt.normalize()
-    end_dt = end_dt.normalize()
-
-    if start_dt > end_dt:
-        raise ValueError("Дата 'с' не может быть больше даты 'по'.")
-
-    collected: list[pd.DataFrame] = []
-    seen_dates: set[pd.Timestamp] = set()
-
-    current_dt = end_dt
-    while current_dt >= start_dt:
-        snapshot_df, prev_dt = _fetch_index_snapshot(
-            index_name=index_name,
-            date_str=current_dt.strftime("%Y-%m-%d"),
-            _request_get_func=request_get,
+        if date_frames:
+            df = pd.concat(date_frames, ignore_index=True)
+        else:
+            return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
+    else:
+        url = (
+            "https://iss.moex.com/iss/statistics/engines/stock/markets/index/analytics/"
+            f"{index_name}.xml"
         )
+        response = request_get(url, timeout=60, params={"iss.meta": "off", "limit": 10000})
+        df = _parse_index_rows(response.content)
 
-        if snapshot_df.empty:
-            break
-
-        effective_dt = snapshot_df["Date"].max().normalize()
-        if effective_dt < start_dt:
-            break
-
-        if effective_dt not in seen_dates:
-            day_df = snapshot_df[snapshot_df["Date"].dt.normalize() == effective_dt]
-            if not day_df.empty:
-                collected.append(day_df)
-                seen_dates.add(effective_dt)
-
-        if prev_dt is None or prev_dt >= current_dt:
-            break
-
-        current_dt = prev_dt
-
-    if not collected:
-        return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
-
-    df = pd.concat(collected, ignore_index=True)
-    df = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
-    if df.empty:
-        return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
-
-    df = df.drop_duplicates(subset=["Date", "Tiker"], keep="last")
     df["ISIN"] = df["Tiker"].apply(lambda t: ticker_to_isin_cached(t, request_get))
+    df = df.drop_duplicates(subset=["Date", "Tiker"], keep="last")
 
     out = df[["Date", "ISIN", "Tiker", "Weight"]].copy()
     out["Date"] = out["Date"].dt.date
