@@ -225,7 +225,7 @@ def render_email_compose_section(report_title: str, key_prefix: str):
         if recipients:
             compose_link = build_compose_link(mail_service, recipients, mail_subject.strip(), mail_body.strip())
             st.success(f"Черновик подготовлен для {len(recipients)} получателя(ей).")
-            st.link_button("Открыть письмо в выбранном сервисе", compose_link, key=f"{key_prefix}_open_link")
+            st.link_button("Открыть письмо в выбранном сервисе", compose_link)
             st.code(compose_link, language="text")
 
 
