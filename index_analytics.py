@@ -6,8 +6,7 @@ import streamlit as st
 
 
 INDEX_ANALYTICS_HELP_TEXT = (
-    "Загрузка данных из ISS MOEX `/statistics/engines/stock/markets/index/analytics/{INDEX}` "
-    "с фильтром по дате и связкой тикер → ISIN."
+
 )
 
 
