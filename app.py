@@ -34,6 +34,8 @@ if "last_file_name" not in st.session_state:
     st.session_state["last_file_name"] = None
 if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"
+if "vm_last_report" not in st.session_state:
+    st.session_state["vm_last_report"] = None
 
 # ---------------------------
 # Main navigation
@@ -1378,23 +1380,57 @@ if st.session_state["active_view"] == "vm":
             try:
                 vm_data = fetch_vm_data(trade_name.strip(), st.session_state.get("forts_contracts"))
                 position_vm = vm_data["VM"] * quantity
-                st.markdown(f"**Инструмент:** {vm_data['TRADE_NAME']}")
-                st.markdown(f"**SECID:** {vm_data['SECID']}")
-                st.markdown(f"**Дата клиринга:** {vm_data['TRADEDATE']}")
-                st.markdown(
-                    f"**Расчетная цена последнего клиринга:** {vm_data['LAST_SETTLE_PRICE']}"
-                )
-                st.markdown(f"**Последняя цена:** {vm_data['TODAY_PRICE']}")
-                st.markdown(f"**Multiplier:** {vm_data['MULTIPLIER']}")
-                st.markdown(f"**Вариационная маржа за день:** {vm_data['VM']:.2f}")
-                st.markdown(f"**Маржа позиции (VM × Кол-во):** {position_vm:.2f}")
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
                 limit_sum = (0.05 * vm_data["TODAY_PRICE"] * quantity * usd_rub) + position_vm
-                st.markdown(f"**Сумма ограничения:** {limit_sum:.2f}")
-                st.caption(f"USD/RUB: {usd_rub_data['usd_rub']} на {usd_rub_data['date']}")
+                st.session_state["vm_last_report"] = {
+                    "TRADE_NAME": vm_data["TRADE_NAME"],
+                    "SECID": vm_data["SECID"],
+                    "TRADEDATE": vm_data["TRADEDATE"],
+                    "LAST_SETTLE_PRICE": vm_data["LAST_SETTLE_PRICE"],
+                    "TODAY_PRICE": vm_data["TODAY_PRICE"],
+                    "MULTIPLIER": vm_data["MULTIPLIER"],
+                    "VM": vm_data["VM"],
+                    "QUANTITY": quantity,
+                    "POSITION_VM": position_vm,
+                    "USD_RUB": usd_rub_data["usd_rub"],
+                    "USD_RUB_DATE": usd_rub_data["date"],
+                    "LIMIT_SUM": limit_sum,
+                }
             except Exception as exc:
                 st.error(str(exc))
+
+    vm_report = st.session_state.get("vm_last_report")
+    if vm_report:
+        st.markdown(f"**Инструмент:** {vm_report['TRADE_NAME']}")
+        st.markdown(f"**SECID:** {vm_report['SECID']}")
+        st.markdown(f"**Дата клиринга:** {vm_report['TRADEDATE']}")
+        st.markdown(f"**Расчетная цена последнего клиринга:** {vm_report['LAST_SETTLE_PRICE']}")
+        st.markdown(f"**Последняя цена:** {vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
+        st.markdown(f"**Вариационная маржа за день:** {vm_report['VM']:.2f}")
+        st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
+        st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
+        st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
+
+        vm_df = pd.DataFrame([vm_report])
+        st.download_button(
+            label="💾 Скачать VM (Excel)",
+            data=ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report"),
+            file_name="vm_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="vm_report_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать VM (CSV)",
+            data=vm_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="vm_report.csv",
+            mime="text/csv",
+            key="vm_report_csv_dl",
+        )
+
+        render_email_compose_section("VM отчёт", "vm_report")
+
     st.stop()
 
 # ---------------------------
