@@ -137,6 +137,96 @@ def open_index_analytics_sheet():
     )
 
 
+def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
+    chunks = re.split(r"[;,\s]+", raw_recipients.strip()) if raw_recipients else []
+    unique = []
+    seen = set()
+    email_pattern = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+    invalid = []
+    for item in chunks:
+        email = item.strip()
+        if not email:
+            continue
+        if email in seen:
+            continue
+        seen.add(email)
+        if email_pattern.match(email):
+            unique.append(email)
+        else:
+            invalid.append(email)
+    return unique, invalid
+
+
+def build_compose_link(service: str, recipients: list[str], subject: str, body: str) -> str:
+    to_field = ",".join(recipients)
+    if service == "Почтовый клиент по умолчанию":
+        return f"mailto:{to_field}?{urlencode({'subject': subject, 'body': body})}"
+    if service == "Gmail":
+        return "https://mail.google.com/mail/?" + urlencode(
+            {"view": "cm", "fs": "1", "to": to_field, "su": subject, "body": body}
+        )
+    if service == "Outlook Web":
+        return "https://outlook.office.com/mail/deeplink/compose?" + urlencode(
+            {"to": to_field, "subject": subject, "body": body}
+        )
+    if service == "Yandex Mail":
+        return "https://mail.yandex.ru/compose?" + urlencode(
+            {"to": to_field, "subject": subject, "body": body}
+        )
+    return "https://e.mail.ru/compose/?" + urlencode(
+        {"To": to_field, "Subject": subject, "Body": body}
+    )
+
+
+def render_email_compose_section(report_title: str, key_prefix: str):
+    st.markdown("---")
+    st.subheader("📧 Отправка отчёта по почте")
+    st.caption(
+        "Выберите сервис и адреса — приложение откроет черновик письма. "
+        "Вложение добавляется вручную из скачанного файла отчёта."
+    )
+
+    mail_service = st.selectbox(
+        "Почтовый сервис",
+        ["Почтовый клиент по умолчанию", "Gmail", "Outlook Web", "Yandex Mail", "Mail.ru"],
+        key=f"{key_prefix}_service",
+    )
+    recipients_raw = st.text_area(
+        "Адреса получателей (через запятую, точку с запятой или перенос строки)",
+        placeholder="user1@example.com; user2@example.com",
+        key=f"{key_prefix}_recipients",
+    )
+    default_subject = f"{report_title} на {datetime.today().strftime('%d.%m.%Y')}"
+    mail_subject = st.text_input("Тема письма", value=default_subject, key=f"{key_prefix}_subject")
+    mail_body = st.text_area(
+        "Текст письма",
+        value=(
+            "Коллеги, добрый день!\n\n"
+            f"Направляю {report_title.lower()}.\n"
+            "Пожалуйста, см. вложенный файл.\n\n"
+            "С уважением."
+        ),
+        height=180,
+        key=f"{key_prefix}_body",
+    )
+
+    if st.button("Сгенерировать письмо", key=f"{key_prefix}_generate"):
+        recipients, invalid_recipients = parse_email_list(recipients_raw)
+        if invalid_recipients:
+            st.error(
+                "Некорректные адреса: "
+                + ", ".join(invalid_recipients[:10])
+                + ("..." if len(invalid_recipients) > 10 else "")
+            )
+        if not recipients:
+            st.warning("Укажите хотя бы один корректный email получателя.")
+        if recipients:
+            compose_link = build_compose_link(mail_service, recipients, mail_subject.strip(), mail_body.strip())
+            st.success(f"Черновик подготовлен для {len(recipients)} получателя(ей).")
+            st.link_button("Открыть письмо в выбранном сервисе", compose_link, key=f"{key_prefix}_open_link")
+            st.code(compose_link, language="text")
+
+
 # ---------------------------
 # Sell_stres helpers (Share)
 # ---------------------------
@@ -1235,6 +1325,29 @@ if st.session_state["active_view"] == "calendar":
                 for date, value in row.items():
                     df_timeline.loc[isin, date] = value
             st.dataframe(df_timeline, use_container_width=True)
+
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_timeline.to_excel(writer, sheet_name="calendar")
+            calendar_xlsx = output.getvalue()
+            calendar_csv = df_timeline.to_csv(index=True).encode("utf-8-sig")
+
+            st.download_button(
+                label="💾 Скачать календарь (Excel)",
+                data=calendar_xlsx,
+                file_name="bond_calendar.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="calendar_xlsx_dl",
+            )
+            st.download_button(
+                label="💾 Скачать календарь (CSV)",
+                data=calendar_csv,
+                file_name="bond_calendar.csv",
+                mime="text/csv",
+                key="calendar_csv_dl",
+            )
+
+            render_email_compose_section("Календарь выплат", "calendar_report")
     st.stop()
 
 # ---------------------------
@@ -1483,6 +1596,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
                 )
+            render_email_compose_section("Sell_stres Share отчёт", "share_report")
 
     with bond_tab:
         st.markdown("### Bond")
@@ -1678,6 +1792,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="bond_meta_xlsx_dl",
                 )
+            render_email_compose_section("Sell_stres Bond отчёт", "bond_report")
 
     st.stop()
 
@@ -1910,44 +2025,6 @@ if st.session_state["results"] is not None:
     def to_csv_bytes(df: pd.DataFrame):
         return df.to_csv(index=False).encode("utf-8-sig")
 
-    def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
-        chunks = re.split(r"[;,\s]+", raw_recipients.strip()) if raw_recipients else []
-        unique = []
-        seen = set()
-        email_pattern = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
-        invalid = []
-        for item in chunks:
-            email = item.strip()
-            if not email:
-                continue
-            if email in seen:
-                continue
-            seen.add(email)
-            if email_pattern.match(email):
-                unique.append(email)
-            else:
-                invalid.append(email)
-        return unique, invalid
-
-    def build_compose_link(service: str, recipients: list[str], subject: str, body: str) -> str:
-        to_field = ",".join(recipients)
-        if service == "Почтовый клиент по умолчанию":
-            return f"mailto:{to_field}?{urlencode({'subject': subject, 'body': body})}"
-        if service == "Gmail":
-            return "https://mail.google.com/mail/?" + urlencode(
-                {"view": "cm", "fs": "1", "to": to_field, "su": subject, "body": body}
-            )
-        if service == "Outlook Web":
-            return "https://outlook.office.com/mail/deeplink/compose?" + urlencode(
-                {"to": to_field, "subject": subject, "body": body}
-            )
-        if service == "Yandex Mail":
-            return "https://mail.yandex.ru/compose?" + urlencode(
-                {"to": to_field, "subject": subject, "body": body}
-            )
-        return "https://e.mail.ru/compose/?" + urlencode(
-            {"To": to_field, "Subject": subject, "Body": body}
-        )
 
     st.download_button(
         label="💾 Скачать результат (Excel)",
@@ -1962,48 +2039,6 @@ if st.session_state["results"] is not None:
         mime="text/csv",
     )
 
-    st.markdown("---")
-    st.subheader("📧 Отправка отчёта по почте")
-    st.caption(
-        "Выберите сервис, укажите список адресов — приложение откроет черновик письма. "
-        "Файл отчёта прикрепляется вручную из скачанного Excel/CSV."
-    )
-
-    mail_service = st.selectbox(
-        "Почтовый сервис",
-        ["Почтовый клиент по умолчанию", "Gmail", "Outlook Web", "Yandex Mail", "Mail.ru"],
-    )
-    recipients_raw = st.text_area(
-        "Адреса получателей (через запятую, точку с запятой или перенос строки)",
-        placeholder="user1@example.com; user2@example.com",
-    )
-    default_subject = f"Отчёт по облигациям на {datetime.today().strftime('%d.%m.%Y')}"
-    mail_subject = st.text_input("Тема письма", value=default_subject)
-    mail_body = st.text_area(
-        "Текст письма",
-        value=(
-            "Коллеги, добрый день!\n\n"
-            "Направляю отчёт по облигациям.\n"
-            "Пожалуйста, см. вложенный файл.\n\n"
-            "С уважением."
-        ),
-        height=180,
-    )
-
-    if st.button("Сгенерировать письмо"):
-        recipients, invalid_recipients = parse_email_list(recipients_raw)
-        if invalid_recipients:
-            st.error(
-                "Некорректные адреса: "
-                + ", ".join(invalid_recipients[:10])
-                + ("..." if len(invalid_recipients) > 10 else "")
-            )
-        if not recipients:
-            st.warning("Укажите хотя бы один корректный email получателя.")
-        if recipients:
-            compose_link = build_compose_link(mail_service, recipients, mail_subject.strip(), mail_body.strip())
-            st.success(f"Черновик подготовлен для {len(recipients)} получателя(ей).")
-            st.link_button("Открыть письмо в выбранном сервисе", compose_link)
-            st.code(compose_link, language="text")
+    render_email_compose_section("Отчёт по облигациям", "repo_report")
 else:
     st.info("👆 Загрузите файл или введите ISIN-ы вручную.")
