@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 
-INDEX_ANALYTICS_HELP_TEXT = ()
+INDEX_ANALYTICS_HELP_TEXT = Введите индекс
 
 
 @st.cache_data(ttl=1800)
@@ -259,7 +259,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     if "index_last_code" not in st.session_state:
         st.session_state["index_last_code"] = "IMOEX"
 
-    st.subheader("🧾 Весы индекса MOEX")
+    st.subheader("🧾 Состав индекса")
     st.markdown(INDEX_ANALYTICS_HELP_TEXT)
 
     idx_col1, idx_col2 = st.columns([1.4, 1])
