@@ -180,11 +180,15 @@ def fetch_index_weights(
     if start_dt > end_dt:
         raise ValueError("Дата 'с' не может быть больше даты 'по'.")
 
+    single_date_mode = start_dt == end_dt
+
     collected: list[pd.DataFrame] = []
     seen_dates: set[pd.Timestamp] = set()
 
     current_dt = end_dt
-    while current_dt >= start_dt:
+    while True:
+        if current_dt < start_dt and not (single_date_mode and not collected):
+            break
         snapshot_df, prev_dt = _fetch_index_snapshot(
             index_name=index_name,
             date_str=current_dt.strftime("%Y-%m-%d"),
@@ -198,7 +202,7 @@ def fetch_index_weights(
             break
 
         effective_dt = snapshot_df["Date"].max().normalize()
-        if effective_dt < start_dt:
+        if effective_dt < start_dt and not (single_date_mode and not collected):
             break
 
         if effective_dt not in seen_dates:
@@ -216,7 +220,17 @@ def fetch_index_weights(
         return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
 
     df = pd.concat(collected, ignore_index=True)
-    df = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
+    if single_date_mode:
+        requested_day = start_dt.date()
+        same_day_df = df[df["Date"].dt.date == requested_day]
+        if same_day_df.empty:
+            fallback_day = df["Date"].max().normalize()
+            df = df[df["Date"].dt.normalize() == fallback_day]
+        else:
+            df = same_day_df
+    else:
+        df = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
+
     if df.empty:
         return pd.DataFrame(columns=["Date", "ISIN", "Tiker", "Weight"])
 
@@ -237,8 +251,6 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     if "index_last_code" not in st.session_state:
         st.session_state["index_last_code"] = "IMOEX"
 
-    st.subheader("🧾 Загрузка состава индекса")
-
     )
 
     idx_col1, idx_col2 = st.columns([1.4, 1])
@@ -247,14 +259,14 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
             "Код индекса",
             value="",
             placeholder="IMOEX",
-            help="Например: IMOEX или RTSI",
+            help="Например: IMOEX, RTSI",
             key="idx_code_input",
         )
     with idx_col2:
         load_period = st.checkbox(
             "Загружать за период",
             value=False,
-            help="Можно загрузить состав за период со всеми изменеиями",
+            help="По умолчанию загружается состав на одну дату.",
             key="idx_use_period",
         )
 
