@@ -1,4 +1,5 @@
 import csv
+import os
 import math
 import re
 import time
@@ -6,7 +7,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
-from urllib.parse import urlencode
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,7 @@ import requests
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
+from email_compose import render_email_compose_section
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -36,6 +37,10 @@ if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"
 if "vm_last_report" not in st.session_state:
     st.session_state["vm_last_report"] = None
+
+FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
+if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
+    st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
 # ---------------------------
 # Main navigation
@@ -63,7 +68,7 @@ def init_sell_stres_state():
             st.session_state[key] = value
 
 
-if st.session_state["active_view"] != "home":
+if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
     if st.button("⬅️ На главную"):
         st.session_state["active_view"] = "home"
         trigger_rerun()
@@ -137,96 +142,6 @@ def open_index_analytics_sheet():
         request_get=request_get,
         dataframe_to_excel_bytes=ss.dataframe_to_excel_bytes,
     )
-
-
-def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
-    chunks = re.split(r"[;,\s]+", raw_recipients.strip()) if raw_recipients else []
-    unique = []
-    seen = set()
-    email_pattern = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
-    invalid = []
-    for item in chunks:
-        email = item.strip()
-        if not email:
-            continue
-        if email in seen:
-            continue
-        seen.add(email)
-        if email_pattern.match(email):
-            unique.append(email)
-        else:
-            invalid.append(email)
-    return unique, invalid
-
-
-def build_compose_link(service: str, recipients: list[str], subject: str, body: str) -> str:
-    to_field = ",".join(recipients)
-    if service == "Почтовый клиент по умолчанию":
-        return f"mailto:{to_field}?{urlencode({'subject': subject, 'body': body})}"
-    if service == "Gmail":
-        return "https://mail.google.com/mail/?" + urlencode(
-            {"view": "cm", "fs": "1", "to": to_field, "su": subject, "body": body}
-        )
-    if service == "Outlook Web":
-        return "https://outlook.office.com/mail/deeplink/compose?" + urlencode(
-            {"to": to_field, "subject": subject, "body": body}
-        )
-    if service == "Yandex Mail":
-        return "https://mail.yandex.ru/compose?" + urlencode(
-            {"to": to_field, "subject": subject, "body": body}
-        )
-    return "https://e.mail.ru/compose/?" + urlencode(
-        {"To": to_field, "Subject": subject, "Body": body}
-    )
-
-
-def render_email_compose_section(report_title: str, key_prefix: str):
-    st.markdown("---")
-    st.subheader("📧 Отправка отчёта по почте")
-    st.caption(
-        "Выберите сервис и адреса — приложение откроет черновик письма. "
-        "Вложение добавляется вручную из скачанного файла отчёта."
-    )
-
-    mail_service = st.selectbox(
-        "Почтовый сервис",
-        ["Почтовый клиент по умолчанию", "Gmail", "Outlook Web", "Yandex Mail", "Mail.ru"],
-        key=f"{key_prefix}_service",
-    )
-    recipients_raw = st.text_area(
-        "Адреса получателей (через запятую, точку с запятой или перенос строки)",
-        placeholder="user1@example.com; user2@example.com",
-        key=f"{key_prefix}_recipients",
-    )
-    default_subject = f"{report_title} на {datetime.today().strftime('%d.%m.%Y')}"
-    mail_subject = st.text_input("Тема письма", value=default_subject, key=f"{key_prefix}_subject")
-    mail_body = st.text_area(
-        "Текст письма",
-        value=(
-            "Коллеги, добрый день!\n\n"
-            f"Направляю {report_title.lower()}.\n"
-            "Пожалуйста, см. вложенный файл.\n\n"
-            "С уважением."
-        ),
-        height=180,
-        key=f"{key_prefix}_body",
-    )
-
-    if st.button("Сгенерировать письмо", key=f"{key_prefix}_generate"):
-        recipients, invalid_recipients = parse_email_list(recipients_raw)
-        if invalid_recipients:
-            st.error(
-                "Некорректные адреса: "
-                + ", ".join(invalid_recipients[:10])
-                + ("..." if len(invalid_recipients) > 10 else "")
-            )
-        if not recipients:
-            st.warning("Укажите хотя бы один корректный email получателя.")
-        if recipients:
-            compose_link = build_compose_link(mail_service, recipients, mail_subject.strip(), mail_body.strip())
-            st.success(f"Черновик подготовлен для {len(recipients)} получателя(ей).")
-            st.link_button("Открыть письмо в выбранном сервисе", compose_link)
-            st.code(compose_link, language="text")
 
 
 # ---------------------------
@@ -1349,7 +1264,7 @@ if st.session_state["active_view"] == "calendar":
                 key="calendar_csv_dl",
             )
 
-            render_email_compose_section("Календарь выплат", "calendar_report")
+            render_email_compose_section("Календарь выплат", "calendar_report", "bond_calendar.xlsx", calendar_xlsx)
     st.stop()
 
 # ---------------------------
@@ -1414,9 +1329,10 @@ if st.session_state["active_view"] == "vm":
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
 
         vm_df = pd.DataFrame([vm_report])
+        vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
         st.download_button(
             label="💾 Скачать VM (Excel)",
-            data=ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report"),
+            data=vm_xlsx,
             file_name="vm_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="vm_report_xlsx_dl",
@@ -1429,7 +1345,7 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
-        render_email_compose_section("VM отчёт", "vm_report")
+        render_email_compose_section("VM отчёт", "vm_report", "vm_report.xlsx", vm_xlsx)
 
     st.stop()
 
@@ -1632,7 +1548,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
                 )
-            render_email_compose_section("Sell_stres Share отчёт", "share_report")
+            render_email_compose_section("Sell_stres Share отчёт", "share_report", "sell_stres_share_deltaP_all.xlsx", share_downloads.get("delta_xlsx") if share_downloads else None)
 
     with bond_tab:
         st.markdown("### Bond")
@@ -1828,7 +1744,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="bond_meta_xlsx_dl",
                 )
-            render_email_compose_section("Sell_stres Bond отчёт", "bond_report")
+            render_email_compose_section("Sell_stres Bond отчёт", "bond_report", "sell_stres_bond_deltaP_all.xlsx", bond_downloads.get("delta_xlsx") if bond_downloads else None)
 
     st.stop()
 
@@ -2062,9 +1978,10 @@ if st.session_state["results"] is not None:
         return df.to_csv(index=False).encode("utf-8-sig")
 
 
+    repo_xlsx = to_excel_bytes(df_show)
     st.download_button(
         label="💾 Скачать результат (Excel)",
-        data=to_excel_bytes(df_show),
+        data=repo_xlsx,
         file_name="bond_data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -2075,6 +1992,6 @@ if st.session_state["results"] is not None:
         mime="text/csv",
     )
 
-    render_email_compose_section("Отчёт по облигациям", "repo_report")
+    render_email_compose_section("Отчёт по облигациям", "repo_report", "bond_data.xlsx", repo_xlsx)
 else:
     st.info("👆 Загрузите файл или введите ISIN-ы вручную.")
