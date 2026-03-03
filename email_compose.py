@@ -34,8 +34,8 @@ def build_compose_link(service: str, recipients: list[str], cc_recipients: list[
                 parts.append((key, value))
         return urlencode(parts, quote_via=quote)
 
-    to_field = ",".join(recipients)
-    cc_field = ",".join(cc_recipients)
+    to_field = ";".join(recipients)
+    cc_field = ";".join(cc_recipients)
     if service == "Почтовый клиент по умолчанию":
         mailto_params = query_string({"cc": cc_field, "subject": subject, "body": body})
         return f"mailto:{to_field}" + (f"?{mailto_params}" if mailto_params else "")
