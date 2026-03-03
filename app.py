@@ -37,6 +37,12 @@ if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"
 if "vm_last_report" not in st.session_state:
     st.session_state["vm_last_report"] = None
+if "calendar_last_report" not in st.session_state:
+    st.session_state["calendar_last_report"] = None
+
+FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
+if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
+    st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
@@ -1241,30 +1247,39 @@ if st.session_state["active_view"] == "calendar":
             for isin, row in timeline_data.items():
                 for date, value in row.items():
                     df_timeline.loc[isin, date] = value
-            st.dataframe(df_timeline, use_container_width=True)
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df_timeline.to_excel(writer, sheet_name="calendar")
-            calendar_xlsx = output.getvalue()
-            calendar_csv = df_timeline.to_csv(index=True).encode("utf-8-sig")
+            st.session_state["calendar_last_report"] = {
+                "df": df_timeline,
+                "xlsx": output.getvalue(),
+                "csv": df_timeline.to_csv(index=True).encode("utf-8-sig"),
+            }
 
-            st.download_button(
-                label="💾 Скачать календарь (Excel)",
-                data=calendar_xlsx,
-                file_name="bond_calendar.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="calendar_xlsx_dl",
-            )
-            st.download_button(
-                label="💾 Скачать календарь (CSV)",
-                data=calendar_csv,
-                file_name="bond_calendar.csv",
-                mime="text/csv",
-                key="calendar_csv_dl",
-            )
-
-            render_email_compose_section("Календарь выплат", "calendar_report", "bond_calendar.xlsx", calendar_xlsx)
+    calendar_report = st.session_state.get("calendar_last_report")
+    if calendar_report:
+        st.dataframe(calendar_report["df"], use_container_width=True)
+        st.download_button(
+            label="💾 Скачать календарь (Excel)",
+            data=calendar_report["xlsx"],
+            file_name="bond_calendar.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="calendar_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать календарь (CSV)",
+            data=calendar_report["csv"],
+            file_name="bond_calendar.csv",
+            mime="text/csv",
+            key="calendar_csv_dl",
+        )
+        render_email_compose_section(
+            "Календарь выплат",
+            "calendar_report",
+            "bond_calendar.xlsx",
+            calendar_report["xlsx"],
+        )
     st.stop()
 
 # ---------------------------
