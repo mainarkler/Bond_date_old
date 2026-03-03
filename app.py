@@ -1,4 +1,5 @@
 import csv
+import os
 import math
 import re
 import time
@@ -6,7 +7,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
-from urllib.parse import urlencode
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,7 @@ import requests
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
+from email_compose import render_email_compose_section
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -36,6 +37,12 @@ if "active_view" not in st.session_state:
     st.session_state["active_view"] = "home"
 if "vm_last_report" not in st.session_state:
     st.session_state["vm_last_report"] = None
+if "calendar_last_report" not in st.session_state:
+    st.session_state["calendar_last_report"] = None
+
+FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
+if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
+    st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
 # ---------------------------
 # Main navigation
@@ -63,7 +70,7 @@ def init_sell_stres_state():
             st.session_state[key] = value
 
 
-if st.session_state["active_view"] != "home":
+if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
     if st.button("⬅️ На главную"):
         st.session_state["active_view"] = "home"
         trigger_rerun()
@@ -139,96 +146,6 @@ def open_index_analytics_sheet():
     )
 
 
-def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
-    chunks = re.split(r"[;,\s]+", raw_recipients.strip()) if raw_recipients else []
-    unique = []
-    seen = set()
-    email_pattern = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
-    invalid = []
-    for item in chunks:
-        email = item.strip()
-        if not email:
-            continue
-        if email in seen:
-            continue
-        seen.add(email)
-        if email_pattern.match(email):
-            unique.append(email)
-        else:
-            invalid.append(email)
-    return unique, invalid
-
-
-def build_compose_link(service: str, recipients: list[str], subject: str, body: str) -> str:
-    to_field = ",".join(recipients)
-    if service == "Почтовый клиент по умолчанию":
-        return f"mailto:{to_field}?{urlencode({'subject': subject, 'body': body})}"
-    if service == "Gmail":
-        return "https://mail.google.com/mail/?" + urlencode(
-            {"view": "cm", "fs": "1", "to": to_field, "su": subject, "body": body}
-        )
-    if service == "Outlook Web":
-        return "https://outlook.office.com/mail/deeplink/compose?" + urlencode(
-            {"to": to_field, "subject": subject, "body": body}
-        )
-    if service == "Yandex Mail":
-        return "https://mail.yandex.ru/compose?" + urlencode(
-            {"to": to_field, "subject": subject, "body": body}
-        )
-    return "https://e.mail.ru/compose/?" + urlencode(
-        {"To": to_field, "Subject": subject, "Body": body}
-    )
-
-
-def render_email_compose_section(report_title: str, key_prefix: str):
-    st.markdown("---")
-    st.subheader("📧 Отправка отчёта по почте")
-    st.caption(
-        "Выберите сервис и адреса — приложение откроет черновик письма. "
-        "Вложение добавляется вручную из скачанного файла отчёта."
-    )
-
-    mail_service = st.selectbox(
-        "Почтовый сервис",
-        ["Почтовый клиент по умолчанию", "Gmail", "Outlook Web", "Yandex Mail", "Mail.ru"],
-        key=f"{key_prefix}_service",
-    )
-    recipients_raw = st.text_area(
-        "Адреса получателей (через запятую, точку с запятой или перенос строки)",
-        placeholder="user1@example.com; user2@example.com",
-        key=f"{key_prefix}_recipients",
-    )
-    default_subject = f"{report_title} на {datetime.today().strftime('%d.%m.%Y')}"
-    mail_subject = st.text_input("Тема письма", value=default_subject, key=f"{key_prefix}_subject")
-    mail_body = st.text_area(
-        "Текст письма",
-        value=(
-            "Коллеги, добрый день!\n\n"
-            f"Направляю {report_title.lower()}.\n"
-            "Пожалуйста, см. вложенный файл.\n\n"
-            "С уважением."
-        ),
-        height=180,
-        key=f"{key_prefix}_body",
-    )
-
-    if st.button("Сгенерировать письмо", key=f"{key_prefix}_generate"):
-        recipients, invalid_recipients = parse_email_list(recipients_raw)
-        if invalid_recipients:
-            st.error(
-                "Некорректные адреса: "
-                + ", ".join(invalid_recipients[:10])
-                + ("..." if len(invalid_recipients) > 10 else "")
-            )
-        if not recipients:
-            st.warning("Укажите хотя бы один корректный email получателя.")
-        if recipients:
-            compose_link = build_compose_link(mail_service, recipients, mail_subject.strip(), mail_body.strip())
-            st.success(f"Черновик подготовлен для {len(recipients)} получателя(ей).")
-            st.link_button("Открыть письмо в выбранном сервисе", compose_link)
-            st.code(compose_link, language="text")
-
-
 # ---------------------------
 # Sell_stres helpers (Share)
 # ---------------------------
@@ -246,6 +163,32 @@ def isin_to_secid(isin: str) -> str:
     if df.empty:
         raise ValueError(f"ISIN {isin} не найден на MOEX")
     return df["secid"].iloc[0]
+
+
+def resolve_share_identifier_to_isin(identifier: str) -> str | None:
+    normalized = identifier.strip().upper()
+    if not normalized:
+        return None
+    if isin_format_valid(normalized) and isin_checksum_valid(normalized):
+        return normalized
+
+    params = {"q": normalized, "iss.meta": "off"}
+    response = request_get("https://iss.moex.com/iss/securities.json", params=params, timeout=200)
+    js = response.json()
+    df = pd.DataFrame(js["securities"]["data"], columns=js["securities"]["columns"])
+    if df.empty or "isin" not in df.columns:
+        return None
+
+    if "secid" in df.columns:
+        exact_secid = df[df["secid"].astype(str).str.upper() == normalized]
+        exact_secid = exact_secid[exact_secid["isin"].notna() & (exact_secid["isin"].astype(str).str.strip() != "")]
+        if not exact_secid.empty:
+            return str(exact_secid.iloc[0]["isin"]).strip().upper()
+
+    with_isin = df[df["isin"].notna() & (df["isin"].astype(str).str.strip() != "")]
+    if with_isin.empty:
+        return None
+    return str(with_isin.iloc[0]["isin"]).strip().upper()
 
 
 def load_moex_history(secid: str) -> pd.DataFrame:
@@ -1326,30 +1269,39 @@ if st.session_state["active_view"] == "calendar":
             for isin, row in timeline_data.items():
                 for date, value in row.items():
                     df_timeline.loc[isin, date] = value
-            st.dataframe(df_timeline, use_container_width=True)
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df_timeline.to_excel(writer, sheet_name="calendar")
-            calendar_xlsx = output.getvalue()
-            calendar_csv = df_timeline.to_csv(index=True).encode("utf-8-sig")
+            st.session_state["calendar_last_report"] = {
+                "df": df_timeline,
+                "xlsx": output.getvalue(),
+                "csv": df_timeline.to_csv(index=True).encode("utf-8-sig"),
+            }
 
-            st.download_button(
-                label="💾 Скачать календарь (Excel)",
-                data=calendar_xlsx,
-                file_name="bond_calendar.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="calendar_xlsx_dl",
-            )
-            st.download_button(
-                label="💾 Скачать календарь (CSV)",
-                data=calendar_csv,
-                file_name="bond_calendar.csv",
-                mime="text/csv",
-                key="calendar_csv_dl",
-            )
-
-            render_email_compose_section("Календарь выплат", "calendar_report")
+    calendar_report = st.session_state.get("calendar_last_report")
+    if calendar_report:
+        st.dataframe(calendar_report["df"], use_container_width=True)
+        st.download_button(
+            label="💾 Скачать календарь (Excel)",
+            data=calendar_report["xlsx"],
+            file_name="bond_calendar.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="calendar_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать календарь (CSV)",
+            data=calendar_report["csv"],
+            file_name="bond_calendar.csv",
+            mime="text/csv",
+            key="calendar_csv_dl",
+        )
+        render_email_compose_section(
+            "Календарь выплат",
+            "calendar_report",
+            "bond_calendar.xlsx",
+            calendar_report["xlsx"],
+        )
     st.stop()
 
 # ---------------------------
@@ -1414,9 +1366,10 @@ if st.session_state["active_view"] == "vm":
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
 
         vm_df = pd.DataFrame([vm_report])
+        vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
         st.download_button(
             label="💾 Скачать VM (Excel)",
-            data=ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report"),
+            data=vm_xlsx,
             file_name="vm_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="vm_report_xlsx_dl",
@@ -1429,7 +1382,7 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
-        render_email_compose_section("VM отчёт", "vm_report")
+        render_email_compose_section("VM отчёт", "vm_report", "vm_report.xlsx", vm_xlsx)
 
     st.stop()
 
@@ -1446,20 +1399,20 @@ if st.session_state["active_view"] == "sell_stres":
     with share_tab:
         st.markdown("### Share")
         use_q_from_list = st.checkbox(
-            "Вводить Q для каждого ISIN (формат: ISIN | Q)", value=False, key="share_q_per_isin"
+            "Вводить Q для каждого ISIN/Ticker (формат: ISIN/Ticker | Q)", value=False, key="share_q_per_isin"
         )
         if use_q_from_list:
             isin_q_input = st.text_area(
-                "Введите ISIN и Q (каждая строка: ISIN | Q)",
+                "Введите ISIN или Ticker и Q (каждая строка: ISIN/Ticker | Q)",
                 height=160,
-                placeholder="RU0009029540 | 33000000000\nRU000A0JX0J2 | 25000000000",
+                placeholder="RU0009029540 | 33000000000\nSBER | 25000000000",
                 key="share_isin_q_input",
             )
         else:
             isin_input = st.text_area(
-                "Введите или вставьте ISIN (через Ctrl+V, пробел или запятую)",
+                "Введите или вставьте ISIN/Ticker (через Ctrl+V, пробел или запятую)",
                 height=160,
-                placeholder="RU0009029540\nRU000A0JX0J2",
+                placeholder="RU0009029540\nSBER",
                 key="share_isin_input",
             )
 
@@ -1491,38 +1444,41 @@ if st.session_state["active_view"] == "sell_stres":
 
         if st.button("Рассчитать Sell_stres (Share)", key="share_calculate"):
             entries = []
-            invalid_isins = []
+            unresolved_identifiers = []
             if use_q_from_list:
                 raw_lines = [line.strip() for line in isin_q_input.splitlines() if line.strip()]
                 for line in raw_lines:
-                    parts = [p.strip() for p in re.split(r"[|;\t,]+", line) if p.strip()]
+                    parts = [p.strip() for p in re.split(r"[|;	,]+", line) if p.strip()]
                     if not parts:
                         continue
-                    isin = parts[0].upper()
+                    identifier = parts[0].upper()
                     q_val = parse_number(parts[1]) if len(parts) > 1 else None
-                    if not isin_format_valid(isin):
-                        invalid_isins.append(isin)
+                    resolved_isin = resolve_share_identifier_to_isin(identifier)
+                    if not resolved_isin:
+                        unresolved_identifiers.append(identifier)
                         continue
                     if q_val is None or q_val <= 0:
-                        st.warning(f"Некорректный Q для {isin}: {parts[1] if len(parts) > 1 else ''}")
+                        st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
                         continue
-                    entries.append({"ISIN": isin, "Q_MAX": int(q_val)})
+                    entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_val)})
             else:
                 raw_text = isin_input.strip()
                 if raw_text:
-                    isins = re.split(r"[\s,;]+", raw_text)
-                    isins = [i.strip().upper() for i in isins if i.strip()]
-                    for isin in isins:
-                        if not isin_format_valid(isin):
-                            invalid_isins.append(isin)
+                    identifiers = re.split(r"[\s,;]+", raw_text)
+                    identifiers = [i.strip().upper() for i in identifiers if i.strip()]
+                    for identifier in identifiers:
+                        resolved_isin = resolve_share_identifier_to_isin(identifier)
+                        if not resolved_isin:
+                            unresolved_identifiers.append(identifier)
                             continue
-                        entries.append({"ISIN": isin, "Q_MAX": int(q_max)})
+                        entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_max)})
 
-            if invalid_isins:
+            if unresolved_identifiers:
                 st.warning(
-                    "Некорректные по формату ISIN пропущены: "
-                    f"{', '.join(invalid_isins[:10])}{'...' if len(invalid_isins) > 10 else ''}"
+                    "Не удалось распознать ISIN/Ticker, записи пропущены: "
+                    f"{', '.join(unresolved_identifiers[:10])}{'...' if len(unresolved_identifiers) > 10 else ''}"
                 )
+
             if not entries:
                 st.error("Нет валидных ISIN для обработки.")
             elif len(entries) > ss.MAX_SECURITIES_PER_RUN:
@@ -1632,7 +1588,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
                 )
-            render_email_compose_section("Sell_stres Share отчёт", "share_report")
+            render_email_compose_section("Sell_stres Share отчёт", "share_report", "sell_stres_share_deltaP_all.xlsx", share_downloads.get("delta_xlsx") if share_downloads else None)
 
     with bond_tab:
         st.markdown("### Bond")
@@ -1828,7 +1784,7 @@ if st.session_state["active_view"] == "sell_stres":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="bond_meta_xlsx_dl",
                 )
-            render_email_compose_section("Sell_stres Bond отчёт", "bond_report")
+            render_email_compose_section("Sell_stres Bond отчёт", "bond_report", "sell_stres_bond_deltaP_all.xlsx", bond_downloads.get("delta_xlsx") if bond_downloads else None)
 
     st.stop()
 
@@ -2062,9 +2018,10 @@ if st.session_state["results"] is not None:
         return df.to_csv(index=False).encode("utf-8-sig")
 
 
+    repo_xlsx = to_excel_bytes(df_show)
     st.download_button(
         label="💾 Скачать результат (Excel)",
-        data=to_excel_bytes(df_show),
+        data=repo_xlsx,
         file_name="bond_data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -2075,6 +2032,6 @@ if st.session_state["results"] is not None:
         mime="text/csv",
     )
 
-    render_email_compose_section("Отчёт по облигациям", "repo_report")
+    render_email_compose_section("Отчёт по облигациям", "repo_report", "bond_data.xlsx", repo_xlsx)
 else:
     st.info("👆 Загрузите файл или введите ISIN-ы вручную.")
