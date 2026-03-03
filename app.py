@@ -1,4 +1,5 @@
 import csv
+import os
 import math
 import re
 import time
@@ -38,6 +39,10 @@ if "active_view" not in st.session_state:
 if "vm_last_report" not in st.session_state:
     st.session_state["vm_last_report"] = None
 
+FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
+if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
+    st.session_state["active_view"] = FORCED_ACTIVE_VIEW
+
 # ---------------------------
 # Main navigation
 # ---------------------------
@@ -64,7 +69,7 @@ def init_sell_stres_state():
             st.session_state[key] = value
 
 
-if st.session_state["active_view"] != "home":
+if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
     if st.button("⬅️ На главную"):
         st.session_state["active_view"] = "home"
         trigger_rerun()
@@ -161,11 +166,18 @@ def parse_email_list(raw_recipients: str) -> tuple[list[str], list[str]]:
 
 
 def build_compose_link(service: str, recipients: list[str], cc_recipients: list[str], subject: str, body: str) -> str:
-    query_string = lambda params: urlencode(params, quote_via=quote)
+    def query_string(params: dict[str, str]) -> str:
+        parts = []
+        for key, value in params.items():
+            if value:
+                parts.append((key, value))
+        return urlencode(parts, quote_via=quote)
+
     to_field = ",".join(recipients)
     cc_field = ",".join(cc_recipients)
     if service == "Почтовый клиент по умолчанию":
-        return f"mailto:{to_field}?{query_string({'cc': cc_field, 'subject': subject, 'body': body})}"
+        mailto_params = query_string({"cc": cc_field, "subject": subject, "body": body})
+        return f"mailto:{to_field}" + (f"?{mailto_params}" if mailto_params else "")
     if service == "Gmail":
         return "https://mail.google.com/mail/?" + query_string(
             {"view": "cm", "fs": "1", "to": to_field, "cc": cc_field, "su": subject, "body": body}
@@ -178,8 +190,8 @@ def build_compose_link(service: str, recipients: list[str], cc_recipients: list[
         return "https://mail.yandex.ru/compose?" + query_string(
             {"to": to_field, "cc": cc_field, "subject": subject, "body": body}
         )
-    return "https://e.mail.ru/compose/?" + urlencode(
-        {"To": to_field, "Cc": cc_field, "Subject": subject, "Body": body}, quote_via=quote
+    return "https://e.mail.ru/compose/?" + query_string(
+        {"To": to_field, "Cc": cc_field, "Subject": subject, "Body": body}
     )
 
 
