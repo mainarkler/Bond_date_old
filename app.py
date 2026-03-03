@@ -44,10 +44,6 @@ FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
-FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
-if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
-    st.session_state["active_view"] = FORCED_ACTIVE_VIEW
-
 # ---------------------------
 # Main navigation
 # ---------------------------
@@ -167,6 +163,32 @@ def isin_to_secid(isin: str) -> str:
     if df.empty:
         raise ValueError(f"ISIN {isin} не найден на MOEX")
     return df["secid"].iloc[0]
+
+
+def resolve_share_identifier_to_isin(identifier: str) -> str | None:
+    normalized = identifier.strip().upper()
+    if not normalized:
+        return None
+    if isin_format_valid(normalized) and isin_checksum_valid(normalized):
+        return normalized
+
+    params = {"q": normalized, "iss.meta": "off"}
+    response = request_get("https://iss.moex.com/iss/securities.json", params=params, timeout=200)
+    js = response.json()
+    df = pd.DataFrame(js["securities"]["data"], columns=js["securities"]["columns"])
+    if df.empty or "isin" not in df.columns:
+        return None
+
+    if "secid" in df.columns:
+        exact_secid = df[df["secid"].astype(str).str.upper() == normalized]
+        exact_secid = exact_secid[exact_secid["isin"].notna() & (exact_secid["isin"].astype(str).str.strip() != "")]
+        if not exact_secid.empty:
+            return str(exact_secid.iloc[0]["isin"]).strip().upper()
+
+    with_isin = df[df["isin"].notna() & (df["isin"].astype(str).str.strip() != "")]
+    if with_isin.empty:
+        return None
+    return str(with_isin.iloc[0]["isin"]).strip().upper()
 
 
 def load_moex_history(secid: str) -> pd.DataFrame:
@@ -1377,20 +1399,20 @@ if st.session_state["active_view"] == "sell_stres":
     with share_tab:
         st.markdown("### Share")
         use_q_from_list = st.checkbox(
-            "Вводить Q для каждого ISIN (формат: ISIN | Q)", value=False, key="share_q_per_isin"
+            "Вводить Q для каждого ISIN/Ticker (формат: ISIN/Ticker | Q)", value=False, key="share_q_per_isin"
         )
         if use_q_from_list:
             isin_q_input = st.text_area(
-                "Введите ISIN и Q (каждая строка: ISIN | Q)",
+                "Введите ISIN или Ticker и Q (каждая строка: ISIN/Ticker | Q)",
                 height=160,
-                placeholder="RU0009029540 | 33000000000\nRU000A0JX0J2 | 25000000000",
+                placeholder="RU0009029540 | 33000000000\nSBER | 25000000000",
                 key="share_isin_q_input",
             )
         else:
             isin_input = st.text_area(
-                "Введите или вставьте ISIN (через Ctrl+V, пробел или запятую)",
+                "Введите или вставьте ISIN/Ticker (через Ctrl+V, пробел или запятую)",
                 height=160,
-                placeholder="RU0009029540\nRU000A0JX0J2",
+                placeholder="RU0009029540\nSBER",
                 key="share_isin_input",
             )
 
@@ -1422,38 +1444,41 @@ if st.session_state["active_view"] == "sell_stres":
 
         if st.button("Рассчитать Sell_stres (Share)", key="share_calculate"):
             entries = []
-            invalid_isins = []
+            unresolved_identifiers = []
             if use_q_from_list:
                 raw_lines = [line.strip() for line in isin_q_input.splitlines() if line.strip()]
                 for line in raw_lines:
-                    parts = [p.strip() for p in re.split(r"[|;\t,]+", line) if p.strip()]
+                    parts = [p.strip() for p in re.split(r"[|;	,]+", line) if p.strip()]
                     if not parts:
                         continue
-                    isin = parts[0].upper()
+                    identifier = parts[0].upper()
                     q_val = parse_number(parts[1]) if len(parts) > 1 else None
-                    if not isin_format_valid(isin):
-                        invalid_isins.append(isin)
+                    resolved_isin = resolve_share_identifier_to_isin(identifier)
+                    if not resolved_isin:
+                        unresolved_identifiers.append(identifier)
                         continue
                     if q_val is None or q_val <= 0:
-                        st.warning(f"Некорректный Q для {isin}: {parts[1] if len(parts) > 1 else ''}")
+                        st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
                         continue
-                    entries.append({"ISIN": isin, "Q_MAX": int(q_val)})
+                    entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_val)})
             else:
                 raw_text = isin_input.strip()
                 if raw_text:
-                    isins = re.split(r"[\s,;]+", raw_text)
-                    isins = [i.strip().upper() for i in isins if i.strip()]
-                    for isin in isins:
-                        if not isin_format_valid(isin):
-                            invalid_isins.append(isin)
+                    identifiers = re.split(r"[\s,;]+", raw_text)
+                    identifiers = [i.strip().upper() for i in identifiers if i.strip()]
+                    for identifier in identifiers:
+                        resolved_isin = resolve_share_identifier_to_isin(identifier)
+                        if not resolved_isin:
+                            unresolved_identifiers.append(identifier)
                             continue
-                        entries.append({"ISIN": isin, "Q_MAX": int(q_max)})
+                        entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_max)})
 
-            if invalid_isins:
+            if unresolved_identifiers:
                 st.warning(
-                    "Некорректные по формату ISIN пропущены: "
-                    f"{', '.join(invalid_isins[:10])}{'...' if len(invalid_isins) > 10 else ''}"
+                    "Не удалось распознать ISIN/Ticker, записи пропущены: "
+                    f"{', '.join(unresolved_identifiers[:10])}{'...' if len(unresolved_identifiers) > 10 else ''}"
                 )
+
             if not entries:
                 st.error("Нет валидных ISIN для обработки.")
             elif len(entries) > ss.MAX_SECURITIES_PER_RUN:
