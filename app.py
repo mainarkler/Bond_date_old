@@ -1423,12 +1423,12 @@ if st.session_state["active_view"] == "vm":
             "Детали во вложении."
         )
 
+        st.session_state["vm_report_default_body"] = vm_mail_body
         render_email_compose_section(
             "VM отчёт",
             "vm_report",
             "vm_report.xlsx",
             vm_xlsx,
-            default_body=vm_mail_body,
         )
 
     st.stop()
