@@ -1410,7 +1410,26 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
-        render_email_compose_section("VM отчёт", "vm_report", "vm_report.xlsx", vm_xlsx)
+        vm_mail_body = (
+            "Коллеги, добрый день!\n\n"
+            "Направляю отчёт по вариационной марже (VM).\n\n"
+            f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']})\n"
+            f"Дата клиринга: {vm_report['TRADEDATE']}\n"
+            f"Кол-во: {vm_report['QUANTITY']}\n"
+            f"VM за день: {vm_report['VM']:.2f}\n"
+            f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
+            f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
+            f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
+            "Детали во вложении."
+        )
+
+        st.session_state["vm_report_default_body"] = vm_mail_body
+        render_email_compose_section(
+            "VM отчёт",
+            "vm_report",
+            "vm_report.xlsx",
+            vm_xlsx,
+        )
 
     st.stop()
 

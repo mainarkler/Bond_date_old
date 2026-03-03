@@ -116,13 +116,14 @@ def render_email_compose_section(
     )
     default_subject = f"{report_title} на {datetime.today().strftime('%d.%m.%Y')}"
     mail_subject = st.text_input("Тема письма", value=default_subject, key=f"{key_prefix}_subject")
+    body_value = st.session_state.get(f"{key_prefix}_default_body") or (
+        "Коллеги, добрый день!\n\n"
+        f"Направляю {report_title.lower()}.\n"
+        "Пожалуйста, см. вложенный файл.\n\n"
+    )
     mail_body = st.text_area(
         "Текст письма",
-        value=(
-            "Коллеги, добрый день!\n\n"
-            f"Направляю {report_title.lower()}.\n"
-            "Пожалуйста, см. вложенный файл.\n\n"
-        ),
+        value=body_value,
         height=180,
         key=f"{key_prefix}_body",
     )
