@@ -541,10 +541,12 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     spec_url = f"https://iss.moex.com/iss/engines/futures/markets/forts/securities/{secid}.json"
     spec_params = {
         "iss.meta": "off",
-        "iss.only": "securities",
-        "securities.columns": "PREVSETTLEPRICE,MINSTEP,STEPPRICE,LASTSETTLEPRICE,LAST,UPDATETIME",
+        "iss.only": "securities,marketdata",
+        "securities.columns": "PREVSETTLEPRICE,MINSTEP,STEPPRICE,LASTSETTLEPRICE",
+        "marketdata.columns": "LAST,UPDATETIME",
     }
     spec = request_get(spec_url, timeout=2000, params=spec_params).json()
+
     sec_columns = spec.get("securities", {}).get("columns", [])
     sec_data = spec.get("securities", {}).get("data", [])
     if not sec_data:
@@ -555,8 +557,12 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     minstep_raw = sec_row.get("MINSTEP")
     stepprice_raw = sec_row.get("STEPPRICE")
     last_settle_raw = sec_row.get("LASTSETTLEPRICE")
-    last_raw = sec_row.get("LAST")
-    update_time_raw = sec_row.get("UPDATETIME")
+
+    market_columns = spec.get("marketdata", {}).get("columns", [])
+    market_data = spec.get("marketdata", {}).get("data", [])
+    market_row = dict(zip(market_columns, market_data[0])) if market_data else {}
+    last_raw = market_row.get("LAST")
+    update_time_raw = market_row.get("UPDATETIME")
 
     if prev_settle_raw is None or minstep_raw is None or stepprice_raw is None:
         raise RuntimeError("В спецификации FORTS отсутствуют обязательные поля цены")
