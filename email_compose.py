@@ -84,6 +84,7 @@ def render_email_compose_section(
     key_prefix: str,
     attachment_name: str | None = None,
     attachment_bytes: bytes | None = None,
+    default_body: str | None = None,
 ):
     st.markdown("---")
     if st.button("📧 Подготовить письмо", key=f"{key_prefix}_open_compose"):
