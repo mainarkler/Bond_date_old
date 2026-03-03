@@ -545,7 +545,22 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
         "securities.columns": "PREVSETTLEPRICE,MINSTEP,STEPPRICE,LASTSETTLEPRICE,LAST,UPDATETIME",
     }
     spec = request_get(spec_url, timeout=2000, params=spec_params).json()
-    prev_settle_raw, minstep_raw, stepprice_raw, last_settle_raw, last_raw, update_time_raw = spec["securities"]["data"][0]
+    sec_columns = spec.get("securities", {}).get("columns", [])
+    sec_data = spec.get("securities", {}).get("data", [])
+    if not sec_data:
+        raise RuntimeError("Не удалось получить спецификацию контракта FORTS")
+    sec_row = dict(zip(sec_columns, sec_data[0]))
+
+    prev_settle_raw = sec_row.get("PREVSETTLEPRICE")
+    minstep_raw = sec_row.get("MINSTEP")
+    stepprice_raw = sec_row.get("STEPPRICE")
+    last_settle_raw = sec_row.get("LASTSETTLEPRICE")
+    last_raw = sec_row.get("LAST")
+    update_time_raw = sec_row.get("UPDATETIME")
+
+    if prev_settle_raw is None or minstep_raw is None or stepprice_raw is None:
+        raise RuntimeError("В спецификации FORTS отсутствуют обязательные поля цены")
+
     prev_settle = to_decimal(prev_settle_raw)
     minstep = to_decimal(minstep_raw)
     stepprice = to_decimal(stepprice_raw)
