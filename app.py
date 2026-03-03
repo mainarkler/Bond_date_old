@@ -542,14 +542,15 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     spec_params = {
         "iss.meta": "off",
         "iss.only": "securities",
-        "securities.columns": "PREVSETTLEPRICE,MINSTEP,STEPPRICE,LASTSETTLEPRICE",
+        "securities.columns": "PREVSETTLEPRICE,MINSTEP,STEPPRICE,LASTSETTLEPRICE,LAST,UPDATETIME",
     }
     spec = request_get(spec_url, timeout=2000, params=spec_params).json()
-    prev_settle_raw, minstep_raw, stepprice_raw, last_settle_raw = spec["securities"]["data"][0]
+    prev_settle_raw, minstep_raw, stepprice_raw, last_settle_raw, last_raw, update_time_raw = spec["securities"]["data"][0]
     prev_settle = to_decimal(prev_settle_raw)
     minstep = to_decimal(minstep_raw)
     stepprice = to_decimal(stepprice_raw)
     last_settle = to_decimal(last_settle_raw) if last_settle_raw is not None else None
+    last_price = to_decimal(last_raw) if last_raw is not None else None
 
     hist_url = f"https://iss.moex.com/iss/history/engines/futures/markets/forts/securities/{secid}.json"
     hist_params = {
@@ -577,6 +578,8 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
         "PREV_PRICE": float(money_decimal(prev_settle)),
         "LAST_SETTLE_PRICE": float(money_decimal(last_settle)) if last_settle is not None else None,
         "TODAY_PRICE": float(money_decimal(day_settle)),
+        "LAST_PRICE": float(money_decimal(last_price)) if last_price is not None else None,
+        "QUOTE_TIME": str(update_time_raw) if update_time_raw is not None else None,
         "MULTIPLIER": float(multiplier),
         "VM": float(money_decimal(vm)),
     }
@@ -1334,13 +1337,16 @@ if st.session_state["active_view"] == "vm":
                 position_vm = vm_data["VM"] * quantity
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
-                limit_sum = (0.05 * vm_data["TODAY_PRICE"] * quantity * usd_rub) + position_vm
+                price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
+                limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + position_vm
                 st.session_state["vm_last_report"] = {
                     "TRADE_NAME": vm_data["TRADE_NAME"],
                     "SECID": vm_data["SECID"],
                     "TRADEDATE": vm_data["TRADEDATE"],
                     "LAST_SETTLE_PRICE": vm_data["LAST_SETTLE_PRICE"],
                     "TODAY_PRICE": vm_data["TODAY_PRICE"],
+                    "LAST_PRICE": vm_data.get("LAST_PRICE"),
+                    "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
                     "MULTIPLIER": vm_data["MULTIPLIER"],
                     "VM": vm_data["VM"],
                     "QUANTITY": quantity,
@@ -1358,7 +1364,8 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**SECID:** {vm_report['SECID']}")
         st.markdown(f"**Дата клиринга:** {vm_report['TRADEDATE']}")
         st.markdown(f"**Расчетная цена последнего клиринга:** {vm_report['LAST_SETTLE_PRICE']}")
-        st.markdown(f"**Последняя цена:** {vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Последняя цена:** {vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
         st.markdown(f"**Вариационная маржа за день:** {vm_report['VM']:.2f}")
         st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
