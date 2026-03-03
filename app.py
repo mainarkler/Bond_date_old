@@ -18,11 +18,15 @@ from email_compose import render_email_compose_section
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from services.report_service import generate_report_data
+
 # ---------------------------
 # Streamlit page setup
 # ---------------------------
 st.set_page_config(page_title="РЕПО претрейд", page_icon="📈", layout="wide")
 st.title("Stat bord")
+report_context = generate_report_data()
+st.caption(f"Обновлено: {report_context['generated_at_utc']}")
 
 # ---------------------------
 # Session state defaults
