@@ -1,126 +1,239 @@
-"""MOEX ISS trades turnover loader.
-
-This module fetches traded boards for a security and computes turnover from
-`trades` endpoint data only (PRICE * QUANTITY).
-"""
+"""MOEX turnover loader using combined trades + history daily data."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+import json
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import requests
 
 BASE_URL = "https://iss.moex.com/iss"
 DEFAULT_ENGINE = "stock"
-
-
-@dataclass(frozen=True)
-class BoardInfo:
-    """Describes a board and the market where trades should be requested."""
-
-    boardid: str
-    market: str
+DEFAULT_LIMIT = 100
 
 
 class MoexTurnoverClient:
-    """Client for loading MOEX turnover from the ISS trades endpoint."""
+    """Client for loading MOEX turnover from ISS endpoints."""
 
-    def __init__(self, timeout: int = 30) -> None:
+    def __init__(self, timeout: int = 30, limit: int = DEFAULT_LIMIT) -> None:
         self.timeout = timeout
+        self.limit = limit
         self.session = requests.Session()
         self.session.trust_env = False
-
-    def _get_json(self, path: str, params: dict | None = None) -> dict:
-        url = f"{BASE_URL}{path}"
-        response = self.session.get(url, params=params, timeout=self.timeout)
-        response.raise_for_status()
-        return response.json()
-
-    def get_traded_boards(self, secid: str) -> Tuple[List[BoardInfo], List[BoardInfo], List[BoardInfo]]:
-        """Return traded boards split by categories: regular, SPEQ, NDM."""
-        payload = self._get_json(
-            f"/securities/{secid}/boards.json",
-            params={"iss.meta": "off"},
+        self.session.headers.update(
+            {
+                "User-Agent": "python-requests/iss-moex-script",
+                "Accept": "application/json,text/plain,*/*",
+            }
         )
 
+    def _get_json(self, url: str, params: dict | None = None) -> dict:
+        response = self.session.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            body_preview = (response.text or "")[:200].replace("\n", " ")
+            raise RuntimeError(
+                f"MOEX ISS вернул не-JSON для {url} (status={response.status_code}): {body_preview}"
+            ) from exc
+
+    def get_boards(self, secid: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+        """Get traded boards with markets for categories: regular, SPEQ, NDM."""
+        url = f"{BASE_URL}/securities/{secid}/boards.json"
+        payload = self._get_json(url, params={"iss.meta": "off"})
         df = pd.DataFrame(payload["boards"]["data"], columns=payload["boards"]["columns"])
-        traded = df[df["is_traded"] == 1].copy()
+        df = df[df["is_traded"] == 1].copy()
 
-        regular_df = traded[(traded["market"] == "shares") & (traded["boardid"] != "SPEQ")]
-        speq_df = traded[traded["boardid"] == "SPEQ"]
-        ndm_df = traded[traded["market"].isin(["ndm", "sharesndm"])]
-
-        regular = [BoardInfo(boardid=row.boardid, market=row.market) for row in regular_df.itertuples()]
-        speq = [BoardInfo(boardid=row.boardid, market=row.market) for row in speq_df.itertuples()]
-        ndm = [BoardInfo(boardid=row.boardid, market=row.market) for row in ndm_df.itertuples()]
-
+        regular = [
+            (str(row.market), str(row.boardid))
+            for row in df[(df["market"] == "shares") & (df["boardid"] != "SPEQ")].itertuples()
+        ]
+        speq = [
+            (str(row.market), str(row.boardid))
+            for row in df[df["boardid"] == "SPEQ"].itertuples()
+        ]
+        ndm = [
+            (str(row.market), str(row.boardid))
+            for row in df[df["market"].isin(["ndm", "sharesndm"])].itertuples()
+        ]
         return regular, speq, ndm
 
-    def get_board_turnover(self, secid: str, board: BoardInfo, start_date: str) -> float:
-        """Fetch all trades for the board (with pagination) and return turnover."""
+    def get_trades_by_day(
+        self,
+        secid: str,
+        engine: str = DEFAULT_ENGINE,
+        market: str = "shares",
+        board: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        """Download history for period and aggregate board turnover by day."""
         start = 0
-        turnover = 0.0
+        frames: list[pd.DataFrame] = []
 
         while True:
-            payload = self._get_json(
-                (
-                    f"/engines/{DEFAULT_ENGINE}/markets/{board.market}/boards/{board.boardid}"
-                    f"/securities/{secid}/trades.json"
-                ),
-                params={
-                    "from": start_date,
-                    "start": start,
-                    "iss.only": "trades",
-                    "iss.meta": "off",
-                },
-            )
+            url = f"{BASE_URL}/history/engines/{engine}/markets/{market}/securities/{secid}.json"
+            params = {
+                "start": start,
+                "limit": self.limit,
+                "iss.only": "history",
+                "iss.meta": "off",
+                "history.columns": "TRADEDATE,BOARDID,VALUE",
+            }
+            if start_date:
+                params["from"] = start_date
+            if end_date:
+                params["till"] = end_date
 
-            data = payload.get("trades", {}).get("data", [])
-            columns = payload.get("trades", {}).get("columns", [])
-
+            payload = self._get_json(url, params=params)
+            data = payload.get("history", {}).get("data", [])
+            columns = payload.get("history", {}).get("columns", [])
             if not data:
                 break
 
             df = pd.DataFrame(data, columns=columns)
-            turnover += (pd.to_numeric(df["PRICE"], errors="coerce") * pd.to_numeric(df["QUANTITY"], errors="coerce")).sum()
-            start += len(df)
+            if "TRADEDATE" not in df.columns or "VALUE" not in df.columns:
+                start += len(data)
+                continue
 
-        return float(turnover)
+            if board and "BOARDID" in df.columns:
+                df = df[df["BOARDID"].astype(str).str.upper() == board.upper()]
+            if df.empty:
+                start += len(data)
+                continue
 
-    def get_turnover(self, secid: str, start_date: str) -> Dict[str, object]:
-        """Calculate turnover totals by board category and overall."""
-        regular_boards, speq_boards, ndm_boards = self.get_traded_boards(secid)
+            df = df[["TRADEDATE", "VALUE"]].copy()
+            df["TURNOVER"] = pd.to_numeric(df["VALUE"], errors="coerce")
+            frames.append(df[["TRADEDATE", "TURNOVER"]])
+            start += len(data)
 
-        board_turnover: Dict[str, float] = {}
-        total_regular = self._sum_category(secid, start_date, regular_boards, board_turnover)
-        total_speq = self._sum_category(secid, start_date, speq_boards, board_turnover)
-        total_ndm = self._sum_category(secid, start_date, ndm_boards, board_turnover)
+        if not frames:
+            return pd.DataFrame(columns=["TRADEDATE", "TURNOVER"])
+        df_all = pd.concat(frames, ignore_index=True)
+        return df_all.groupby("TRADEDATE", as_index=False)["TURNOVER"].sum()
+
+    def get_history(self, secid: str, date_from: str, date_to: str | None = None) -> pd.DataFrame:
+        """Download history VALUE by day."""
+        start = 0
+        frames: list[pd.DataFrame] = []
+        url = f"{BASE_URL}/history/engines/stock/markets/shares/securities/{secid}.json"
+
+        while True:
+            params = {
+                "from": date_from,
+                "start": start,
+                "limit": self.limit,
+                "iss.only": "history",
+                "iss.meta": "off",
+            }
+            if date_to:
+                params["till"] = date_to
+
+            payload = self._get_json(url, params=params)
+            data = payload.get("history", {}).get("data", [])
+            columns = payload.get("history", {}).get("columns", [])
+            if not data:
+                break
+
+            df = pd.DataFrame(data, columns=columns)
+            if "TRADEDATE" in df.columns and "VALUE" in df.columns:
+                frames.append(df[["TRADEDATE", "VALUE"]].copy())
+            start += len(data)
+
+        if not frames:
+            return pd.DataFrame(columns=["TRADEDATE", "VALUE"])
+        return pd.concat(frames, ignore_index=True)
+
+    def fetch_combined_daily(self, secid: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
+        """Get daily category values + history and combine into single table."""
+        regular_boards, speq_boards, ndm_boards = self.get_boards(secid)
+        categories = {"REGULAR": regular_boards, "SPEQ": speq_boards, "NDM": ndm_boards}
+
+        category_frames: dict[str, pd.DataFrame] = {}
+        for category, board_items in categories.items():
+            category_parts: list[pd.DataFrame] = []
+            for market, board in board_items:
+                try:
+                    df_part = self.get_trades_by_day(
+                        secid=secid,
+                        engine=DEFAULT_ENGINE,
+                        market=market,
+                        board=board,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                except Exception:
+                    continue
+                if not df_part.empty:
+                    category_parts.append(df_part)
+
+            if category_parts:
+                merged_cat = pd.concat(category_parts, ignore_index=True)
+                merged_cat = merged_cat.groupby("TRADEDATE", as_index=False)["TURNOVER"].sum()
+                merged_cat.rename(columns={"TURNOVER": category}, inplace=True)
+                category_frames[category] = merged_cat
+            else:
+                category_frames[category] = pd.DataFrame(columns=["TRADEDATE", category])
+
+        try:
+            hist_df = self.get_history(secid, start_date, end_date)
+        except Exception:
+            hist_df = pd.DataFrame(columns=["TRADEDATE", "VALUE"])
+
+        all_dates = pd.DataFrame(columns=["TRADEDATE"])
+        for frame in category_frames.values():
+            if not frame.empty:
+                all_dates = pd.concat([all_dates, frame[["TRADEDATE"]]], ignore_index=True)
+        if not hist_df.empty:
+            all_dates = pd.concat([all_dates, hist_df[["TRADEDATE"]]], ignore_index=True)
+
+        if all_dates.empty:
+            combined_df = pd.DataFrame(columns=["TRADEDATE", "REGULAR", "SPEQ", "NDM", "HISTORY_VALUE"])
+        else:
+            combined_df = all_dates.drop_duplicates().reset_index(drop=True)
+            for category in ["REGULAR", "SPEQ", "NDM"]:
+                combined_df = combined_df.merge(category_frames[category], on="TRADEDATE", how="left")
+
+            if not hist_df.empty:
+                hist_df = hist_df.rename(columns={"VALUE": "HISTORY_VALUE"})
+                hist_df["HISTORY_VALUE"] = pd.to_numeric(hist_df["HISTORY_VALUE"], errors="coerce")
+                hist_df = hist_df.groupby("TRADEDATE", as_index=False)["HISTORY_VALUE"].sum()
+                combined_df = combined_df.merge(hist_df, on="TRADEDATE", how="left")
+            else:
+                combined_df["HISTORY_VALUE"] = 0.0
+
+            for col in ["REGULAR", "SPEQ", "NDM", "HISTORY_VALUE"]:
+                if col not in combined_df.columns:
+                    combined_df[col] = 0.0
+            combined_df[["REGULAR", "SPEQ", "NDM", "HISTORY_VALUE"]] = combined_df[
+                ["REGULAR", "SPEQ", "NDM", "HISTORY_VALUE"]
+            ].fillna(0.0)
+
+        combined_df["TOTAL_TRADES"] = combined_df[["REGULAR", "SPEQ", "NDM"]].sum(axis=1)
+        combined_df.insert(0, "SECID", secid)
+        return combined_df[["SECID", "TRADEDATE", "HISTORY_VALUE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]]
+
+    def get_turnover(self, secid: str, start_date: str, end_date: str | None = None) -> Dict[str, object]:
+        """Return totals compatible with app UI based on combined daily data."""
+        combined_df = self.fetch_combined_daily(secid, start_date, end_date)
+        total_regular = float(pd.to_numeric(combined_df["REGULAR"], errors="coerce").sum())
+        total_speq = float(pd.to_numeric(combined_df["SPEQ"], errors="coerce").sum())
+        total_ndm = float(pd.to_numeric(combined_df["NDM"], errors="coerce").sum())
 
         return {
-            "board_turnover": board_turnover,
+            "board_turnover": {
+                "REGULAR": total_regular,
+                "SPEQ": total_speq,
+                "NDM": total_ndm,
+                "HISTORY_VALUE": float(pd.to_numeric(combined_df["HISTORY_VALUE"], errors="coerce").sum()),
+            },
             "TOTAL_regular": total_regular,
             "TOTAL_SPEQ": total_speq,
             "TOTAL_NDM": total_ndm,
             "TOTAL_all": total_regular + total_speq + total_ndm,
         }
-
-    def _sum_category(
-        self,
-        secid: str,
-        start_date: str,
-        boards: Iterable[BoardInfo],
-        board_turnover: Dict[str, float],
-    ) -> float:
-        category_total = 0.0
-
-        for board in boards:
-            value = self.get_board_turnover(secid, board, start_date)
-            board_turnover[board.boardid] = value
-            category_total += value
-
-        return float(category_total)
 
 
 def print_turnover_report(turnover: Dict[str, object]) -> None:
@@ -137,8 +250,9 @@ def print_turnover_report(turnover: Dict[str, object]) -> None:
 
 if __name__ == "__main__":
     SECID = "SBER"
-    START_DATE = "2026-01-01"
+    START_DATE = "2026-03-01"
+    END_DATE = "2026-03-05"
 
     client = MoexTurnoverClient()
-    result = client.get_turnover(SECID, START_DATE)
+    result = client.get_turnover(SECID, START_DATE, END_DATE)
     print_turnover_report(result)

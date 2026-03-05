@@ -99,21 +99,19 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_vm", use_container_width=True):
             st.session_state["active_view"] = "vm"
             trigger_rerun()
+
+        st.markdown("### Состав индекса")
+        st.caption("Загрузка состава индекса по датам и построение матрицы весов.")
+        if st.button("Открыть", key="open_index_analytics", use_container_width=True):
+            st.session_state["active_view"] = "index_analytics"
+            trigger_rerun()
     with bottom_right:
         st.markdown("### Sell_stress")
         st.caption("Оценка рыночного давления для акций и облигаций.")
         if st.button("Открыть", key="open_sell_stres", use_container_width=True):
             st.session_state["active_view"] = "sell_stres"
             trigger_rerun()
-    index_col, _ = st.columns(2)
-    with index_col:
-        st.markdown("### Состав индекса")
-        st.caption("Загрузка состава индекса по датам и построение матрицы весов.")
-        if st.button("Открыть", key="open_index_analytics", use_container_width=True):
-            st.session_state["active_view"] = "index_analytics"
-            trigger_rerun()
-    moex_col, _ = st.columns(2)
-    with moex_col:
+
         st.markdown("### MOEX turnover")
         st.caption("Расчет оборота по сделкам MOEX ISS trades: regular / SPEQ / NDM.")
         if st.button("Открыть", key="open_moex_turnover", use_container_width=True):
@@ -198,6 +196,30 @@ def resolve_share_identifier_to_isin(identifier: str) -> str | None:
     if with_isin.empty:
         return None
     return str(with_isin.iloc[0]["isin"]).strip().upper()
+
+
+def resolve_identifier_to_secid(identifier: str) -> str | None:
+    normalized = identifier.strip().upper()
+    if not normalized:
+        return None
+    if isin_format_valid(normalized) and isin_checksum_valid(normalized):
+        return isin_to_secid(normalized)
+
+    params = {"q": normalized, "iss.meta": "off"}
+    response = request_get("https://iss.moex.com/iss/securities.json", params=params, timeout=200)
+    js = response.json()
+    df = pd.DataFrame(js["securities"]["data"], columns=js["securities"]["columns"])
+    if df.empty or "secid" not in df.columns:
+        return None
+
+    exact = df[df["secid"].astype(str).str.upper() == normalized]
+    if not exact.empty:
+        return str(exact.iloc[0]["secid"]).strip().upper()
+
+    with_secid = df[df["secid"].notna() & (df["secid"].astype(str).str.strip() != "")]
+    if with_secid.empty:
+        return None
+    return str(with_secid.iloc[0]["secid"]).strip().upper()
 
 
 def load_moex_history(secid: str) -> pd.DataFrame:
@@ -599,7 +621,9 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     day_settle = to_decimal(day_settle_raw)
 
     multiplier = stepprice / minstep
-    vm = (day_settle - prev_settle) * multiplier
+    vm_clearing = (day_settle - prev_settle) * multiplier
+    ref_price = last_price if last_price is not None else (last_settle if last_settle is not None else day_settle)
+    vm_live = (ref_price - prev_settle) * multiplier
 
     return {
         "TRADE_NAME": trade_name_clean,
@@ -611,7 +635,8 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
         "LAST_PRICE": float(money_decimal(last_price)) if last_price is not None else None,
         "QUOTE_TIME": str(update_time_raw) if update_time_raw is not None else None,
         "MULTIPLIER": float(multiplier),
-        "VM": float(money_decimal(vm)),
+        "VM_CLEARING": float(money_decimal(vm_clearing)),
+        "VM": float(money_decimal(vm_live)),
     }
 
 
@@ -1379,6 +1404,7 @@ if st.session_state["active_view"] == "vm":
                     "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
                     "MULTIPLIER": vm_data["MULTIPLIER"],
                     "VM": vm_data["VM"],
+                    "VM_CLEARING": vm_data["VM_CLEARING"],
                     "QUANTITY": quantity,
                     "POSITION_VM": position_vm,
                     "USD_RUB": usd_rub_data["usd_rub"],
@@ -1397,7 +1423,8 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Последняя цена:** {vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']}")
         st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
-        st.markdown(f"**Вариационная маржа за день:** {vm_report['VM']:.2f}")
+        st.markdown(f"**Вариационная маржа (по последней цене):** {vm_report['VM']:.2f}")
+        st.markdown(f"**VM клиринговая (SETTLEPRICEDAY - PREVSETTLEPRICE):** {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}")
         st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
         st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
@@ -1425,7 +1452,8 @@ if st.session_state["active_view"] == "vm":
             f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']})\n"
             f"Дата клиринга: {vm_report['TRADEDATE']}\n"
             f"Кол-во: {vm_report['QUANTITY']}\n"
-            f"VM за день: {vm_report['VM']:.2f}\n"
+            f"VM (по последней цене): {vm_report['VM']:.2f}\n"
+            f"VM клиринговая: {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}\n"
             f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
             f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
@@ -1856,42 +1884,117 @@ if st.session_state["active_view"] == "index_analytics":
 # ---------------------------
 if st.session_state["active_view"] == "moex_turnover":
     st.subheader("📊 MOEX turnover (trades)")
-    st.markdown("Расчет оборота акции через MOEX ISS endpoint `trades`.")
+    st.markdown("Расчет оборота акции через MOEX ISS endpoint `history`.")
 
-    secid_col, date_col = st.columns(2)
-    with secid_col:
-        secid_input = st.text_input("SECID", value="SBER").strip().upper()
-    with date_col:
-        start_date_input = st.text_input("START_DATE (YYYY-MM-DD)", value="2026-01-01").strip()
+    secid_input = st.text_area(
+        "SECID / ISIN / TICKER (каждый инструмент с новой строки)",
+        value="",
+        placeholder="SBER\nRU0009029540\nGAZP",
+        key="moex_identifiers",
+    )
+    use_interval = st.checkbox("Считать за интервал дат", value=False, key="moex_use_interval")
+    if use_interval:
+        date_col_left, date_col_right = st.columns(2)
+        with date_col_left:
+            start_date_value = st.date_input(
+                "START_DATE",
+                value=datetime.now().date() - timedelta(days=30),
+                key="moex_start_date",
+            )
+        with date_col_right:
+            end_date_value = st.date_input(
+                "END_DATE",
+                value=datetime.now().date(),
+                key="moex_end_date",
+            )
+        if end_date_value < start_date_value:
+            st.error("END_DATE не может быть раньше START_DATE.")
+            st.stop()
+    else:
+        single_date_value = st.date_input(
+            "DATE",
+            value=datetime.now().date() - timedelta(days=1),
+            key="moex_single_date",
+        )
+        start_date_value = single_date_value
+        end_date_value = single_date_value
+
+    start_date_input = start_date_value.strftime("%Y-%m-%d")
+    end_date_input = end_date_value.strftime("%Y-%m-%d")
 
     if st.button("Рассчитать оборот", key="calc_moex_turnover"):
-        if not secid_input:
-            st.error("Укажите SECID.")
+        raw_identifiers = [line.strip().upper() for line in secid_input.splitlines() if line.strip()]
+        if not raw_identifiers:
+            st.error("Укажите хотя бы один SECID / ISIN / TICKER.")
         else:
+            unique_identifiers = list(dict.fromkeys(raw_identifiers))
             with st.spinner("Загружаем сделки и считаем оборот..."):
-                try:
-                    client = MoexTurnoverClient()
-                    turnover = client.get_turnover(secid_input, start_date_input)
-                except Exception as exc:
-                    st.error(f"Ошибка при расчете оборота: {exc}")
-                else:
-                    st.success("Расчет завершен")
-                    board_items = turnover.get("board_turnover", {})
-                    if board_items:
-                        board_df = pd.DataFrame(
-                            [{"board": board, "turnover": value} for board, value in board_items.items()]
-                        ).sort_values("turnover", ascending=False)
-                        st.dataframe(board_df, use_container_width=True)
-                    else:
-                        st.info("Нет данных по boards за указанный период.")
+                client = MoexTurnoverClient()
+                report_rows = []
+                errors = []
+                board_rows = []
 
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("TOTAL regular", f"{turnover['TOTAL_regular']:,.2f}")
-                    col2.metric("TOTAL SPEQ", f"{turnover['TOTAL_SPEQ']:,.2f}")
-                    col3.metric("TOTAL NDM", f"{turnover['TOTAL_NDM']:,.2f}")
-                    col4.metric("TOTAL all", f"{turnover['TOTAL_all']:,.2f}")
+                for identifier in unique_identifiers:
+                    try:
+                        resolved_secid = resolve_identifier_to_secid(identifier)
+                        if not resolved_secid:
+                            raise ValueError(f"Инструмент '{identifier}' не найден на MOEX")
+                        turnover = client.get_turnover(resolved_secid, start_date_input, end_date_input)
+                    except Exception as exc:
+                        errors.append(f"{identifier}: {exc}")
+                        continue
+
+                    report_rows.append(
+                        {
+                            "input": identifier,
+                            "SECID": resolved_secid,
+                            "TOTAL_regular": float(turnover["TOTAL_regular"]),
+                            "TOTAL_SPEQ": float(turnover["TOTAL_SPEQ"]),
+                            "TOTAL_NDM": float(turnover["TOTAL_NDM"]),
+                            "TOTAL_all": float(turnover["TOTAL_all"]),
+                        }
+                    )
+                    for board, value in turnover.get("board_turnover", {}).items():
+                        board_rows.append(
+                            {
+                                "input": identifier,
+                                "SECID": resolved_secid,
+                                "board": board,
+                                "turnover": float(value),
+                            }
+                        )
+
+            if report_rows:
+                st.success("Расчет завершен")
+                report_df = pd.DataFrame(report_rows)
+                st.dataframe(report_df, use_container_width=True)
+
+                totals = report_df[["TOTAL_regular", "TOTAL_SPEQ", "TOTAL_NDM", "TOTAL_all"]].sum()
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("TOTAL regular", f"{totals['TOTAL_regular']:,.2f}")
+                col2.metric("TOTAL SPEQ", f"{totals['TOTAL_SPEQ']:,.2f}")
+                col3.metric("TOTAL NDM", f"{totals['TOTAL_NDM']:,.2f}")
+                col4.metric("TOTAL all", f"{totals['TOTAL_all']:,.2f}")
+
+                if board_rows:
+                    st.markdown("**Оборот по boards**")
+                    board_df = pd.DataFrame(board_rows).sort_values(
+                        ["input", "turnover"], ascending=[True, False]
+                    )
+                    st.dataframe(board_df, use_container_width=True)
+                else:
+                    st.info("Нет данных по boards за указанный период.")
+
+            if errors:
+                st.warning("Не удалось посчитать часть инструментов:")
+                for error in errors:
+                    st.write(f"- {error}")
+
+            if not report_rows:
+                st.error("Не удалось выполнить расчет ни для одного инструмента.")
 
     st.stop()
+
 
 # ---------------------------
 # REPO duration settings
