@@ -1,7 +1,7 @@
-"""MOEX ISS trades turnover loader.
+"""MOEX ISS history turnover loader.
 
 This module fetches traded boards for a security and computes turnover from
-`trades` endpoint data only (PRICE * QUANTITY).
+`history` endpoint data.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class BoardInfo:
 
 
 class MoexTurnoverClient:
-    """Client for loading MOEX turnover from the ISS trades endpoint."""
+    """Client for loading MOEX turnover from the ISS history endpoint."""
 
     def __init__(self, timeout: int = 30) -> None:
         self.timeout = timeout
@@ -58,45 +58,63 @@ class MoexTurnoverClient:
 
         return regular, speq, ndm
 
-    def get_board_turnover(self, secid: str, board: BoardInfo, start_date: str) -> float:
-        """Fetch all trades for the board (with pagination) and return turnover."""
+    def get_board_turnover(
+        self,
+        secid: str,
+        board: BoardInfo,
+        start_date: str,
+        end_date: str | None = None,
+    ) -> float:
+        """Fetch history rows for board and return turnover."""
         start = 0
         turnover = 0.0
 
         while True:
+            params = {
+                "from": start_date,
+                "start": start,
+                "iss.only": "history",
+                "iss.meta": "off",
+            }
+            if end_date:
+                params["till"] = end_date
+
             payload = self._get_json(
-                (
-                    f"/engines/{DEFAULT_ENGINE}/markets/{board.market}/boards/{board.boardid}"
-                    f"/securities/{secid}/trades.json"
-                ),
-                params={
-                    "from": start_date,
-                    "start": start,
-                    "iss.only": "trades",
-                    "iss.meta": "off",
-                },
+                f"/history/engines/{DEFAULT_ENGINE}/markets/{board.market}/securities/{secid}.json",
+                params=params,
             )
 
-            data = payload.get("trades", {}).get("data", [])
-            columns = payload.get("trades", {}).get("columns", [])
+            data = payload.get("history", {}).get("data", [])
+            columns = payload.get("history", {}).get("columns", [])
 
             if not data:
                 break
 
             df = pd.DataFrame(data, columns=columns)
-            turnover += (pd.to_numeric(df["PRICE"], errors="coerce") * pd.to_numeric(df["QUANTITY"], errors="coerce")).sum()
-            start += len(df)
+            if "BOARDID" in df.columns:
+                df = df[df["BOARDID"].astype(str).str.upper() == board.boardid.upper()]
+
+            if "VALUE" in df.columns:
+                board_value = pd.to_numeric(df["VALUE"], errors="coerce").sum()
+            else:
+                board_value = (
+                    pd.to_numeric(df.get("CLOSE"), errors="coerce")
+                    * pd.to_numeric(df.get("VOLUME"), errors="coerce")
+                ).sum()
+
+            turnover += float(board_value)
+            start += len(data)
 
         return float(turnover)
 
-    def get_turnover(self, secid: str, start_date: str) -> Dict[str, object]:
+    def get_turnover(self, secid: str, start_date: str, end_date: str | None = None) -> Dict[str, object]:
         """Calculate turnover totals by board category and overall."""
         regular_boards, speq_boards, ndm_boards = self.get_traded_boards(secid)
 
         board_turnover: Dict[str, float] = {}
-        total_regular = self._sum_category(secid, start_date, regular_boards, board_turnover)
-        total_speq = self._sum_category(secid, start_date, speq_boards, board_turnover)
-        total_ndm = self._sum_category(secid, start_date, ndm_boards, board_turnover)
+        total_regular = self._sum_category(secid, start_date, end_date, regular_boards, board_turnover)
+        total_speq = self._sum_category(secid, start_date, end_date, speq_boards, board_turnover)
+        total_ndm = self._sum_category(secid, start_date, end_date, ndm_boards, board_turnover)
 
         return {
             "board_turnover": board_turnover,
@@ -110,13 +128,14 @@ class MoexTurnoverClient:
         self,
         secid: str,
         start_date: str,
+        end_date: str | None,
         boards: Iterable[BoardInfo],
         board_turnover: Dict[str, float],
     ) -> float:
         category_total = 0.0
 
         for board in boards:
-            value = self.get_board_turnover(secid, board, start_date)
+            value = self.get_board_turnover(secid, board, start_date, end_date)
             board_turnover[board.boardid] = value
             category_total += value
 
