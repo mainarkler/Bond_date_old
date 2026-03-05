@@ -1,7 +1,7 @@
-"""MOEX ISS trades turnover loader.
+"""MOEX ISS history turnover loader.
 
 This module fetches traded boards for a security and computes turnover from
-`trades` endpoint data only (PRICE * QUANTITY).
+`history` endpoint data.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class BoardInfo:
 
 
 class MoexTurnoverClient:
-    """Client for loading MOEX turnover from the ISS trades endpoint."""
+    """Client for loading MOEX turnover from the ISS history endpoint."""
 
     def __init__(self, timeout: int = 30) -> None:
         self.timeout = timeout
@@ -65,7 +65,7 @@ class MoexTurnoverClient:
         start_date: str,
         end_date: str | None = None,
     ) -> float:
-        """Fetch all trades for the board (with pagination) and return turnover."""
+        """Fetch history rows for board and return turnover."""
         start = 0
         turnover = 0.0
 
@@ -73,29 +73,37 @@ class MoexTurnoverClient:
             params = {
                 "from": start_date,
                 "start": start,
-                "iss.only": "trades",
+                "iss.only": "history",
                 "iss.meta": "off",
             }
             if end_date:
                 params["till"] = end_date
 
             payload = self._get_json(
-                (
-                    f"/engines/{DEFAULT_ENGINE}/markets/{board.market}/boards/{board.boardid}"
-                    f"/securities/{secid}/trades.json"
-                ),
+                f"/history/engines/{DEFAULT_ENGINE}/markets/{board.market}/securities/{secid}.json",
                 params=params,
             )
 
-            data = payload.get("trades", {}).get("data", [])
-            columns = payload.get("trades", {}).get("columns", [])
+            data = payload.get("history", {}).get("data", [])
+            columns = payload.get("history", {}).get("columns", [])
 
             if not data:
                 break
 
             df = pd.DataFrame(data, columns=columns)
-            turnover += (pd.to_numeric(df["PRICE"], errors="coerce") * pd.to_numeric(df["QUANTITY"], errors="coerce")).sum()
-            start += len(df)
+            if "BOARDID" in df.columns:
+                df = df[df["BOARDID"].astype(str).str.upper() == board.boardid.upper()]
+
+            if "VALUE" in df.columns:
+                board_value = pd.to_numeric(df["VALUE"], errors="coerce").sum()
+            else:
+                board_value = (
+                    pd.to_numeric(df.get("CLOSE"), errors="coerce")
+                    * pd.to_numeric(df.get("VOLUME"), errors="coerce")
+                ).sum()
+
+            turnover += float(board_value)
+            start += len(data)
 
         return float(turnover)
 

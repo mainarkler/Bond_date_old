@@ -1878,7 +1878,7 @@ if st.session_state["active_view"] == "index_analytics":
 # ---------------------------
 if st.session_state["active_view"] == "moex_turnover":
     st.subheader("📊 MOEX turnover (trades)")
-    st.markdown("Расчет оборота акции через MOEX ISS endpoint `trades`.")
+    st.markdown("Расчет оборота акции через MOEX ISS endpoint `history`.")
 
     secid_input = st.text_area(
         "SECID / ISIN / TICKER (каждый инструмент с новой строки)",
