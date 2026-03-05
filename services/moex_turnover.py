@@ -26,16 +26,25 @@ class MoexTurnoverClient:
         response.raise_for_status()
         return response.json()
 
-    def get_boards(self, secid: str) -> Tuple[List[str], List[str], List[str]]:
-        """Get traded boards for security: regular, SPEQ, NDM."""
+    def get_boards(self, secid: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+        """Get traded boards with markets for categories: regular, SPEQ, NDM."""
         url = f"{BASE_URL}/securities/{secid}/boards.json"
         payload = self._get_json(url, params={"iss.meta": "off"})
         df = pd.DataFrame(payload["boards"]["data"], columns=payload["boards"]["columns"])
         df = df[df["is_traded"] == 1].copy()
 
-        regular = df[(df["market"] == "shares") & (df["boardid"] != "SPEQ")]["boardid"].tolist()
-        speq = df[df["boardid"] == "SPEQ"]["boardid"].tolist()
-        ndm = df[df["market"].isin(["ndm", "sharesndm"])]["boardid"].tolist()
+        regular = [
+            (str(row.market), str(row.boardid))
+            for row in df[(df["market"] == "shares") & (df["boardid"] != "SPEQ")].itertuples()
+        ]
+        speq = [
+            (str(row.market), str(row.boardid))
+            for row in df[df["boardid"] == "SPEQ"].itertuples()
+        ]
+        ndm = [
+            (str(row.market), str(row.boardid))
+            for row in df[df["market"].isin(["ndm", "sharesndm"])].itertuples()
+        ]
         return regular, speq, ndm
 
     def get_trades_by_day(
@@ -47,39 +56,46 @@ class MoexTurnoverClient:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame:
-        """Download trades for period and aggregate turnover by day."""
+        """Download history for period and aggregate board turnover by day."""
         start = 0
         frames: list[pd.DataFrame] = []
 
         while True:
-            if board:
-                url = f"{BASE_URL}/engines/{engine}/markets/{market}/boards/{board}/securities/{secid}/trades.json"
-            else:
-                url = f"{BASE_URL}/engines/{engine}/markets/{market}/securities/{secid}/trades.json"
+            url = f"{BASE_URL}/history/engines/{engine}/markets/{market}/securities/{secid}.json"
 
-            params = {"start": start, "iss.only": "trades", "iss.meta": "off"}
+            params = {
+                "start": start,
+                "limit": self.limit,
+                "iss.only": "history",
+                "iss.meta": "off",
+                "history.columns": "TRADEDATE,BOARDID,VALUE",
+            }
             if start_date:
                 params["from"] = start_date
             if end_date:
                 params["till"] = end_date
 
             payload = self._get_json(url, params=params)
-            data = payload.get("trades", {}).get("data", [])
-            columns = payload.get("trades", {}).get("columns", [])
+            data = payload.get("history", {}).get("data", [])
+            columns = payload.get("history", {}).get("columns", [])
             if not data:
                 break
 
             df = pd.DataFrame(data, columns=columns)
-            required = ["TRADEDATE", "PRICE", "QUANTITY"]
-            missing = [col for col in required if col not in df.columns]
-            if missing:
+            required = ["TRADEDATE", "VALUE"]
+            if any(col not in df.columns for col in required):
                 start += len(data)
                 continue
 
-            df = df[required].copy()
-            df["PRICE"] = pd.to_numeric(df["PRICE"], errors="coerce")
-            df["QUANTITY"] = pd.to_numeric(df["QUANTITY"], errors="coerce")
-            df["TURNOVER"] = df["PRICE"] * df["QUANTITY"]
+            if board and "BOARDID" in df.columns:
+                df = df[df["BOARDID"].astype(str).str.upper() == board.upper()]
+
+            if df.empty:
+                start += len(data)
+                continue
+
+            df = df[["TRADEDATE", "VALUE"]].copy()
+            df["TURNOVER"] = pd.to_numeric(df["VALUE"], errors="coerce")
             frames.append(df[["TRADEDATE", "TURNOVER"]])
             start += len(data)
 
@@ -88,6 +104,7 @@ class MoexTurnoverClient:
 
         df_all = pd.concat(frames, ignore_index=True)
         return df_all.groupby("TRADEDATE", as_index=False)["TURNOVER"].sum()
+
 
     def get_history(self, secid: str, date_from: str, date_to: str | None = None) -> pd.DataFrame:
         """Download history VALUE by day."""
@@ -127,9 +144,9 @@ class MoexTurnoverClient:
         regular_boards, speq_boards, ndm_boards = self.get_boards(secid)
 
         categories = {
-            "REGULAR": [("shares", b) for b in regular_boards],
-            "SPEQ": [("shares", b) for b in speq_boards],
-            "NDM": [("ndm", b) for b in ndm_boards],
+            "REGULAR": regular_boards,
+            "SPEQ": speq_boards,
+            "NDM": ndm_boards,
         }
 
         category_frames: dict[str, pd.DataFrame] = {}
