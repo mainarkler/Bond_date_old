@@ -58,23 +58,33 @@ class MoexTurnoverClient:
 
         return regular, speq, ndm
 
-    def get_board_turnover(self, secid: str, board: BoardInfo, start_date: str) -> float:
+    def get_board_turnover(
+        self,
+        secid: str,
+        board: BoardInfo,
+        start_date: str,
+        end_date: str | None = None,
+    ) -> float:
         """Fetch all trades for the board (with pagination) and return turnover."""
         start = 0
         turnover = 0.0
 
         while True:
+            params = {
+                "from": start_date,
+                "start": start,
+                "iss.only": "trades",
+                "iss.meta": "off",
+            }
+            if end_date:
+                params["till"] = end_date
+
             payload = self._get_json(
                 (
                     f"/engines/{DEFAULT_ENGINE}/markets/{board.market}/boards/{board.boardid}"
                     f"/securities/{secid}/trades.json"
                 ),
-                params={
-                    "from": start_date,
-                    "start": start,
-                    "iss.only": "trades",
-                    "iss.meta": "off",
-                },
+                params=params,
             )
 
             data = payload.get("trades", {}).get("data", [])
@@ -89,14 +99,14 @@ class MoexTurnoverClient:
 
         return float(turnover)
 
-    def get_turnover(self, secid: str, start_date: str) -> Dict[str, object]:
+    def get_turnover(self, secid: str, start_date: str, end_date: str | None = None) -> Dict[str, object]:
         """Calculate turnover totals by board category and overall."""
         regular_boards, speq_boards, ndm_boards = self.get_traded_boards(secid)
 
         board_turnover: Dict[str, float] = {}
-        total_regular = self._sum_category(secid, start_date, regular_boards, board_turnover)
-        total_speq = self._sum_category(secid, start_date, speq_boards, board_turnover)
-        total_ndm = self._sum_category(secid, start_date, ndm_boards, board_turnover)
+        total_regular = self._sum_category(secid, start_date, end_date, regular_boards, board_turnover)
+        total_speq = self._sum_category(secid, start_date, end_date, speq_boards, board_turnover)
+        total_ndm = self._sum_category(secid, start_date, end_date, ndm_boards, board_turnover)
 
         return {
             "board_turnover": board_turnover,
@@ -110,13 +120,14 @@ class MoexTurnoverClient:
         self,
         secid: str,
         start_date: str,
+        end_date: str | None,
         boards: Iterable[BoardInfo],
         board_turnover: Dict[str, float],
     ) -> float:
         category_total = 0.0
 
         for board in boards:
-            value = self.get_board_turnover(secid, board, start_date)
+            value = self.get_board_turnover(secid, board, start_date, end_date)
             board_turnover[board.boardid] = value
             category_total += value
 

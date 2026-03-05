@@ -1886,12 +1886,35 @@ if st.session_state["active_view"] == "moex_turnover":
         placeholder="SBER\nRU0009029540\nGAZP",
         key="moex_identifiers",
     )
-    start_date_value = st.date_input(
-        "START_DATE",
-        value=datetime.now().date() - timedelta(days=30),
-        key="moex_start_date",
-    )
+    use_interval = st.checkbox("Считать за интервал дат", value=False, key="moex_use_interval")
+    if use_interval:
+        date_col_left, date_col_right = st.columns(2)
+        with date_col_left:
+            start_date_value = st.date_input(
+                "START_DATE",
+                value=datetime.now().date() - timedelta(days=30),
+                key="moex_start_date",
+            )
+        with date_col_right:
+            end_date_value = st.date_input(
+                "END_DATE",
+                value=datetime.now().date(),
+                key="moex_end_date",
+            )
+        if end_date_value < start_date_value:
+            st.error("END_DATE не может быть раньше START_DATE.")
+            st.stop()
+    else:
+        single_date_value = st.date_input(
+            "DATE",
+            value=datetime.now().date() - timedelta(days=1),
+            key="moex_single_date",
+        )
+        start_date_value = single_date_value
+        end_date_value = single_date_value
+
     start_date_input = start_date_value.strftime("%Y-%m-%d")
+    end_date_input = end_date_value.strftime("%Y-%m-%d")
 
     if st.button("Рассчитать оборот", key="calc_moex_turnover"):
         raw_identifiers = [line.strip().upper() for line in secid_input.splitlines() if line.strip()]
@@ -1910,7 +1933,7 @@ if st.session_state["active_view"] == "moex_turnover":
                         resolved_secid = resolve_identifier_to_secid(identifier)
                         if not resolved_secid:
                             raise ValueError(f"Инструмент '{identifier}' не найден на MOEX")
-                        turnover = client.get_turnover(resolved_secid, start_date_input)
+                        turnover = client.get_turnover(resolved_secid, start_date_input, end_date_input)
                     except Exception as exc:
                         errors.append(f"{identifier}: {exc}")
                         continue
