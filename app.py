@@ -621,7 +621,9 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     day_settle = to_decimal(day_settle_raw)
 
     multiplier = stepprice / minstep
-    vm = (day_settle - prev_settle) * multiplier
+    vm_clearing = (day_settle - prev_settle) * multiplier
+    ref_price = last_price if last_price is not None else (last_settle if last_settle is not None else day_settle)
+    vm_live = (ref_price - prev_settle) * multiplier
 
     return {
         "TRADE_NAME": trade_name_clean,
@@ -633,7 +635,8 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
         "LAST_PRICE": float(money_decimal(last_price)) if last_price is not None else None,
         "QUOTE_TIME": str(update_time_raw) if update_time_raw is not None else None,
         "MULTIPLIER": float(multiplier),
-        "VM": float(money_decimal(vm)),
+        "VM_CLEARING": float(money_decimal(vm_clearing)),
+        "VM": float(money_decimal(vm_live)),
     }
 
 
@@ -1401,6 +1404,7 @@ if st.session_state["active_view"] == "vm":
                     "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
                     "MULTIPLIER": vm_data["MULTIPLIER"],
                     "VM": vm_data["VM"],
+                    "VM_CLEARING": vm_data["VM_CLEARING"],
                     "QUANTITY": quantity,
                     "POSITION_VM": position_vm,
                     "USD_RUB": usd_rub_data["usd_rub"],
@@ -1419,7 +1423,8 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Последняя цена:** {vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']}")
         st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
-        st.markdown(f"**Вариационная маржа за день:** {vm_report['VM']:.2f}")
+        st.markdown(f"**Вариационная маржа (по последней цене):** {vm_report['VM']:.2f}")
+        st.markdown(f"**VM клиринговая (SETTLEPRICEDAY - PREVSETTLEPRICE):** {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}")
         st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
         st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
@@ -1447,7 +1452,8 @@ if st.session_state["active_view"] == "vm":
             f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']})\n"
             f"Дата клиринга: {vm_report['TRADEDATE']}\n"
             f"Кол-во: {vm_report['QUANTITY']}\n"
-            f"VM за день: {vm_report['VM']:.2f}\n"
+            f"VM (по последней цене): {vm_report['VM']:.2f}\n"
+            f"VM клиринговая: {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}\n"
             f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
             f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
