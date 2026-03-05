@@ -1,34 +1,28 @@
 """MOEX ISS history turnover loader.
 
-This module fetches traded boards for a security and computes turnover from
-`history` endpoint data.
+This module computes turnover from:
+`/history/engines/stock/markets/shares/securities/{SECID}.json`
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict
 
 import pandas as pd
 import requests
 
 BASE_URL = "https://iss.moex.com/iss"
 DEFAULT_ENGINE = "stock"
-
-
-@dataclass(frozen=True)
-class BoardInfo:
-    """Describes a board and the market where trades should be requested."""
-
-    boardid: str
-    market: str
+DEFAULT_MARKET = "shares"
+DEFAULT_LIMIT = 100
 
 
 class MoexTurnoverClient:
     """Client for loading MOEX turnover from the ISS history endpoint."""
 
-    def __init__(self, timeout: int = 30) -> None:
+    def __init__(self, timeout: int = 30, limit: int = DEFAULT_LIMIT) -> None:
         self.timeout = timeout
+        self.limit = limit
         self.session = requests.Session()
         self.session.trust_env = False
 
@@ -38,41 +32,16 @@ class MoexTurnoverClient:
         response.raise_for_status()
         return response.json()
 
-    def get_traded_boards(self, secid: str) -> Tuple[List[BoardInfo], List[BoardInfo], List[BoardInfo]]:
-        """Return traded boards split by categories: regular, SPEQ, NDM."""
-        payload = self._get_json(
-            f"/securities/{secid}/boards.json",
-            params={"iss.meta": "off"},
-        )
-
-        df = pd.DataFrame(payload["boards"]["data"], columns=payload["boards"]["columns"])
-        traded = df[df["is_traded"] == 1].copy()
-
-        regular_df = traded[(traded["market"] == "shares") & (traded["boardid"] != "SPEQ")]
-        speq_df = traded[traded["boardid"] == "SPEQ"]
-        ndm_df = traded[traded["market"].isin(["ndm", "sharesndm"])]
-
-        regular = [BoardInfo(boardid=row.boardid, market=row.market) for row in regular_df.itertuples()]
-        speq = [BoardInfo(boardid=row.boardid, market=row.market) for row in speq_df.itertuples()]
-        ndm = [BoardInfo(boardid=row.boardid, market=row.market) for row in ndm_df.itertuples()]
-
-        return regular, speq, ndm
-
-    def get_board_turnover(
-        self,
-        secid: str,
-        board: BoardInfo,
-        start_date: str,
-        end_date: str | None = None,
-    ) -> float:
-        """Fetch history rows for board and return turnover."""
+    def get_turnover(self, secid: str, start_date: str, end_date: str | None = None) -> Dict[str, object]:
+        """Calculate turnover for security using history endpoint and VALUE field."""
         start = 0
-        turnover = 0.0
+        total_value = 0.0
 
         while True:
             params = {
                 "from": start_date,
                 "start": start,
+                "limit": self.limit,
                 "iss.only": "history",
                 "iss.meta": "off",
             }
@@ -80,66 +49,34 @@ class MoexTurnoverClient:
                 params["till"] = end_date
 
             payload = self._get_json(
-                f"/history/engines/{DEFAULT_ENGINE}/markets/{board.market}/securities/{secid}.json",
+                f"/history/engines/{DEFAULT_ENGINE}/markets/{DEFAULT_MARKET}/securities/{secid}.json",
                 params=params,
             )
 
             data = payload.get("history", {}).get("data", [])
             columns = payload.get("history", {}).get("columns", [])
-
             if not data:
                 break
 
             df = pd.DataFrame(data, columns=columns)
-            if "BOARDID" in df.columns:
-                df = df[df["BOARDID"].astype(str).str.upper() == board.boardid.upper()]
-
             if "VALUE" in df.columns:
-                board_value = pd.to_numeric(df["VALUE"], errors="coerce").sum()
+                page_value = pd.to_numeric(df["VALUE"], errors="coerce").sum()
             else:
-                board_value = (
+                page_value = (
                     pd.to_numeric(df.get("CLOSE"), errors="coerce")
                     * pd.to_numeric(df.get("VOLUME"), errors="coerce")
                 ).sum()
 
-            turnover += float(board_value)
+            total_value += float(page_value)
             start += len(data)
 
-        return float(turnover)
-
-    def get_turnover(self, secid: str, start_date: str, end_date: str | None = None) -> Dict[str, object]:
-        """Calculate turnover totals by board category and overall."""
-        regular_boards, speq_boards, ndm_boards = self.get_traded_boards(secid)
-
-        board_turnover: Dict[str, float] = {}
-        total_regular = self._sum_category(secid, start_date, end_date, regular_boards, board_turnover)
-        total_speq = self._sum_category(secid, start_date, end_date, speq_boards, board_turnover)
-        total_ndm = self._sum_category(secid, start_date, end_date, ndm_boards, board_turnover)
-
         return {
-            "board_turnover": board_turnover,
-            "TOTAL_regular": total_regular,
-            "TOTAL_SPEQ": total_speq,
-            "TOTAL_NDM": total_ndm,
-            "TOTAL_all": total_regular + total_speq + total_ndm,
+            "board_turnover": {"SHARES": float(total_value)},
+            "TOTAL_regular": float(total_value),
+            "TOTAL_SPEQ": 0.0,
+            "TOTAL_NDM": 0.0,
+            "TOTAL_all": float(total_value),
         }
-
-    def _sum_category(
-        self,
-        secid: str,
-        start_date: str,
-        end_date: str | None,
-        boards: Iterable[BoardInfo],
-        board_turnover: Dict[str, float],
-    ) -> float:
-        category_total = 0.0
-
-        for board in boards:
-            value = self.get_board_turnover(secid, board, start_date, end_date)
-            board_turnover[board.boardid] = value
-            category_total += value
-
-        return float(category_total)
 
 
 def print_turnover_report(turnover: Dict[str, object]) -> None:
@@ -157,7 +94,8 @@ def print_turnover_report(turnover: Dict[str, object]) -> None:
 if __name__ == "__main__":
     SECID = "SBER"
     START_DATE = "2026-01-01"
+    END_DATE = "2026-03-05"
 
     client = MoexTurnoverClient()
-    result = client.get_turnover(SECID, START_DATE)
+    result = client.get_turnover(SECID, START_DATE, END_DATE)
     print_turnover_report(result)
