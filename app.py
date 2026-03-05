@@ -18,15 +18,13 @@ from email_compose import render_email_compose_section
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from services.report_service import generate_report_data
+from services.moex_turnover import MoexTurnoverClient
 
 # ---------------------------
 # Streamlit page setup
 # ---------------------------
 st.set_page_config(page_title="РЕПО претрейд", page_icon="📈", layout="wide")
 st.title("Stat bord")
-report_context = generate_report_data()
-st.caption(f"Обновлено: {report_context['generated_at_utc']}")
 
 # ---------------------------
 # Session state defaults
@@ -45,7 +43,7 @@ if "calendar_last_report" not in st.session_state:
     st.session_state["calendar_last_report"] = None
 
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
-if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics"}:
+if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics", "moex_turnover"}:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
 # ---------------------------
@@ -113,6 +111,13 @@ if st.session_state["active_view"] == "home":
         st.caption("Загрузка состава индекса по датам и построение матрицы весов.")
         if st.button("Открыть", key="open_index_analytics", use_container_width=True):
             st.session_state["active_view"] = "index_analytics"
+            trigger_rerun()
+    moex_col, _ = st.columns(2)
+    with moex_col:
+        st.markdown("### MOEX turnover")
+        st.caption("Расчет оборота по сделкам MOEX ISS trades: regular / SPEQ / NDM.")
+        if st.button("Открыть", key="open_moex_turnover", use_container_width=True):
+            st.session_state["active_view"] = "moex_turnover"
             trigger_rerun()
     st.stop()
 
@@ -1844,6 +1849,48 @@ if st.session_state["active_view"] == "sell_stres":
 # ---------------------------
 if st.session_state["active_view"] == "index_analytics":
     open_index_analytics_sheet()
+    st.stop()
+
+# ---------------------------
+# MOEX turnover view
+# ---------------------------
+if st.session_state["active_view"] == "moex_turnover":
+    st.subheader("📊 MOEX turnover (trades)")
+    st.markdown("Расчет оборота акции через MOEX ISS endpoint `trades`.")
+
+    secid_col, date_col = st.columns(2)
+    with secid_col:
+        secid_input = st.text_input("SECID", value="SBER").strip().upper()
+    with date_col:
+        start_date_input = st.text_input("START_DATE (YYYY-MM-DD)", value="2026-01-01").strip()
+
+    if st.button("Рассчитать оборот", key="calc_moex_turnover"):
+        if not secid_input:
+            st.error("Укажите SECID.")
+        else:
+            with st.spinner("Загружаем сделки и считаем оборот..."):
+                try:
+                    client = MoexTurnoverClient()
+                    turnover = client.get_turnover(secid_input, start_date_input)
+                except Exception as exc:
+                    st.error(f"Ошибка при расчете оборота: {exc}")
+                else:
+                    st.success("Расчет завершен")
+                    board_items = turnover.get("board_turnover", {})
+                    if board_items:
+                        board_df = pd.DataFrame(
+                            [{"board": board, "turnover": value} for board, value in board_items.items()]
+                        ).sort_values("turnover", ascending=False)
+                        st.dataframe(board_df, use_container_width=True)
+                    else:
+                        st.info("Нет данных по boards за указанный период.")
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("TOTAL regular", f"{turnover['TOTAL_regular']:,.2f}")
+                    col2.metric("TOTAL SPEQ", f"{turnover['TOTAL_SPEQ']:,.2f}")
+                    col3.metric("TOTAL NDM", f"{turnover['TOTAL_NDM']:,.2f}")
+                    col4.metric("TOTAL all", f"{turnover['TOTAL_all']:,.2f}")
+
     st.stop()
 
 # ---------------------------
