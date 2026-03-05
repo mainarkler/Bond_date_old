@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -20,11 +21,23 @@ class MoexTurnoverClient:
         self.limit = limit
         self.session = requests.Session()
         self.session.trust_env = False
+        self.session.headers.update(
+            {
+                "User-Agent": "python-requests/iss-moex-script",
+                "Accept": "application/json,text/plain,*/*",
+            }
+        )
 
     def _get_json(self, url: str, params: dict | None = None) -> dict:
         response = self.session.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
-        return response.json()
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            body_preview = (response.text or "")[:200].replace("\n", " ")
+            raise RuntimeError(
+                f"MOEX ISS вернул не-JSON для {url} (status={response.status_code}): {body_preview}"
+            ) from exc
 
     def get_boards(self, secid: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
         """Get traded boards with markets for categories: regular, SPEQ, NDM."""
@@ -62,7 +75,6 @@ class MoexTurnoverClient:
 
         while True:
             url = f"{BASE_URL}/history/engines/{engine}/markets/{market}/securities/{secid}.json"
-
             params = {
                 "start": start,
                 "limit": self.limit,
@@ -82,14 +94,12 @@ class MoexTurnoverClient:
                 break
 
             df = pd.DataFrame(data, columns=columns)
-            required = ["TRADEDATE", "VALUE"]
-            if any(col not in df.columns for col in required):
+            if "TRADEDATE" not in df.columns or "VALUE" not in df.columns:
                 start += len(data)
                 continue
 
             if board and "BOARDID" in df.columns:
                 df = df[df["BOARDID"].astype(str).str.upper() == board.upper()]
-
             if df.empty:
                 start += len(data)
                 continue
@@ -101,10 +111,8 @@ class MoexTurnoverClient:
 
         if not frames:
             return pd.DataFrame(columns=["TRADEDATE", "TURNOVER"])
-
         df_all = pd.concat(frames, ignore_index=True)
         return df_all.groupby("TRADEDATE", as_index=False)["TURNOVER"].sum()
-
 
     def get_history(self, secid: str, date_from: str, date_to: str | None = None) -> pd.DataFrame:
         """Download history VALUE by day."""
@@ -136,47 +144,48 @@ class MoexTurnoverClient:
 
         if not frames:
             return pd.DataFrame(columns=["TRADEDATE", "VALUE"])
-
         return pd.concat(frames, ignore_index=True)
 
     def fetch_combined_daily(self, secid: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
-        """Get daily trades categories + history and combine into single table."""
+        """Get daily category values + history and combine into single table."""
         regular_boards, speq_boards, ndm_boards = self.get_boards(secid)
-
-        categories = {
-            "REGULAR": regular_boards,
-            "SPEQ": speq_boards,
-            "NDM": ndm_boards,
-        }
+        categories = {"REGULAR": regular_boards, "SPEQ": speq_boards, "NDM": ndm_boards}
 
         category_frames: dict[str, pd.DataFrame] = {}
         for category, board_items in categories.items():
-            trades_frames: list[pd.DataFrame] = []
+            category_parts: list[pd.DataFrame] = []
             for market, board in board_items:
-                df_trades = self.get_trades_by_day(
-                    secid=secid,
-                    engine=DEFAULT_ENGINE,
-                    market=market,
-                    board=board,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-                if not df_trades.empty:
-                    trades_frames.append(df_trades)
+                try:
+                    df_part = self.get_trades_by_day(
+                        secid=secid,
+                        engine=DEFAULT_ENGINE,
+                        market=market,
+                        board=board,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                except Exception:
+                    continue
+                if not df_part.empty:
+                    category_parts.append(df_part)
 
-            if trades_frames:
-                merged_cat = pd.concat(trades_frames, ignore_index=True)
+            if category_parts:
+                merged_cat = pd.concat(category_parts, ignore_index=True)
                 merged_cat = merged_cat.groupby("TRADEDATE", as_index=False)["TURNOVER"].sum()
                 merged_cat.rename(columns={"TURNOVER": category}, inplace=True)
                 category_frames[category] = merged_cat
             else:
                 category_frames[category] = pd.DataFrame(columns=["TRADEDATE", category])
 
+        try:
+            hist_df = self.get_history(secid, start_date, end_date)
+        except Exception:
+            hist_df = pd.DataFrame(columns=["TRADEDATE", "VALUE"])
+
         all_dates = pd.DataFrame(columns=["TRADEDATE"])
         for frame in category_frames.values():
             if not frame.empty:
                 all_dates = pd.concat([all_dates, frame[["TRADEDATE"]]], ignore_index=True)
-        hist_df = self.get_history(secid, start_date, end_date)
         if not hist_df.empty:
             all_dates = pd.concat([all_dates, hist_df[["TRADEDATE"]]], ignore_index=True)
 
