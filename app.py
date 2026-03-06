@@ -43,7 +43,15 @@ if "calendar_last_report" not in st.session_state:
     st.session_state["calendar_last_report"] = None
 
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
-if FORCED_ACTIVE_VIEW in {"repo", "calendar", "vm", "sell_stres", "index_analytics", "moex_turnover"}:
+if FORCED_ACTIVE_VIEW in {
+    "repo",
+    "calendar",
+    "vm",
+    "sell_stres",
+    "index_analytics",
+    "moex_turnover",
+    "market_statistics",
+}:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
 # ---------------------------
@@ -117,6 +125,12 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_moex_turnover", use_container_width=True):
             st.session_state["active_view"] = "moex_turnover"
             trigger_rerun()
+
+        st.markdown("### Статистика рынка")
+        st.caption("История объема торгов по акциям/облигациям с графиками и выгрузкой.")
+        if st.button("Открыть", key="open_market_statistics", use_container_width=True):
+            st.session_state["active_view"] = "market_statistics"
+            trigger_rerun()
     st.stop()
 
 # ---------------------------
@@ -151,6 +165,187 @@ def open_index_analytics_sheet():
         request_get=request_get,
         dataframe_to_excel_bytes=ss.dataframe_to_excel_bytes,
     )
+
+
+def resolve_market_security_profile(identifier: str, market_kind: str) -> dict:
+    normalized = identifier.strip().upper()
+    if not normalized:
+        raise ValueError("Пустой идентификатор")
+
+    response = request_get(
+        "https://iss.moex.com/iss/securities.json",
+        params={"q": normalized, "iss.meta": "off"},
+        timeout=200,
+    )
+    js = response.json()
+    df = pd.DataFrame(js["securities"]["data"], columns=js["securities"]["columns"])
+    if df.empty:
+        raise ValueError(f"Инструмент '{identifier}' не найден на MOEX")
+
+    if "group" in df.columns:
+        if market_kind == "shares":
+            df_filtered = df[df["group"].astype(str).str.contains("share", case=False, na=False)]
+        else:
+            df_filtered = df[df["group"].astype(str).str.contains("bond", case=False, na=False)]
+        if not df_filtered.empty:
+            df = df_filtered
+
+    if "secid" in df.columns:
+        exact_secid = df[df["secid"].astype(str).str.upper() == normalized]
+        if not exact_secid.empty:
+            row = exact_secid.iloc[0]
+        elif "isin" in df.columns:
+            exact_isin = df[df["isin"].astype(str).str.upper() == normalized]
+            row = exact_isin.iloc[0] if not exact_isin.empty else df.iloc[0]
+        else:
+            row = df.iloc[0]
+    else:
+        row = df.iloc[0]
+
+    secid = str(row.get("secid", "")).strip().upper()
+    if not secid:
+        raise ValueError(f"Не удалось определить SECID для '{identifier}'")
+
+    return {
+        "input": identifier,
+        "secid": secid,
+        "isin": str(row.get("isin", "")).strip().upper(),
+        "shortname": str(row.get("shortname", "")).strip(),
+        "emitent_title": str(row.get("emitent_title", "")).strip(),
+    }
+
+
+def load_market_history_values(secid: str, market_kind: str, start_date: str, end_date: str) -> pd.DataFrame:
+    start = 0
+    all_rows = []
+    columns = []
+    while True:
+        url = f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/securities/{secid}.json"
+        response = request_get(
+            url,
+            params={
+                "from": start_date,
+                "till": end_date,
+                "start": start,
+                "iss.only": "history",
+                "iss.meta": "off",
+                "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,BOARDID,SHORTNAME,SECID",
+            },
+            timeout=200,
+        )
+        payload = response.json().get("history", {})
+        rows = payload.get("data", [])
+        columns = payload.get("columns", columns)
+        if not rows:
+            break
+        all_rows.extend(rows)
+        start += len(rows)
+
+    if not all_rows:
+        return pd.DataFrame(columns=["TRADEDATE", "VALUE", "NUMTRADES", "VOLUME", "SECID", "SHORTNAME"])
+
+    df = pd.DataFrame(all_rows, columns=columns)
+    for col in ["VALUE", "NUMTRADES", "VOLUME"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        else:
+            df[col] = 0.0
+    df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"], errors="coerce")
+    df = df.dropna(subset=["TRADEDATE"])
+
+    agg = (
+        df.groupby(["TRADEDATE", "SECID", "SHORTNAME"], as_index=False)
+        .agg(VALUE=("VALUE", "sum"), NUMTRADES=("NUMTRADES", "sum"), VOLUME=("VOLUME", "sum"))
+        .sort_values(["TRADEDATE", "SECID"])
+    )
+    return agg
+
+
+def load_market_wide_history_values(market_kind: str, start_date: str, end_date: str) -> pd.DataFrame:
+    start = 0
+    all_rows = []
+    columns = []
+    while True:
+        url = f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/securities.json"
+        response = request_get(
+            url,
+            params={
+                "from": start_date,
+                "till": end_date,
+                "start": start,
+                "iss.only": "history",
+                "iss.meta": "off",
+                "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID",
+            },
+            timeout=200,
+        )
+        payload = response.json().get("history", {})
+        rows = payload.get("data", [])
+        columns = payload.get("columns", columns)
+        if not rows:
+            break
+        all_rows.extend(rows)
+        start += len(rows)
+
+    if not all_rows:
+        return pd.DataFrame(columns=["TRADEDATE", "VALUE", "NUMTRADES", "VOLUME", "SECID", "SHORTNAME"])
+
+    df = pd.DataFrame(all_rows, columns=columns)
+    for col in ["VALUE", "NUMTRADES", "VOLUME"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        else:
+            df[col] = 0.0
+    df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"], errors="coerce")
+    df = df.dropna(subset=["TRADEDATE"])
+
+    return (
+        df.groupby(["TRADEDATE", "SECID", "SHORTNAME"], as_index=False)
+        .agg(VALUE=("VALUE", "sum"), NUMTRADES=("NUMTRADES", "sum"), VOLUME=("VOLUME", "sum"))
+        .sort_values(["TRADEDATE", "SECID"])
+    )
+
+
+def load_security_emitents_map(market_kind: str) -> pd.DataFrame:
+    start = 0
+    rows_all = []
+    columns = []
+
+    while True:
+        response = request_get(
+            "https://iss.moex.com/iss/securities.json",
+            params={
+                "start": start,
+                "iss.meta": "off",
+                "iss.only": "securities",
+                "securities.columns": "secid,group,emitent_title",
+            },
+            timeout=200,
+        )
+        payload = response.json().get("securities", {})
+        rows = payload.get("data", [])
+        columns = payload.get("columns", columns)
+        if not rows:
+            break
+        rows_all.extend(rows)
+        start += len(rows)
+
+    if not rows_all:
+        return pd.DataFrame(columns=["SECID", "EMITENT_TITLE"])
+
+    df = pd.DataFrame(rows_all, columns=columns)
+    if "group" in df.columns:
+        if market_kind == "shares":
+            df = df[df["group"].astype(str).str.contains("share", case=False, na=False)]
+        else:
+            df = df[df["group"].astype(str).str.contains("bond", case=False, na=False)]
+    if df.empty:
+        return pd.DataFrame(columns=["SECID", "EMITENT_TITLE"])
+
+    df = df.rename(columns={"secid": "SECID", "emitent_title": "EMITENT_TITLE"})
+    df["SECID"] = df["SECID"].astype(str).str.upper()
+    df["EMITENT_TITLE"] = df["EMITENT_TITLE"].astype(str).replace("nan", "", regex=False)
+    return df[["SECID", "EMITENT_TITLE"]].drop_duplicates(subset=["SECID"])
 
 
 # ---------------------------
@@ -1992,6 +2187,225 @@ if st.session_state["active_view"] == "moex_turnover":
 
             if not report_rows:
                 st.error("Не удалось выполнить расчет ни для одного инструмента.")
+
+    st.stop()
+
+
+# ---------------------------
+# Market statistics view
+# ---------------------------
+if st.session_state["active_view"] == "market_statistics":
+    st.subheader("📈 Статистика рынка")
+    st.markdown(
+        "Расчет исторического объема торгов по списку инструментов с визуализацией и выгрузкой CSV/Excel."
+    )
+
+    market_mode = st.radio(
+        "Тип инструментов",
+        options=["Акции", "Облигации"],
+        horizontal=True,
+        key="market_statistics_mode",
+    )
+    market_kind = "shares" if market_mode == "Акции" else "bonds"
+
+    identifiers_input = st.text_area(
+        "SECID / ISIN / TICKER (каждый инструмент с новой строки)",
+        value="",
+        placeholder="SBER\nGAZP\nRU000A105SN8",
+        key="market_statistics_identifiers",
+    )
+    use_all_papers = st.checkbox(
+        "Считать статистику по всем бумагам выбранного рынка (без списка ISIN/SECID)",
+        value=False,
+        key="market_statistics_all_papers",
+    )
+
+    date_col_left, date_col_right = st.columns(2)
+    with date_col_left:
+        market_start_date = st.date_input(
+            "START_DATE",
+            value=datetime.now().date() - timedelta(days=90),
+            key="market_statistics_start_date",
+        )
+    with date_col_right:
+        market_end_date = st.date_input(
+            "END_DATE",
+            value=datetime.now().date(),
+            key="market_statistics_end_date",
+        )
+
+    if market_end_date < market_start_date:
+        st.error("END_DATE не может быть раньше START_DATE.")
+        st.stop()
+
+    if st.button("Рассчитать статистику", key="calc_market_statistics"):
+        raw_identifiers = [line.strip().upper() for line in identifiers_input.splitlines() if line.strip()]
+        if not use_all_papers and not raw_identifiers:
+            st.error("Укажите хотя бы один SECID / ISIN / TICKER.")
+        else:
+            full_rows = []
+            errors = []
+            with st.spinner("Загружаем историю торгов..."):
+                if use_all_papers:
+                    try:
+                        hist_df = load_market_wide_history_values(
+                            market_kind,
+                            market_start_date.strftime("%Y-%m-%d"),
+                            market_end_date.strftime("%Y-%m-%d"),
+                        )
+                        if hist_df.empty:
+                            raise ValueError("Нет данных истории за указанный период")
+                        hist_df["INPUT"] = "ALL_SECURITIES"
+                        hist_df["ISIN"] = ""
+                        emitent_map_df = load_security_emitents_map(market_kind)
+                        if not emitent_map_df.empty:
+                            hist_df = hist_df.merge(emitent_map_df, on="SECID", how="left")
+                        if "EMITENT_TITLE" not in hist_df.columns:
+                            hist_df["EMITENT_TITLE"] = ""
+                        full_rows.append(hist_df)
+                    except Exception as exc:
+                        errors.append(f"ALL_SECURITIES: {exc}")
+                else:
+                    unique_identifiers = list(dict.fromkeys(raw_identifiers))
+                    for identifier in unique_identifiers:
+                        try:
+                            profile = resolve_market_security_profile(identifier, market_kind)
+                            hist_df = load_market_history_values(
+                                profile["secid"],
+                                market_kind,
+                                market_start_date.strftime("%Y-%m-%d"),
+                                market_end_date.strftime("%Y-%m-%d"),
+                            )
+                            if hist_df.empty:
+                                raise ValueError("Нет данных истории за указанный период")
+
+                            hist_df["INPUT"] = profile["input"]
+                            hist_df["ISIN"] = profile["isin"]
+                            hist_df["EMITENT_TITLE"] = profile["emitent_title"]
+                            full_rows.append(hist_df)
+                        except Exception as exc:
+                            errors.append(f"{identifier}: {exc}")
+
+            if full_rows:
+                combined_df = pd.concat(full_rows, ignore_index=True)
+                combined_df = combined_df.sort_values(["TRADEDATE", "SECID"])
+
+                st.success("Статистика рассчитана")
+
+                totals = (
+                    combined_df.groupby(["SECID", "ISIN", "SHORTNAME", "EMITENT_TITLE"], dropna=False, as_index=False)
+                    .agg(
+                        TOTAL_VALUE=("VALUE", "sum"),
+                        TOTAL_NUMTRADES=("NUMTRADES", "sum"),
+                        TOTAL_VOLUME=("VOLUME", "sum"),
+                        DAYS=("TRADEDATE", "nunique"),
+                    )
+                    .sort_values("TOTAL_VALUE", ascending=False)
+                )
+                st.markdown("**Сводка по инструментам**")
+                st.dataframe(totals, use_container_width=True)
+
+                st.markdown("**Динамика общего оборота VALUE по дням**")
+                daily_value_df = (
+                    combined_df.groupby("TRADEDATE", as_index=False)["VALUE"].sum().sort_values("TRADEDATE")
+                )
+                st.line_chart(daily_value_df.set_index("TRADEDATE")["VALUE"], use_container_width=True)
+
+                st.markdown("**Статистика по инструментам (график)**")
+                chart_metric = st.selectbox(
+                    "Показатель",
+                    options=["TOTAL_VALUE", "TOTAL_NUMTRADES", "TOTAL_VOLUME"],
+                    key="market_statistics_metric",
+                )
+                chart_data = totals[["SECID", chart_metric]].set_index("SECID")
+                st.bar_chart(chart_data, use_container_width=True)
+
+                st.markdown("**Агрегация по эмитентам**")
+                emitent_df = (
+                    combined_df.groupby("EMITENT_TITLE", dropna=False, as_index=False)
+                    .agg(
+                        TOTAL_VALUE=("VALUE", "sum"),
+                        TOTAL_NUMTRADES=("NUMTRADES", "sum"),
+                        TOTAL_VOLUME=("VOLUME", "sum"),
+                    )
+                    .sort_values("TOTAL_VALUE", ascending=False)
+                )
+                emitent_df["EMITENT_TITLE"] = (
+                    emitent_df["EMITENT_TITLE"].fillna("").astype(str).replace("", "Не указан")
+                )
+                st.dataframe(emitent_df, use_container_width=True)
+                st.bar_chart(emitent_df.set_index("EMITENT_TITLE")[["TOTAL_VALUE"]], use_container_width=True)
+
+                display_df = combined_df.copy()
+                display_df["TRADEDATE"] = display_df["TRADEDATE"].dt.strftime("%Y-%m-%d")
+                st.markdown("**Детальные данные (история)**")
+                st.dataframe(display_df, use_container_width=True)
+
+                daily_export_df = daily_value_df.copy()
+                daily_export_df["TRADEDATE"] = daily_export_df["TRADEDATE"].dt.strftime("%Y-%m-%d")
+
+                csv_bytes = display_df.to_csv(index=False).encode("utf-8-sig")
+                totals_csv_bytes = totals.to_csv(index=False).encode("utf-8-sig")
+                daily_csv_bytes = daily_export_df.to_csv(index=False).encode("utf-8-sig")
+                emitent_csv_bytes = emitent_df.to_csv(index=False).encode("utf-8-sig") if not emitent_df.empty else b""
+
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    display_df.to_excel(writer, index=False, sheet_name="history")
+                    totals.to_excel(writer, index=False, sheet_name="totals")
+                    daily_export_df.to_excel(writer, index=False, sheet_name="daily_value")
+                    if not emitent_df.empty:
+                        emitent_df.to_excel(writer, index=False, sheet_name="emitents")
+                excel_buffer.seek(0)
+
+                st.markdown("### Скачать отчеты")
+                dl_col1, dl_col2 = st.columns(2)
+                with dl_col1:
+                    st.download_button(
+                        label="💾 История (CSV)",
+                        data=csv_bytes,
+                        file_name=f"market_statistics_{market_kind}_history.csv",
+                        mime="text/csv",
+                        key="market_statistics_history_csv",
+                    )
+                    st.download_button(
+                        label="💾 Сводка (CSV)",
+                        data=totals_csv_bytes,
+                        file_name=f"market_statistics_{market_kind}_totals.csv",
+                        mime="text/csv",
+                        key="market_statistics_totals_csv",
+                    )
+                with dl_col2:
+                    st.download_button(
+                        label="💾 Динамика по дням (CSV)",
+                        data=daily_csv_bytes,
+                        file_name=f"market_statistics_{market_kind}_daily.csv",
+                        mime="text/csv",
+                        key="market_statistics_daily_csv",
+                    )
+                    st.download_button(
+                        label="💾 Полный отчёт (Excel)",
+                        data=excel_buffer.getvalue(),
+                        file_name=f"market_statistics_{market_kind}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="market_statistics_excel",
+                    )
+                if emitent_csv_bytes:
+                    st.download_button(
+                        label="💾 По эмитентам (CSV)",
+                        data=emitent_csv_bytes,
+                        file_name=f"market_statistics_{market_kind}_emitents.csv",
+                        mime="text/csv",
+                        key="market_statistics_emitent_csv",
+                    )
+
+            if errors:
+                st.warning("Не удалось обработать часть инструментов:")
+                for error in errors:
+                    st.write(f"- {error}")
+
+            if not full_rows:
+                st.error("Не удалось получить статистику ни для одного инструмента.")
 
     st.stop()
 
