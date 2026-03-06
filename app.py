@@ -348,6 +348,11 @@ def load_security_emitents_map(market_kind: str) -> pd.DataFrame:
     return df[["SECID", "EMITENT_TITLE"]].drop_duplicates(subset=["SECID"])
 
 
+def normalize_emitent_title(value: str) -> str:
+    title = str(value or "").strip()
+    return title if title else "Не указан"
+
+
 # ---------------------------
 # Sell_stres helpers (Share)
 # ---------------------------
@@ -2220,6 +2225,35 @@ if st.session_state["active_view"] == "market_statistics":
         key="market_statistics_all_papers",
     )
 
+    emitent_map_for_filter = load_security_emitents_map(market_kind)
+    emitent_options = []
+    if not emitent_map_for_filter.empty:
+        emitent_options = sorted(
+            {
+                normalize_emitent_title(title)
+                for title in emitent_map_for_filter["EMITENT_TITLE"].dropna().astype(str).tolist()
+            }
+        )
+
+    selected_emitents = st.multiselect(
+        "Фильтр по эмитентам (если пусто — считаем по всем)",
+        options=emitent_options,
+        default=[],
+        key="market_statistics_emitent_filter",
+    )
+
+    if emitent_options:
+        emitent_list_df = pd.DataFrame({"EMITENT_TITLE": emitent_options})
+        st.download_button(
+            label="💾 Выгрузить список эмитентов (CSV)",
+            data=emitent_list_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"market_statistics_{market_kind}_emitent_list.csv",
+            mime="text/csv",
+            key=f"market_statistics_emitent_list_csv_{market_kind}",
+        )
+    else:
+        st.info("Список эмитентов для выбранного рынка пока недоступен.")
+
     date_col_left, date_col_right = st.columns(2)
     with date_col_left:
         market_start_date = st.date_input(
@@ -2262,6 +2296,11 @@ if st.session_state["active_view"] == "market_statistics":
                             hist_df = hist_df.merge(emitent_map_df, on="SECID", how="left")
                         if "EMITENT_TITLE" not in hist_df.columns:
                             hist_df["EMITENT_TITLE"] = ""
+                        hist_df["EMITENT_TITLE"] = hist_df["EMITENT_TITLE"].map(normalize_emitent_title)
+                        if selected_emitents:
+                            hist_df = hist_df[hist_df["EMITENT_TITLE"].isin(selected_emitents)]
+                        if hist_df.empty:
+                            raise ValueError("Нет данных истории за указанный период/фильтр эмитентов")
                         full_rows.append(hist_df)
                     except Exception as exc:
                         errors.append(f"ALL_SECURITIES: {exc}")
@@ -2281,7 +2320,9 @@ if st.session_state["active_view"] == "market_statistics":
 
                             hist_df["INPUT"] = profile["input"]
                             hist_df["ISIN"] = profile["isin"]
-                            hist_df["EMITENT_TITLE"] = profile["emitent_title"]
+                            hist_df["EMITENT_TITLE"] = normalize_emitent_title(profile["emitent_title"])
+                            if selected_emitents and hist_df["EMITENT_TITLE"].iloc[0] not in selected_emitents:
+                                continue
                             full_rows.append(hist_df)
                         except Exception as exc:
                             errors.append(f"{identifier}: {exc}")
@@ -2330,9 +2371,7 @@ if st.session_state["active_view"] == "market_statistics":
                     )
                     .sort_values("TOTAL_VALUE", ascending=False)
                 )
-                emitent_df["EMITENT_TITLE"] = (
-                    emitent_df["EMITENT_TITLE"].fillna("").astype(str).replace("", "Не указан")
-                )
+                emitent_df["EMITENT_TITLE"] = emitent_df["EMITENT_TITLE"].map(normalize_emitent_title)
                 st.dataframe(emitent_df, use_container_width=True)
                 st.bar_chart(emitent_df.set_index("EMITENT_TITLE")[["TOTAL_VALUE"]], use_container_width=True)
 
