@@ -2239,7 +2239,7 @@ if st.session_state["active_view"] == "market_statistics":
                 emitent_csv_bytes = emitent_df.to_csv(index=False).encode("utf-8-sig") if not emitent_df.empty else b""
 
                 excel_buffer = BytesIO()
-                with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                     display_df.to_excel(writer, index=False, sheet_name="history")
                     totals.to_excel(writer, index=False, sheet_name="totals")
                     daily_export_df.to_excel(writer, index=False, sheet_name="daily_value")
