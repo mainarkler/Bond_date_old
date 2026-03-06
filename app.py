@@ -2225,9 +2225,25 @@ if st.session_state["active_view"] == "market_statistics":
         key="market_statistics_all_papers",
     )
 
-    emitent_map_for_filter = load_security_emitents_map(market_kind)
+    emitent_cache_key = f"market_statistics_emitent_map_{market_kind}"
+    emitent_loaded_key = f"market_statistics_emitent_loaded_{market_kind}"
+    if emitent_cache_key not in st.session_state:
+        st.session_state[emitent_cache_key] = pd.DataFrame(columns=["SECID", "EMITENT_TITLE"])
+    if emitent_loaded_key not in st.session_state:
+        st.session_state[emitent_loaded_key] = False
+
+    emitent_controls_col1, emitent_controls_col2 = st.columns([1, 2])
+    with emitent_controls_col1:
+        if st.button("📥 Загрузить список эмитентов", key=f"market_statistics_load_emitents_{market_kind}"):
+            with st.spinner("Загружаем справочник эмитентов..."):
+                st.session_state[emitent_cache_key] = load_security_emitents_map(market_kind)
+                st.session_state[emitent_loaded_key] = True
+    with emitent_controls_col2:
+        st.caption("Список эмитентов загружается только по кнопке, чтобы не делать лишний запрос.")
+
+    emitent_map_for_filter = st.session_state[emitent_cache_key]
     emitent_options = []
-    if not emitent_map_for_filter.empty:
+    if st.session_state[emitent_loaded_key] and not emitent_map_for_filter.empty:
         emitent_options = sorted(
             {
                 normalize_emitent_title(title)
@@ -2240,9 +2256,12 @@ if st.session_state["active_view"] == "market_statistics":
         options=emitent_options,
         default=[],
         key="market_statistics_emitent_filter",
+        disabled=not st.session_state[emitent_loaded_key],
     )
+    if not st.session_state[emitent_loaded_key]:
+        selected_emitents = []
 
-    if emitent_options:
+    if st.session_state[emitent_loaded_key] and emitent_options:
         emitent_list_df = pd.DataFrame({"EMITENT_TITLE": emitent_options})
         st.download_button(
             label="💾 Выгрузить список эмитентов (CSV)",
@@ -2251,7 +2270,7 @@ if st.session_state["active_view"] == "market_statistics":
             mime="text/csv",
             key=f"market_statistics_emitent_list_csv_{market_kind}",
         )
-    else:
+    elif st.session_state[emitent_loaded_key]:
         st.info("Список эмитентов для выбранного рынка пока недоступен.")
 
     date_col_left, date_col_right = st.columns(2)
@@ -2291,8 +2310,10 @@ if st.session_state["active_view"] == "market_statistics":
                             raise ValueError("Нет данных истории за указанный период")
                         hist_df["INPUT"] = "ALL_SECURITIES"
                         hist_df["ISIN"] = ""
-                        emitent_map_df = load_security_emitents_map(market_kind)
-                        if not emitent_map_df.empty:
+                        emitent_map_df = st.session_state.get(
+                            emitent_cache_key, pd.DataFrame(columns=["SECID", "EMITENT_TITLE"])
+                        )
+                        if st.session_state.get(emitent_loaded_key) and not emitent_map_df.empty:
                             hist_df = hist_df.merge(emitent_map_df, on="SECID", how="left")
                         if "EMITENT_TITLE" not in hist_df.columns:
                             hist_df["EMITENT_TITLE"] = ""
