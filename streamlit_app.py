@@ -4,4 +4,4 @@ Run with:
     streamlit run streamlit_app.py
 """
 
-import app  # noqa: F401
+import api.streamlit_app  # noqa: F401
