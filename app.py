@@ -2199,13 +2199,22 @@ if st.session_state["active_view"] == "moex_turnover":
 # ---------------------------
 # Market statistics view
 # ---------------------------
-DEFAULT_RAILWAY_DB_URL = "postgresql://postgres:JterdsOyKZHseSLJSuJpNuBQLcJgpxpb@yamabiko.proxy.rlwy.net:12533/railway"
+DEFAULT_SUPABASE_HOST = "db.wfbshhakbsvdjlnzklwt.supabase.co"
+DEFAULT_SUPABASE_PORT = 5432
+DEFAULT_SUPABASE_DBNAME = "postgres"
+DEFAULT_SUPABASE_USER = "postgres"
+DEFAULT_SUPABASE_PASSWORD = "6f_@%DB&hA2+$f_"
 
 def get_postgres_conn_from_secrets():
     import psycopg2
+    from streamlit.errors import StreamlitSecretNotFoundError
 
-    raw_pg = st.secrets.get("postgres")
-    flat = st.secrets
+    try:
+        raw_pg = st.secrets.get("postgres")
+        flat = st.secrets
+    except StreamlitSecretNotFoundError:
+        raw_pg = {}
+        flat = {}
 
     dsn_url = ""
     connect_timeout = 8
@@ -2229,11 +2238,11 @@ def get_postgres_conn_from_secrets():
             raise RuntimeError(f"Не удалось подключиться к PostgreSQL по URL: {exc}") from exc
 
     cfg = raw_pg if hasattr(raw_pg, "get") else flat
-    host = str(cfg.get("host", "localhost")).strip()
-    dbname = str(cfg.get("dbname", "postgres")).strip()
-    user = str(cfg.get("user", "postgres")).strip()
-    password = str(cfg.get("password", "")).strip()
-    port = int(cfg.get("port", 5432))
+    host = str(cfg.get("host", DEFAULT_SUPABASE_HOST)).strip()
+    dbname = str(cfg.get("dbname", DEFAULT_SUPABASE_DBNAME)).strip()
+    user = str(cfg.get("user", DEFAULT_SUPABASE_USER)).strip()
+    password = str(cfg.get("password", DEFAULT_SUPABASE_PASSWORD)).strip()
+    port = int(cfg.get("port", DEFAULT_SUPABASE_PORT))
 
     hosts_to_try = [host]
     if host == "localhost":
