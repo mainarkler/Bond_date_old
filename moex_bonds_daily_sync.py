@@ -44,6 +44,9 @@ def get_postgres_conn():
     if not dsn_url:
         dsn_url = str(flat.get("DATABASE_URL", flat.get("POSTGRES_URL", ""))).strip()
 
+    if not dsn_url:
+        dsn_url = DEFAULT_RAILWAY_DB_URL
+
     if dsn_url:
         try:
             return psycopg2.connect(dsn=dsn_url, connect_timeout=connect_timeout)
