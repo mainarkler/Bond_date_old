@@ -2199,206 +2199,227 @@ if st.session_state["active_view"] == "moex_turnover":
 # ---------------------------
 # Market statistics view
 # ---------------------------
+def get_postgres_conn_from_secrets():
+    import psycopg2
+
+    cfg = st.secrets.get("postgres", st.secrets)
+    connect_timeout = int(cfg.get("connect_timeout", 8))
+
+    dsn_url = str(cfg.get("url", "")).strip()
+    if dsn_url:
+        try:
+            return psycopg2.connect(dsn=dsn_url, connect_timeout=connect_timeout)
+        except Exception as exc:
+            raise RuntimeError(f"Не удалось подключиться к PostgreSQL по URL: {exc}") from exc
+
+    host = str(cfg.get("host", "localhost")).strip()
+    dbname = str(cfg.get("dbname", "postgres")).strip()
+    user = str(cfg.get("user", "postgres")).strip()
+    password = str(cfg.get("password", "")).strip()
+    port = int(cfg.get("port", 5432))
+
+    hosts_to_try = [host]
+    if host == "localhost":
+        hosts_to_try.extend(["127.0.0.1", "host.docker.internal"])
+
+    last_exc = None
+    for candidate_host in dict.fromkeys(hosts_to_try):
+        try:
+            return psycopg2.connect(
+                host=candidate_host,
+                dbname=dbname,
+                user=user,
+                password=password,
+                port=port,
+                connect_timeout=connect_timeout,
+            )
+        except Exception as exc:
+            last_exc = exc
+
+    raise RuntimeError(
+        f"Не удалось подключиться к PostgreSQL (host={host}, port={port}, dbname={dbname}, user={user}): {last_exc}"
+    )
+
+
+def get_market_statistics_table_columns(conn) -> set[str]:
+    query = """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = 'Статистика рынка'
+    """
+    df = pd.read_sql_query(query, conn)
+    if df.empty:
+        return set()
+    return set(df["column_name"].astype(str).tolist())
+
+
+def load_market_statistics_from_postgres(start_date: str, end_date: str, selected_emitents=None, market_type: str = "bonds") -> pd.DataFrame:
+    selected_emitents = selected_emitents or []
+
+    with get_postgres_conn_from_secrets() as conn:
+        columns = get_market_statistics_table_columns(conn)
+
+        query = """
+            SELECT
+                date::date AS tradedate,
+                emitent_title,
+                bonds_count
+            FROM "Статистика рынка"
+            WHERE date BETWEEN %s AND %s
+        """
+        params = [start_date, end_date]
+
+        if "market_type" in columns:
+            query += " AND market_type = %s"
+            params.append(market_type)
+        elif market_type == "shares":
+            return pd.DataFrame(columns=["TRADEDATE", "EMITENT_TITLE", "BONDS_COUNT"])
+
+        if selected_emitents:
+            query += " AND emitent_title = ANY(%s)"
+            params.append(selected_emitents)
+
+        df = pd.read_sql_query(query, conn, params=params)
+
+    if df.empty:
+        return pd.DataFrame(columns=["TRADEDATE", "EMITENT_TITLE", "BONDS_COUNT"])
+
+    df = df.rename(
+        columns={
+            "tradedate": "TRADEDATE",
+            "emitent_title": "EMITENT_TITLE",
+            "bonds_count": "BONDS_COUNT",
+        }
+    )
+    df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"], errors="coerce")
+    df["BONDS_COUNT"] = pd.to_numeric(df["BONDS_COUNT"], errors="coerce").fillna(0).astype(int)
+    df["EMITENT_TITLE"] = df["EMITENT_TITLE"].map(normalize_emitent_title)
+    return df.dropna(subset=["TRADEDATE"]).sort_values(["TRADEDATE", "EMITENT_TITLE"])
+
+
+def load_emitents_from_postgres(market_type: str = "bonds") -> list[str]:
+    with get_postgres_conn_from_secrets() as conn:
+        columns = get_market_statistics_table_columns(conn)
+
+        query = """
+            SELECT DISTINCT emitent_title
+            FROM "Статистика рынка"
+            WHERE emitent_title IS NOT NULL AND TRIM(emitent_title) <> ''
+        """
+        params = []
+
+        if "market_type" in columns:
+            query += " AND market_type = %s"
+            params.append(market_type)
+        elif market_type == "shares":
+            return []
+
+        query += " ORDER BY emitent_title"
+        df = pd.read_sql_query(query, conn, params=params)
+
+    if df.empty:
+        return []
+    return [normalize_emitent_title(v) for v in df["emitent_title"].tolist()]
+
+
 if st.session_state["active_view"] == "market_statistics":
     st.subheader("📈 Статистика рынка")
-    st.markdown(
-        "Расчет исторического объема торгов по списку инструментов с визуализацией и выгрузкой CSV/Excel."
-    )
+    st.markdown("Данные блока берутся только из PostgreSQL (таблица `Статистика рынка`) без прямых запросов к ISS.")
 
     market_mode = st.radio(
         "Тип инструментов",
-        options=["Акции", "Облигации"],
+        options=["Облигации", "Акции"],
         horizontal=True,
-        key="market_statistics_mode",
+        key="market_statistics_mode_postgres",
     )
-    market_kind = "shares" if market_mode == "Акции" else "bonds"
+    market_type = "bonds" if market_mode == "Облигации" else "shares"
 
-    identifiers_input = st.text_area(
-        "SECID / ISIN / TICKER (каждый инструмент с новой строки)",
-        value="",
-        placeholder="SBER\nGAZP\nRU000A105SN8",
-        key="market_statistics_identifiers",
-    )
-    use_all_papers = st.checkbox(
-        "Считать статистику по всем бумагам выбранного рынка (без списка ISIN/SECID)",
-        value=False,
-        key="market_statistics_all_papers",
-    )
-
-    emitent_cache_key = f"market_statistics_emitent_map_{market_kind}"
-    emitent_loaded_key = f"market_statistics_emitent_loaded_{market_kind}"
+    emitent_cache_key = f"market_statistics_emitent_postgres_{market_type}"
+    emitent_loaded_key = f"market_statistics_emitent_loaded_postgres_{market_type}"
     if emitent_cache_key not in st.session_state:
-        st.session_state[emitent_cache_key] = pd.DataFrame(columns=["SECID", "EMITENT_TITLE"])
+        st.session_state[emitent_cache_key] = []
     if emitent_loaded_key not in st.session_state:
         st.session_state[emitent_loaded_key] = False
 
     emitent_controls_col1, emitent_controls_col2 = st.columns([1, 2])
     with emitent_controls_col1:
-        if st.button("📥 Загрузить список эмитентов", key=f"market_statistics_load_emitents_{market_kind}"):
-            with st.spinner("Загружаем справочник эмитентов..."):
-                st.session_state[emitent_cache_key] = load_security_emitents_map(market_kind)
-                st.session_state[emitent_loaded_key] = True
+        if st.button("📥 Загрузить список эмитентов", key=f"market_statistics_load_emitents_postgres_{market_type}"):
+            try:
+                with st.spinner("Загружаем список эмитентов из PostgreSQL..."):
+                    st.session_state[emitent_cache_key] = load_emitents_from_postgres(market_type)
+                    st.session_state[emitent_loaded_key] = True
+            except Exception as exc:
+                st.session_state[emitent_cache_key] = []
+                st.session_state[emitent_loaded_key] = False
+                st.error(f"Не удалось подключиться к PostgreSQL: {exc}")
     with emitent_controls_col2:
-        st.caption("Список эмитентов загружается только по кнопке, чтобы не делать лишний запрос.")
+        st.caption("Список эмитентов загружается из PostgreSQL по кнопке.")
 
-    emitent_map_for_filter = st.session_state[emitent_cache_key]
-    emitent_options = []
-    if st.session_state[emitent_loaded_key] and not emitent_map_for_filter.empty:
-        emitent_options = sorted(
-            {
-                normalize_emitent_title(title)
-                for title in emitent_map_for_filter["EMITENT_TITLE"].dropna().astype(str).tolist()
-            }
-        )
-
+    emitent_options = st.session_state[emitent_cache_key] if st.session_state[emitent_loaded_key] else []
     selected_emitents = st.multiselect(
         "Фильтр по эмитентам (если пусто — считаем по всем)",
         options=emitent_options,
         default=[],
-        key="market_statistics_emitent_filter",
+        key=f"market_statistics_emitent_filter_postgres_{market_type}",
         disabled=not st.session_state[emitent_loaded_key],
     )
-    if not st.session_state[emitent_loaded_key]:
-        selected_emitents = []
-
-    if st.session_state[emitent_loaded_key] and emitent_options:
-        emitent_list_df = pd.DataFrame({"EMITENT_TITLE": emitent_options})
-        st.download_button(
-            label="💾 Выгрузить список эмитентов (CSV)",
-            data=emitent_list_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"market_statistics_{market_kind}_emitent_list.csv",
-            mime="text/csv",
-            key=f"market_statistics_emitent_list_csv_{market_kind}",
-        )
-    elif st.session_state[emitent_loaded_key]:
-        st.info("Список эмитентов для выбранного рынка пока недоступен.")
 
     date_col_left, date_col_right = st.columns(2)
     with date_col_left:
         market_start_date = st.date_input(
             "START_DATE",
             value=datetime.now().date() - timedelta(days=90),
-            key="market_statistics_start_date",
+            key=f"market_statistics_start_date_postgres_{market_type}",
         )
     with date_col_right:
         market_end_date = st.date_input(
             "END_DATE",
             value=datetime.now().date(),
-            key="market_statistics_end_date",
+            key=f"market_statistics_end_date_postgres_{market_type}",
         )
 
     if market_end_date < market_start_date:
         st.error("END_DATE не может быть раньше START_DATE.")
         st.stop()
 
-    if st.button("Рассчитать статистику", key="calc_market_statistics"):
-        raw_identifiers = [line.strip().upper() for line in identifiers_input.splitlines() if line.strip()]
-        if not use_all_papers and not raw_identifiers:
-            st.error("Укажите хотя бы один SECID / ISIN / TICKER.")
-        else:
-            full_rows = []
-            errors = []
-            with st.spinner("Загружаем историю торгов..."):
-                if use_all_papers:
-                    try:
-                        hist_df = load_market_wide_history_values(
-                            market_kind,
-                            market_start_date.strftime("%Y-%m-%d"),
-                            market_end_date.strftime("%Y-%m-%d"),
-                        )
-                        if hist_df.empty:
-                            raise ValueError("Нет данных истории за указанный период")
-                        hist_df["INPUT"] = "ALL_SECURITIES"
-                        hist_df["ISIN"] = ""
-                        emitent_map_df = st.session_state.get(
-                            emitent_cache_key, pd.DataFrame(columns=["SECID", "EMITENT_TITLE"])
-                        )
-                        if st.session_state.get(emitent_loaded_key) and not emitent_map_df.empty:
-                            hist_df = hist_df.merge(emitent_map_df, on="SECID", how="left")
-                        if "EMITENT_TITLE" not in hist_df.columns:
-                            hist_df["EMITENT_TITLE"] = ""
-                        hist_df["EMITENT_TITLE"] = hist_df["EMITENT_TITLE"].map(normalize_emitent_title)
-                        if selected_emitents:
-                            hist_df = hist_df[hist_df["EMITENT_TITLE"].isin(selected_emitents)]
-                        if hist_df.empty:
-                            raise ValueError("Нет данных истории за указанный период/фильтр эмитентов")
-                        full_rows.append(hist_df)
-                    except Exception as exc:
-                        errors.append(f"ALL_SECURITIES: {exc}")
-                else:
-                    unique_identifiers = list(dict.fromkeys(raw_identifiers))
-                    for identifier in unique_identifiers:
-                        try:
-                            profile = resolve_market_security_profile(identifier, market_kind)
-                            hist_df = load_market_history_values(
-                                profile["secid"],
-                                market_kind,
-                                market_start_date.strftime("%Y-%m-%d"),
-                                market_end_date.strftime("%Y-%m-%d"),
-                            )
-                            if hist_df.empty:
-                                raise ValueError("Нет данных истории за указанный период")
+    if st.button("Рассчитать статистику", key=f"calc_market_statistics_postgres_{market_type}"):
+        try:
+            with st.spinner("Загружаем статистику из PostgreSQL..."):
+                combined_df = load_market_statistics_from_postgres(
+                    market_start_date.strftime("%Y-%m-%d"),
+                    market_end_date.strftime("%Y-%m-%d"),
+                    selected_emitents,
+                    market_type,
+                )
 
-                            hist_df["INPUT"] = profile["input"]
-                            hist_df["ISIN"] = profile["isin"]
-                            hist_df["EMITENT_TITLE"] = normalize_emitent_title(profile["emitent_title"])
-                            if selected_emitents and hist_df["EMITENT_TITLE"].iloc[0] not in selected_emitents:
-                                continue
-                            full_rows.append(hist_df)
-                        except Exception as exc:
-                            errors.append(f"{identifier}: {exc}")
-
-            if full_rows:
-                combined_df = pd.concat(full_rows, ignore_index=True)
-                combined_df = combined_df.sort_values(["TRADEDATE", "SECID"])
-
+            if combined_df.empty:
+                st.warning("Нет данных в PostgreSQL за указанный период/фильтры.")
+            else:
                 st.success("Статистика рассчитана")
 
                 totals = (
-                    combined_df.groupby(["SECID", "ISIN", "SHORTNAME", "EMITENT_TITLE"], dropna=False, as_index=False)
+                    combined_df.groupby(["EMITENT_TITLE"], dropna=False, as_index=False)
                     .agg(
-                        TOTAL_VALUE=("VALUE", "sum"),
-                        TOTAL_NUMTRADES=("NUMTRADES", "sum"),
-                        TOTAL_VOLUME=("VOLUME", "sum"),
+                        TOTAL_COUNT=("BONDS_COUNT", "sum"),
                         DAYS=("TRADEDATE", "nunique"),
                     )
-                    .sort_values("TOTAL_VALUE", ascending=False)
+                    .sort_values("TOTAL_COUNT", ascending=False)
                 )
-                st.markdown("**Сводка по инструментам**")
+                st.markdown("**Сводка по эмитентам**")
                 st.dataframe(totals, use_container_width=True)
 
-                st.markdown("**Динамика общего оборота VALUE по дням**")
+                st.markdown("**Динамика общего количества бумаг по дням**")
                 daily_value_df = (
-                    combined_df.groupby("TRADEDATE", as_index=False)["VALUE"].sum().sort_values("TRADEDATE")
+                    combined_df.groupby("TRADEDATE", as_index=False)["BONDS_COUNT"].sum().sort_values("TRADEDATE")
                 )
-                st.line_chart(daily_value_df.set_index("TRADEDATE")["VALUE"], use_container_width=True)
+                st.line_chart(daily_value_df.set_index("TRADEDATE")["BONDS_COUNT"], use_container_width=True)
 
-                st.markdown("**Статистика по инструментам (график)**")
-                chart_metric = st.selectbox(
-                    "Показатель",
-                    options=["TOTAL_VALUE", "TOTAL_NUMTRADES", "TOTAL_VOLUME"],
-                    key="market_statistics_metric",
-                )
-                chart_data = totals[["SECID", chart_metric]].set_index("SECID")
-                st.bar_chart(chart_data, use_container_width=True)
-
-                st.markdown("**Агрегация по эмитентам**")
-                emitent_df = (
-                    combined_df.groupby("EMITENT_TITLE", dropna=False, as_index=False)
-                    .agg(
-                        TOTAL_VALUE=("VALUE", "sum"),
-                        TOTAL_NUMTRADES=("NUMTRADES", "sum"),
-                        TOTAL_VOLUME=("VOLUME", "sum"),
-                    )
-                    .sort_values("TOTAL_VALUE", ascending=False)
-                )
-                emitent_df["EMITENT_TITLE"] = emitent_df["EMITENT_TITLE"].map(normalize_emitent_title)
-                st.dataframe(emitent_df, use_container_width=True)
-                st.bar_chart(emitent_df.set_index("EMITENT_TITLE")[["TOTAL_VALUE"]], use_container_width=True)
+                st.markdown("**Топ эмитентов (график)**")
+                st.bar_chart(totals.set_index("EMITENT_TITLE")[["TOTAL_COUNT"]], use_container_width=True)
 
                 display_df = combined_df.copy()
                 display_df["TRADEDATE"] = display_df["TRADEDATE"].dt.strftime("%Y-%m-%d")
-                st.markdown("**Детальные данные (история)**")
+                st.markdown("**Детальные данные**")
                 st.dataframe(display_df, use_container_width=True)
 
                 daily_export_df = daily_value_df.copy()
@@ -2407,65 +2428,48 @@ if st.session_state["active_view"] == "market_statistics":
                 csv_bytes = display_df.to_csv(index=False).encode("utf-8-sig")
                 totals_csv_bytes = totals.to_csv(index=False).encode("utf-8-sig")
                 daily_csv_bytes = daily_export_df.to_csv(index=False).encode("utf-8-sig")
-                emitent_csv_bytes = emitent_df.to_csv(index=False).encode("utf-8-sig") if not emitent_df.empty else b""
 
                 excel_buffer = BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                    display_df.to_excel(writer, index=False, sheet_name="history")
+                    display_df.to_excel(writer, index=False, sheet_name="details")
                     totals.to_excel(writer, index=False, sheet_name="totals")
-                    daily_export_df.to_excel(writer, index=False, sheet_name="daily_value")
-                    if not emitent_df.empty:
-                        emitent_df.to_excel(writer, index=False, sheet_name="emitents")
+                    daily_export_df.to_excel(writer, index=False, sheet_name="daily")
                 excel_buffer.seek(0)
 
                 st.markdown("### Скачать отчеты")
                 dl_col1, dl_col2 = st.columns(2)
                 with dl_col1:
                     st.download_button(
-                        label="💾 История (CSV)",
+                        label="💾 Детальные данные (CSV)",
                         data=csv_bytes,
-                        file_name=f"market_statistics_{market_kind}_history.csv",
+                        file_name=f"market_statistics_{market_type}_details.csv",
                         mime="text/csv",
-                        key="market_statistics_history_csv",
+                        key=f"market_statistics_details_csv_postgres_{market_type}",
                     )
                     st.download_button(
                         label="💾 Сводка (CSV)",
                         data=totals_csv_bytes,
-                        file_name=f"market_statistics_{market_kind}_totals.csv",
+                        file_name=f"market_statistics_{market_type}_totals.csv",
                         mime="text/csv",
-                        key="market_statistics_totals_csv",
+                        key=f"market_statistics_totals_csv_postgres_{market_type}",
                     )
                 with dl_col2:
                     st.download_button(
                         label="💾 Динамика по дням (CSV)",
                         data=daily_csv_bytes,
-                        file_name=f"market_statistics_{market_kind}_daily.csv",
+                        file_name=f"market_statistics_{market_type}_daily.csv",
                         mime="text/csv",
-                        key="market_statistics_daily_csv",
+                        key=f"market_statistics_daily_csv_postgres_{market_type}",
                     )
                     st.download_button(
                         label="💾 Полный отчёт (Excel)",
                         data=excel_buffer.getvalue(),
-                        file_name=f"market_statistics_{market_kind}.xlsx",
+                        file_name=f"market_statistics_{market_type}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="market_statistics_excel",
+                        key=f"market_statistics_excel_postgres_{market_type}",
                     )
-                if emitent_csv_bytes:
-                    st.download_button(
-                        label="💾 По эмитентам (CSV)",
-                        data=emitent_csv_bytes,
-                        file_name=f"market_statistics_{market_kind}_emitents.csv",
-                        mime="text/csv",
-                        key="market_statistics_emitent_csv",
-                    )
-
-            if errors:
-                st.warning("Не удалось обработать часть инструментов:")
-                for error in errors:
-                    st.write(f"- {error}")
-
-            if not full_rows:
-                st.error("Не удалось получить статистику ни для одного инструмента.")
+        except Exception as exc:
+            st.error(f"Ошибка подключения к PostgreSQL: {exc}")
 
     st.stop()
 
