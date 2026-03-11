@@ -1,3 +1,11 @@
+"""MOEX bonds loader -> PostgreSQL.
+
+Performance notes:
+- Uses batched UPSERT into `moex_bonds_securities`.
+- Rebuilds `bond_emitters` once per loader run (not in Streamlit).
+- Creates supporting indexes for fast aggregation and dashboard queries.
+"""
+
 import os
 from typing import Dict, Iterable, List
 
@@ -6,7 +14,7 @@ import requests
 from psycopg2.extras import execute_batch
 
 MOEX_SECURITIES_URL = "https://iss.moex.com/iss/securities.json"
-BATCH_SIZE = 100
+BATCH_SIZE = 1000
 PAGE_SIZE = 100
 
 
@@ -21,7 +29,7 @@ def get_db_connection():
 
 
 def ensure_schema(conn) -> None:
-    """Create required tables and view if they do not exist."""
+    """Create required tables/view/indexes if they do not exist."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -40,6 +48,11 @@ def ensure_schema(conn) -> None:
             )
             """
         )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moex_bonds_emitent_title ON moex_bonds_securities (emitent_title)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moex_bonds_emitent_inn ON moex_bonds_securities (emitent_inn)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moex_bonds_issue_date ON moex_bonds_securities (issue_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_moex_bonds_maturity_date ON moex_bonds_securities (maturity_date)")
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS bond_emitters (
@@ -53,6 +66,10 @@ def ensure_schema(conn) -> None:
             )
             """
         )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bond_emitters_title ON bond_emitters (emitent_title)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bond_emitters_bonds_count ON bond_emitters (bonds_count DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bond_emitters_last_maturity ON bond_emitters (last_maturity_date DESC)")
+
         cur.execute(
             """
             CREATE OR REPLACE VIEW bond_emitters_market_view AS
@@ -86,13 +103,15 @@ def _normalize_row(row: Dict[str, object]) -> Dict[str, object]:
 
 def fetch_bonds_from_moex() -> Iterable[Dict[str, object]]:
     start = 0
-
     while True:
         params = {
             "start": start,
             "iss.meta": "off",
             "iss.only": "securities",
-            "securities.columns": "secid,shortname,name,secname,isin,emitent_id,emitentid,emitent_title,emitent_inn,issuedate,matdate,maturitydate,couponpercent,group",
+            "securities.columns": (
+                "secid,shortname,name,secname,isin,emitent_id,emitentid,emitent_title,"
+                "emitent_inn,issuedate,matdate,maturitydate,couponpercent,group"
+            ),
         }
         response = requests.get(MOEX_SECURITIES_URL, params=params, timeout=30)
         response.raise_for_status()
@@ -106,10 +125,8 @@ def fetch_bonds_from_moex() -> Iterable[Dict[str, object]]:
 
         for values in data_rows:
             raw = dict(zip(columns, values))
-            group_value = str(raw.get("group") or "").lower()
-            if "bond" not in group_value:
+            if "bond" not in str(raw.get("group") or "").lower():
                 continue
-
             normalized = _normalize_row(raw)
             if normalized["secid"]:
                 yield normalized
@@ -118,35 +135,14 @@ def fetch_bonds_from_moex() -> Iterable[Dict[str, object]]:
 
 
 def upsert_moex_bonds(conn, rows: Iterable[Dict[str, object]]) -> int:
-    batch = []
-    total = 0
-
-    sql = """
+    """Batched UPSERT into moex_bonds_securities."""
+    sql_query = """
         INSERT INTO moex_bonds_securities (
-            secid,
-            shortname,
-            name,
-            isin,
-            emitent_id,
-            emitent_title,
-            emitent_inn,
-            issue_date,
-            maturity_date,
-            coupon_percent,
-            updated_at
-        )
-        VALUES (
-            %(secid)s,
-            %(shortname)s,
-            %(name)s,
-            %(isin)s,
-            %(emitent_id)s,
-            %(emitent_title)s,
-            %(emitent_inn)s,
-            %(issue_date)s,
-            %(maturity_date)s,
-            %(coupon_percent)s,
-            NOW()
+            secid, shortname, name, isin, emitent_id, emitent_title,
+            emitent_inn, issue_date, maturity_date, coupon_percent, updated_at
+        ) VALUES (
+            %(secid)s, %(shortname)s, %(name)s, %(isin)s, %(emitent_id)s, %(emitent_title)s,
+            %(emitent_inn)s, %(issue_date)s, %(maturity_date)s, %(coupon_percent)s, NOW()
         )
         ON CONFLICT (secid) DO UPDATE SET
             shortname = EXCLUDED.shortname,
@@ -161,16 +157,18 @@ def upsert_moex_bonds(conn, rows: Iterable[Dict[str, object]]) -> int:
             updated_at = NOW();
     """
 
+    total = 0
+    batch: List[Dict[str, object]] = []
     with conn.cursor() as cur:
         for row in rows:
             batch.append(row)
             if len(batch) >= BATCH_SIZE:
-                execute_batch(cur, sql, batch)
+                execute_batch(cur, sql_query, batch, page_size=BATCH_SIZE)
                 total += len(batch)
                 batch.clear()
 
         if batch:
-            execute_batch(cur, sql, batch)
+            execute_batch(cur, sql_query, batch, page_size=BATCH_SIZE)
             total += len(batch)
 
     conn.commit()
@@ -178,7 +176,7 @@ def upsert_moex_bonds(conn, rows: Iterable[Dict[str, object]]) -> int:
 
 
 def refresh_bond_emitters(conn) -> None:
-    """Rebuild aggregated emitters table from moex_bonds_securities."""
+    """Aggregate emitters once per loader run (not in Streamlit requests)."""
     with conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE bond_emitters")
         cur.execute(
