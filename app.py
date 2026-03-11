@@ -2202,16 +2202,28 @@ if st.session_state["active_view"] == "moex_turnover":
 def get_postgres_conn_from_secrets():
     import psycopg2
 
-    cfg = st.secrets.get("postgres", st.secrets)
-    connect_timeout = int(cfg.get("connect_timeout", 8))
+    raw_pg = st.secrets.get("postgres")
+    flat = st.secrets
 
-    dsn_url = str(cfg.get("url", "")).strip()
+    dsn_url = ""
+    connect_timeout = 8
+
+    if isinstance(raw_pg, str):
+        dsn_url = raw_pg.strip()
+    elif raw_pg is not None:
+        dsn_url = str(raw_pg.get("url", "")).strip()
+        connect_timeout = int(raw_pg.get("connect_timeout", connect_timeout))
+
+    if not dsn_url:
+        dsn_url = str(flat.get("DATABASE_URL", flat.get("POSTGRES_URL", ""))).strip()
+
     if dsn_url:
         try:
             return psycopg2.connect(dsn=dsn_url, connect_timeout=connect_timeout)
         except Exception as exc:
             raise RuntimeError(f"Не удалось подключиться к PostgreSQL по URL: {exc}") from exc
 
+    cfg = raw_pg if hasattr(raw_pg, "get") else flat
     host = str(cfg.get("host", "localhost")).strip()
     dbname = str(cfg.get("dbname", "postgres")).strip()
     user = str(cfg.get("user", "postgres")).strip()
