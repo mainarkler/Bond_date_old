@@ -14,23 +14,13 @@ MOEX_BONDS_URL = "https://iss.moex.com/iss/securities.json"
 STAT_TABLE = "Статистика рынка"
 BONDS_TABLE = "moex_bonds_securities"
 MARKET_TYPE = "bonds"
-DEFAULT_SUPABASE_HOST = "db.wfbshhakbsvdjlnzklwt.supabase.co"
-DEFAULT_SUPABASE_PORT = 5432
-DEFAULT_SUPABASE_DBNAME = "postgres"
-DEFAULT_SUPABASE_USER = "postgres"
-DEFAULT_SUPABASE_PASSWORD = "6f_@%DB&hA2+$f_"
+DEFAULT_RAILWAY_DB_URL = "postgresql://postgres:JterdsOyKZHseSLJSuJpNuBQLcJgpxpb@yamabiko.proxy.rlwy.net:12533/railway"
 
 
 def get_postgres_conn():
     """Create PostgreSQL connection from Streamlit secrets."""
-    from streamlit.errors import StreamlitSecretNotFoundError
-
-    try:
-        raw_pg = st.secrets.get("postgres")
-        flat = st.secrets
-    except StreamlitSecretNotFoundError:
-        raw_pg = {}
-        flat = {}
+    raw_pg = st.secrets.get("postgres")
+    flat = st.secrets
 
     dsn_url = ""
     connect_timeout = 8
@@ -54,11 +44,11 @@ def get_postgres_conn():
             raise RuntimeError(f"Не удалось подключиться к PostgreSQL по URL: {exc}") from exc
 
     cfg = raw_pg if hasattr(raw_pg, "get") else flat
-    host = str(cfg.get("host", DEFAULT_SUPABASE_HOST)).strip()
-    dbname = str(cfg.get("dbname", DEFAULT_SUPABASE_DBNAME)).strip()
-    user = str(cfg.get("user", DEFAULT_SUPABASE_USER)).strip()
-    password = str(cfg.get("password", DEFAULT_SUPABASE_PASSWORD)).strip()
-    port = int(cfg.get("port", DEFAULT_SUPABASE_PORT))
+    host = str(cfg.get("host", "localhost")).strip()
+    dbname = str(cfg.get("dbname", "postgres")).strip()
+    user = str(cfg.get("user", "postgres")).strip()
+    password = str(cfg.get("password", "")).strip()
+    port = int(cfg.get("port", 5432))
 
     hosts_to_try = [host]
     if host == "localhost":
@@ -90,7 +80,7 @@ def fetch_all_moex_bonds() -> pd.DataFrame:
         "iss.only": "securities",
         "group_by": "group",
         "group_by_filter": "stock_bonds",
-        "securities.columns": "secid,shortname,name,isin,emitent_id,emitent_title,emitent_inn,primary_boardid",
+        "securities.columns": "secid,isin,shortname,emitent_title,primary_boardid",
         "start": 0,
         "limit": 100,
     }
@@ -114,12 +104,9 @@ def fetch_all_moex_bonds() -> pd.DataFrame:
             rows.append(
                 {
                     "secid": row.get("secid"),
-                    "shortname": row.get("shortname"),
-                    "name": row.get("name"),
                     "isin": row.get("isin"),
-                    "emitent_id": row.get("emitent_id"),
+                    "shortname": row.get("shortname"),
                     "emitent_title": row.get("emitent_title"),
-                    "emitent_inn": row.get("emitent_inn"),
                     "primary_boardid": row.get("primary_boardid"),
                 }
             )
@@ -165,31 +152,21 @@ def upsert_moex_bonds_securities(conn, bonds_df: pd.DataFrame) -> None:
             f"""
             CREATE TABLE IF NOT EXISTS {BONDS_TABLE} (
                 secid TEXT PRIMARY KEY,
-                shortname TEXT,
-                name TEXT,
                 isin TEXT,
-                emitent_id TEXT,
+                shortname TEXT,
                 emitent_title TEXT,
-                emitent_inn TEXT,
                 primary_boardid TEXT,
                 updated_at DATE NOT NULL DEFAULT CURRENT_DATE
             )
             """
         )
-        cur.execute(f"ALTER TABLE {BONDS_TABLE} ADD COLUMN IF NOT EXISTS name TEXT")
-        cur.execute(f"ALTER TABLE {BONDS_TABLE} ADD COLUMN IF NOT EXISTS emitent_id TEXT")
-        cur.execute(f"ALTER TABLE {BONDS_TABLE} ADD COLUMN IF NOT EXISTS emitent_inn TEXT")
-        cur.execute(f"ALTER TABLE {BONDS_TABLE} ADD COLUMN IF NOT EXISTS primary_boardid TEXT")
 
         values = [
             (
                 str(row["secid"]) if pd.notna(row["secid"]) else None,
-                str(row["shortname"]) if pd.notna(row["shortname"]) else None,
-                str(row["name"]) if pd.notna(row["name"]) else None,
                 str(row["isin"]) if pd.notna(row["isin"]) else None,
-                str(row["emitent_id"]) if pd.notna(row["emitent_id"]) else None,
+                str(row["shortname"]) if pd.notna(row["shortname"]) else None,
                 str(row["emitent_title"]) if pd.notna(row["emitent_title"]) else None,
-                str(row["emitent_inn"]) if pd.notna(row["emitent_inn"]) else None,
                 str(row["primary_boardid"]) if pd.notna(row["primary_boardid"]) else None,
             )
             for _, row in bonds_df.iterrows()
@@ -199,17 +176,12 @@ def upsert_moex_bonds_securities(conn, bonds_df: pd.DataFrame) -> None:
         execute_values(
             cur,
             f"""
-            INSERT INTO {BONDS_TABLE} (
-                secid, shortname, name, isin, emitent_id, emitent_title, emitent_inn, primary_boardid
-            )
+            INSERT INTO {BONDS_TABLE} (secid, isin, shortname, emitent_title, primary_boardid)
             VALUES %s
             ON CONFLICT (secid) DO UPDATE SET
-                shortname = EXCLUDED.shortname,
-                name = EXCLUDED.name,
                 isin = EXCLUDED.isin,
-                emitent_id = EXCLUDED.emitent_id,
+                shortname = EXCLUDED.shortname,
                 emitent_title = EXCLUDED.emitent_title,
-                emitent_inn = EXCLUDED.emitent_inn,
                 primary_boardid = EXCLUDED.primary_boardid,
                 updated_at = CURRENT_DATE
             """,
