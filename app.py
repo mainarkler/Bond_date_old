@@ -2203,32 +2203,55 @@ def get_postgres_conn_from_secrets():
     import psycopg2
 
     cfg = st.secrets["postgres"]
+    connect_timeout = int(cfg.get("connect_timeout", 5))
     return psycopg2.connect(
         host=cfg["host"],
         dbname=cfg["dbname"],
         user=cfg["user"],
         password=cfg["password"],
         port=cfg["port"],
+        connect_timeout=connect_timeout,
     )
 
 
-def load_market_statistics_from_postgres(start_date: str, end_date: str, selected_emitents=None) -> pd.DataFrame:
-    selected_emitents = selected_emitents or []
+def get_market_statistics_table_columns(conn) -> set[str]:
     query = """
-        SELECT
-            date::date AS tradedate,
-            emitent_title,
-            bonds_count
-        FROM "Статистика рынка"
-        WHERE date BETWEEN %s AND %s
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = 'Статистика рынка'
     """
-    params = [start_date, end_date]
+    df = pd.read_sql_query(query, conn)
+    if df.empty:
+        return set()
+    return set(df["column_name"].astype(str).tolist())
 
-    if selected_emitents:
-        query += " AND emitent_title = ANY(%s)"
-        params.append(selected_emitents)
+
+def load_market_statistics_from_postgres(start_date: str, end_date: str, selected_emitents=None, market_type: str = "bonds") -> pd.DataFrame:
+    selected_emitents = selected_emitents or []
 
     with get_postgres_conn_from_secrets() as conn:
+        columns = get_market_statistics_table_columns(conn)
+
+        query = """
+            SELECT
+                date::date AS tradedate,
+                emitent_title,
+                bonds_count
+            FROM "Статистика рынка"
+            WHERE date BETWEEN %s AND %s
+        """
+        params = [start_date, end_date]
+
+        if "market_type" in columns:
+            query += " AND market_type = %s"
+            params.append(market_type)
+        elif market_type == "shares":
+            return pd.DataFrame(columns=["TRADEDATE", "EMITENT_TITLE", "BONDS_COUNT"])
+
+        if selected_emitents:
+            query += " AND emitent_title = ANY(%s)"
+            params.append(selected_emitents)
+
         df = pd.read_sql_query(query, conn, params=params)
 
     if df.empty:
@@ -2247,15 +2270,26 @@ def load_market_statistics_from_postgres(start_date: str, end_date: str, selecte
     return df.dropna(subset=["TRADEDATE"]).sort_values(["TRADEDATE", "EMITENT_TITLE"])
 
 
-def load_emitents_from_postgres() -> list[str]:
-    query = """
-        SELECT DISTINCT emitent_title
-        FROM "Статистика рынка"
-        WHERE emitent_title IS NOT NULL AND TRIM(emitent_title) <> ''
-        ORDER BY emitent_title
-    """
+def load_emitents_from_postgres(market_type: str = "bonds") -> list[str]:
     with get_postgres_conn_from_secrets() as conn:
-        df = pd.read_sql_query(query, conn)
+        columns = get_market_statistics_table_columns(conn)
+
+        query = """
+            SELECT DISTINCT emitent_title
+            FROM "Статистика рынка"
+            WHERE emitent_title IS NOT NULL AND TRIM(emitent_title) <> ''
+        """
+        params = []
+
+        if "market_type" in columns:
+            query += " AND market_type = %s"
+            params.append(market_type)
+        elif market_type == "shares":
+            return []
+
+        query += " ORDER BY emitent_title"
+        df = pd.read_sql_query(query, conn, params=params)
+
     if df.empty:
         return []
     return [normalize_emitent_title(v) for v in df["emitent_title"].tolist()]
@@ -2265,8 +2299,16 @@ if st.session_state["active_view"] == "market_statistics":
     st.subheader("📈 Статистика рынка")
     st.markdown("Данные блока берутся только из PostgreSQL (таблица `Статистика рынка`) без прямых запросов к ISS.")
 
-    emitent_cache_key = "market_statistics_emitent_postgres"
-    emitent_loaded_key = "market_statistics_emitent_loaded_postgres"
+    market_mode = st.radio(
+        "Тип инструментов",
+        options=["Облигации", "Акции"],
+        horizontal=True,
+        key="market_statistics_mode_postgres",
+    )
+    market_type = "bonds" if market_mode == "Облигации" else "shares"
+
+    emitent_cache_key = f"market_statistics_emitent_postgres_{market_type}"
+    emitent_loaded_key = f"market_statistics_emitent_loaded_postgres_{market_type}"
     if emitent_cache_key not in st.session_state:
         st.session_state[emitent_cache_key] = []
     if emitent_loaded_key not in st.session_state:
@@ -2274,10 +2316,15 @@ if st.session_state["active_view"] == "market_statistics":
 
     emitent_controls_col1, emitent_controls_col2 = st.columns([1, 2])
     with emitent_controls_col1:
-        if st.button("📥 Загрузить список эмитентов", key="market_statistics_load_emitents_postgres"):
-            with st.spinner("Загружаем список эмитентов из PostgreSQL..."):
-                st.session_state[emitent_cache_key] = load_emitents_from_postgres()
-                st.session_state[emitent_loaded_key] = True
+        if st.button("📥 Загрузить список эмитентов", key=f"market_statistics_load_emitents_postgres_{market_type}"):
+            try:
+                with st.spinner("Загружаем список эмитентов из PostgreSQL..."):
+                    st.session_state[emitent_cache_key] = load_emitents_from_postgres(market_type)
+                    st.session_state[emitent_loaded_key] = True
+            except Exception:
+                st.session_state[emitent_cache_key] = []
+                st.session_state[emitent_loaded_key] = False
+                st.error("Не удалось подключиться к PostgreSQL. Проверьте secrets и доступность БД.")
     with emitent_controls_col2:
         st.caption("Список эмитентов загружается из PostgreSQL по кнопке.")
 
@@ -2286,7 +2333,7 @@ if st.session_state["active_view"] == "market_statistics":
         "Фильтр по эмитентам (если пусто — считаем по всем)",
         options=emitent_options,
         default=[],
-        key="market_statistics_emitent_filter_postgres",
+        key=f"market_statistics_emitent_filter_postgres_{market_type}",
         disabled=not st.session_state[emitent_loaded_key],
     )
 
@@ -2295,52 +2342,53 @@ if st.session_state["active_view"] == "market_statistics":
         market_start_date = st.date_input(
             "START_DATE",
             value=datetime.now().date() - timedelta(days=90),
-            key="market_statistics_start_date_postgres",
+            key=f"market_statistics_start_date_postgres_{market_type}",
         )
     with date_col_right:
         market_end_date = st.date_input(
             "END_DATE",
             value=datetime.now().date(),
-            key="market_statistics_end_date_postgres",
+            key=f"market_statistics_end_date_postgres_{market_type}",
         )
 
     if market_end_date < market_start_date:
         st.error("END_DATE не может быть раньше START_DATE.")
         st.stop()
 
-    if st.button("Рассчитать статистику", key="calc_market_statistics_postgres"):
+    if st.button("Рассчитать статистику", key=f"calc_market_statistics_postgres_{market_type}"):
         try:
             with st.spinner("Загружаем статистику из PostgreSQL..."):
                 combined_df = load_market_statistics_from_postgres(
                     market_start_date.strftime("%Y-%m-%d"),
                     market_end_date.strftime("%Y-%m-%d"),
                     selected_emitents,
+                    market_type,
                 )
 
             if combined_df.empty:
-                st.error("Нет данных в PostgreSQL за указанный период/фильтры.")
+                st.warning("Нет данных в PostgreSQL за указанный период/фильтры.")
             else:
                 st.success("Статистика рассчитана")
 
                 totals = (
                     combined_df.groupby(["EMITENT_TITLE"], dropna=False, as_index=False)
                     .agg(
-                        TOTAL_BONDS_COUNT=("BONDS_COUNT", "sum"),
+                        TOTAL_COUNT=("BONDS_COUNT", "sum"),
                         DAYS=("TRADEDATE", "nunique"),
                     )
-                    .sort_values("TOTAL_BONDS_COUNT", ascending=False)
+                    .sort_values("TOTAL_COUNT", ascending=False)
                 )
                 st.markdown("**Сводка по эмитентам**")
                 st.dataframe(totals, use_container_width=True)
 
-                st.markdown("**Динамика общего количества облигаций по дням**")
+                st.markdown("**Динамика общего количества бумаг по дням**")
                 daily_value_df = (
                     combined_df.groupby("TRADEDATE", as_index=False)["BONDS_COUNT"].sum().sort_values("TRADEDATE")
                 )
                 st.line_chart(daily_value_df.set_index("TRADEDATE")["BONDS_COUNT"], use_container_width=True)
 
                 st.markdown("**Топ эмитентов (график)**")
-                st.bar_chart(totals.set_index("EMITENT_TITLE")[["TOTAL_BONDS_COUNT"]], use_container_width=True)
+                st.bar_chart(totals.set_index("EMITENT_TITLE")[["TOTAL_COUNT"]], use_container_width=True)
 
                 display_df = combined_df.copy()
                 display_df["TRADEDATE"] = display_df["TRADEDATE"].dt.strftime("%Y-%m-%d")
@@ -2367,34 +2415,34 @@ if st.session_state["active_view"] == "market_statistics":
                     st.download_button(
                         label="💾 Детальные данные (CSV)",
                         data=csv_bytes,
-                        file_name="market_statistics_details.csv",
+                        file_name=f"market_statistics_{market_type}_details.csv",
                         mime="text/csv",
-                        key="market_statistics_details_csv_postgres",
+                        key=f"market_statistics_details_csv_postgres_{market_type}",
                     )
                     st.download_button(
                         label="💾 Сводка (CSV)",
                         data=totals_csv_bytes,
-                        file_name="market_statistics_totals.csv",
+                        file_name=f"market_statistics_{market_type}_totals.csv",
                         mime="text/csv",
-                        key="market_statistics_totals_csv_postgres",
+                        key=f"market_statistics_totals_csv_postgres_{market_type}",
                     )
                 with dl_col2:
                     st.download_button(
                         label="💾 Динамика по дням (CSV)",
                         data=daily_csv_bytes,
-                        file_name="market_statistics_daily.csv",
+                        file_name=f"market_statistics_{market_type}_daily.csv",
                         mime="text/csv",
-                        key="market_statistics_daily_csv_postgres",
+                        key=f"market_statistics_daily_csv_postgres_{market_type}",
                     )
                     st.download_button(
                         label="💾 Полный отчёт (Excel)",
                         data=excel_buffer.getvalue(),
-                        file_name="market_statistics.xlsx",
+                        file_name=f"market_statistics_{market_type}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="market_statistics_excel_postgres",
+                        key=f"market_statistics_excel_postgres_{market_type}",
                     )
-        except Exception as exc:
-            st.error(f"Ошибка загрузки из PostgreSQL: {exc}")
+        except Exception:
+            st.error("Ошибка подключения к PostgreSQL. Проверьте secrets и доступность БД.")
 
     st.stop()
 

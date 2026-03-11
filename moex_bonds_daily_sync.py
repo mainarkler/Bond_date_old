@@ -13,6 +13,7 @@ from psycopg2.extras import execute_values
 MOEX_BONDS_URL = "https://iss.moex.com/iss/securities.json"
 STAT_TABLE = "Статистика рынка"
 BONDS_TABLE = "moex_bonds_securities"
+MARKET_TYPE = "bonds"
 
 
 def get_postgres_conn():
@@ -70,6 +71,33 @@ def fetch_all_moex_bonds() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def ensure_statistics_table_schema(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                """
+                CREATE TABLE IF NOT EXISTS {} (
+                    date DATE NOT NULL,
+                    emitent_title TEXT NOT NULL,
+                    bonds_count INTEGER NOT NULL DEFAULT 0,
+                    market_type TEXT NOT NULL DEFAULT 'bonds'
+                )
+                """
+            ).format(sql.Identifier(STAT_TABLE))
+        )
+        cur.execute(
+            sql.SQL("ALTER TABLE {} ADD COLUMN IF NOT EXISTS market_type TEXT NOT NULL DEFAULT 'bonds'").format(
+                sql.Identifier(STAT_TABLE)
+            )
+        )
+        cur.execute(
+            sql.SQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS market_statistics_uq ON {} (date, emitent_title, market_type)"
+            ).format(sql.Identifier(STAT_TABLE))
+        )
+    conn.commit()
+
+
 def upsert_moex_bonds_securities(conn, bonds_df: pd.DataFrame) -> None:
     if bonds_df.empty:
         return
@@ -122,8 +150,8 @@ def is_first_run_today(conn) -> bool:
     today = date.today()
     with conn.cursor() as cur:
         cur.execute(
-            sql.SQL("SELECT 1 FROM {} WHERE date = %s LIMIT 1").format(sql.Identifier(STAT_TABLE)),
-            (today,),
+            sql.SQL("SELECT 1 FROM {} WHERE date = %s AND market_type = %s LIMIT 1").format(sql.Identifier(STAT_TABLE)),
+            (today, MARKET_TYPE),
         )
         exists = cur.fetchone() is not None
     return not exists
@@ -151,22 +179,22 @@ def ensure_yesterday_statistics(conn, emitter_counts: Iterable[tuple[str, int]])
 
     with conn.cursor() as cur:
         cur.execute(
-            sql.SQL("SELECT 1 FROM {} WHERE date = %s LIMIT 1").format(sql.Identifier(STAT_TABLE)),
-            (yesterday,),
+            sql.SQL("SELECT 1 FROM {} WHERE date = %s AND market_type = %s LIMIT 1").format(sql.Identifier(STAT_TABLE)),
+            (yesterday, MARKET_TYPE),
         )
         yesterday_exists = cur.fetchone() is not None
 
         if not yesterday_exists:
             insert_query = sql.SQL(
                 """
-                INSERT INTO {} (date, emitent_title, bonds_count)
+                INSERT INTO {} (date, emitent_title, bonds_count, market_type)
                 VALUES %s
-                ON CONFLICT (date, emitent_title) DO UPDATE
+                ON CONFLICT (date, emitent_title, market_type) DO UPDATE
                 SET bonds_count = EXCLUDED.bonds_count
                 """
             ).format(sql.Identifier(STAT_TABLE))
 
-            values = [(yesterday, emitter, count) for emitter, count in emitter_counts]
+            values = [(yesterday, emitter, count, MARKET_TYPE) for emitter, count in emitter_counts]
             execute_values(cur, insert_query.as_string(cur), values)
 
     conn.commit()
@@ -181,14 +209,14 @@ def update_today_bonds_count(conn, emitter_counts: Iterable[tuple[str, int]]) ->
     with conn.cursor() as cur:
         query = sql.SQL(
             """
-            INSERT INTO {} (date, emitent_title, bonds_count)
+            INSERT INTO {} (date, emitent_title, bonds_count, market_type)
             VALUES %s
-            ON CONFLICT (date, emitent_title) DO UPDATE
+            ON CONFLICT (date, emitent_title, market_type) DO UPDATE
             SET bonds_count = EXCLUDED.bonds_count
             """
         ).format(sql.Identifier(STAT_TABLE))
 
-        values = [(today, emitter, count) for emitter, count in emitter_counts]
+        values = [(today, emitter, count, MARKET_TYPE) for emitter, count in emitter_counts]
         execute_values(cur, query.as_string(cur), values)
 
     conn.commit()
@@ -197,6 +225,7 @@ def update_today_bonds_count(conn, emitter_counts: Iterable[tuple[str, int]]) ->
 def run_daily_sync() -> None:
     conn = get_postgres_conn()
     try:
+        ensure_statistics_table_schema(conn)
         bonds_df = fetch_all_moex_bonds()
         upsert_moex_bonds_securities(conn, bonds_df)
 
