@@ -19,13 +19,20 @@ MARKET_TYPE = "bonds"
 def get_postgres_conn():
     """Create PostgreSQL connection from Streamlit secrets."""
     cfg = st.secrets.get("postgres", st.secrets)
+    connect_timeout = int(cfg.get("connect_timeout", 8))
+
+    dsn_url = str(cfg.get("url", "")).strip()
+    if dsn_url:
+        try:
+            return psycopg2.connect(dsn=dsn_url, connect_timeout=connect_timeout)
+        except Exception as exc:
+            raise RuntimeError(f"Не удалось подключиться к PostgreSQL по URL: {exc}") from exc
 
     host = str(cfg.get("host", "localhost")).strip()
     dbname = str(cfg.get("dbname", "postgres")).strip()
     user = str(cfg.get("user", "postgres")).strip()
     password = str(cfg.get("password", "")).strip()
     port = int(cfg.get("port", 5432))
-    connect_timeout = int(cfg.get("connect_timeout", 5))
 
     hosts_to_try = [host]
     if host == "localhost":
