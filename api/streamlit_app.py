@@ -1,10 +1,7 @@
-"""Streamlit app for browsing PostgreSQL market tables.
+"""Streamlit app: bond emitters dashboard backed by PostgreSQL.
 
-Requirements implemented:
-- Connect to local Docker PostgreSQL instance (defaults provided below).
-- Discover all tables from `public` schema dynamically.
-- Show first 5 rows for each table.
-- Render each table inside an expandable block for удобство.
+The app is intentionally structured with small reusable functions so it can be
+extended later with additional bond-market tables and analytics blocks.
 """
 
 import os
@@ -12,20 +9,19 @@ from typing import List
 
 import pandas as pd
 import psycopg2
-from psycopg2 import sql
 import streamlit as st
 
 # -----------------------------------------------------------------------------
-# Streamlit page config
+# Streamlit page
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Статистика рынка", page_icon="📈", layout="wide")
-st.title("📈 Статистика рынка")
-st.caption("Просмотр таблиц PostgreSQL (schema: public) и первых 5 строк каждой таблицы.")
+st.set_page_config(page_title="Эмитенты облигаций", page_icon="📈", layout="wide")
+st.title("📈 Эмитенты облигаций")
+st.caption("Данные читаются из PostgreSQL (Docker) с последующей обработкой в Pandas.")
 
 
 # -----------------------------------------------------------------------------
-# DB configuration
-# Priority: environment variables -> requested default values
+# DB connection config
+# Priority: env vars first, then requested defaults
 # -----------------------------------------------------------------------------
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "127.0.0.1"),
@@ -35,73 +31,133 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD", "6f_@%DB&hA2+$f_"),
 }
 
+REQUIRED_RELATIONS = [
+    "moex_bonds_securities",
+    "bond_emitters",
+    "bond_emitters_market_view",
+]
+
+SORT_OPTIONS = {
+    "bonds_count (убыв.)": ("bonds_count", False),
+    "bonds_count (возр.)": ("bonds_count", True),
+    "last_maturity_date (убыв.)": ("last_maturity_date", False),
+    "last_maturity_date (возр.)": ("last_maturity_date", True),
+}
+
 
 def get_connection() -> psycopg2.extensions.connection:
-    """Create a PostgreSQL connection.
-
-    Kept as a separate function so it can be reused by future modules and tests.
-    """
+    """Create PostgreSQL connection."""
     return psycopg2.connect(**DB_CONFIG)
 
 
-def fetch_public_tables(conn: psycopg2.extensions.connection) -> List[str]:
-    """Return all table names from public schema in a stable order."""
-    tables_sql = """
-        SELECT tablename
-        FROM pg_catalog.pg_tables
-        WHERE schemaname = 'public'
-        ORDER BY tablename;
+def list_available_relations(conn: psycopg2.extensions.connection) -> List[str]:
+    """List tables and views from public schema."""
+    sql = """
+        SELECT table_name AS relation_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        UNION
+        SELECT table_name AS relation_name
+        FROM information_schema.views
+        WHERE table_schema = 'public'
+        ORDER BY relation_name;
     """
-    tables_df = pd.read_sql_query(tables_sql, conn)
-    return tables_df["tablename"].tolist()
+    rel_df = pd.read_sql_query(sql, conn)
+    return rel_df["relation_name"].tolist()
 
 
-def fetch_table_preview(
-    conn: psycopg2.extensions.connection,
-    table_name: str,
-    limit: int = 5,
-) -> pd.DataFrame:
-    """Load first `limit` rows for selected table safely.
-
-    Uses psycopg2.sql.Identifier to avoid SQL injection in table names.
+def load_emitters_market_data(conn: psycopg2.extensions.connection) -> pd.DataFrame:
+    """Load normalized emitters market data from public.bond_emitters_market_view."""
+    sql = """
+        SELECT
+            emitent_title,
+            emitent_inn,
+            bonds_count,
+            first_issue_date,
+            last_maturity_date
+        FROM public.bond_emitters_market_view
     """
-    query = sql.SQL("SELECT * FROM {} LIMIT %s").format(sql.Identifier(table_name))
-    return pd.read_sql_query(query.as_string(conn), conn, params=[limit])
+    df = pd.read_sql_query(sql, conn)
+
+    # Normalize expected types for stable filtering/sorting in UI.
+    if "bonds_count" in df.columns:
+        df["bonds_count"] = pd.to_numeric(df["bonds_count"], errors="coerce").fillna(0).astype(int)
+    if "first_issue_date" in df.columns:
+        df["first_issue_date"] = pd.to_datetime(df["first_issue_date"], errors="coerce").dt.date
+    if "last_maturity_date" in df.columns:
+        df["last_maturity_date"] = pd.to_datetime(df["last_maturity_date"], errors="coerce").dt.date
+
+    return df
 
 
-def render_table_section(conn: psycopg2.extensions.connection, table_name: str) -> None:
-    """Render one table preview block with title + expander + dataframe."""
-    st.markdown(f"### Таблица: `{table_name}`")
-    with st.expander(f"Показать первые 5 строк: {table_name}", expanded=False):
-        preview_df = fetch_table_preview(conn, table_name, limit=5)
-        if preview_df.empty:
-            st.info("Таблица существует, но не содержит строк.")
+def apply_filters_and_sort(df: pd.DataFrame, emitter_filter: str, sort_choice: str) -> pd.DataFrame:
+    """Apply emitter name filter and selected sorting option."""
+    filtered = df.copy()
+
+    if emitter_filter.strip():
+        filtered = filtered[
+            filtered["emitent_title"].fillna("").str.contains(emitter_filter.strip(), case=False, na=False)
+        ]
+
+    sort_column, ascending = SORT_OPTIONS[sort_choice]
+    filtered = filtered.sort_values(by=sort_column, ascending=ascending, na_position="last")
+    return filtered
+
+
+def render_dataframe_section(title: str, df: pd.DataFrame, expanded: bool = False) -> None:
+    """Render one expander section with dataframe."""
+    with st.expander(title, expanded=expanded):
+        if df.empty:
+            st.info("Нет данных для отображения.")
         else:
-            st.dataframe(preview_df, use_container_width=True)
+            st.dataframe(df, use_container_width=True)
 
 
-# -----------------------------------------------------------------------------
-# Main rendering logic
-# -----------------------------------------------------------------------------
 try:
     with get_connection() as conn:
-        st.success(
-            f"Подключение успешно: {DB_CONFIG['host']}:{DB_CONFIG['port']} / DB={DB_CONFIG['dbname']}"
+        st.success(f"Подключено к PostgreSQL: {DB_CONFIG['host']}:{DB_CONFIG['port']} / {DB_CONFIG['dbname']}")
+
+        available_relations = list_available_relations(conn)
+        st.write("Найденные таблицы/представления в schema public:")
+        st.code("\n".join(available_relations) if available_relations else "(пусто)")
+
+        missing = [name for name in REQUIRED_RELATIONS if name not in available_relations]
+        if missing:
+            st.warning(
+                "Отсутствуют требуемые объекты: " + ", ".join(missing) + ". "
+                "Проверьте загрузчик/миграции БД."
+            )
+
+        market_df = load_emitters_market_data(conn)
+
+        # Filters and sorting controls.
+        controls_col1, controls_col2 = st.columns(2)
+        with controls_col1:
+            emitter_filter = st.text_input("Фильтр по названию эмитента", value="")
+        with controls_col2:
+            sort_choice = st.selectbox("Сортировка", list(SORT_OPTIONS.keys()), index=0)
+
+        result_df = apply_filters_and_sort(market_df, emitter_filter, sort_choice)
+
+        # Section 1: all emitters (with filter/sort applied)
+        render_dataframe_section("Все эмитенты (с фильтром и сортировкой)", result_df, expanded=True)
+
+        # Section 2: top 10 by bond count
+        top10_df = (
+            market_df.sort_values(by="bonds_count", ascending=False, na_position="last")
+            .head(10)
+            .reset_index(drop=True)
         )
+        render_dataframe_section("Топ-10 эмитентов по количеству облигаций", top10_df)
 
-        table_names = fetch_public_tables(conn)
-        st.subheader("Список таблиц схемы public")
-
-        if not table_names:
-            st.warning("В схеме public не найдено таблиц.")
-        else:
-            st.write(f"Найдено таблиц: **{len(table_names)}**")
-            for table_name in table_names:
-                render_table_section(conn, table_name)
+        # Section 3: rows with the latest maturity dates
+        last_maturity_df = (
+            market_df.sort_values(by="last_maturity_date", ascending=False, na_position="last")
+            .head(10)
+            .reset_index(drop=True)
+        )
+        render_dataframe_section("Топ-10 по последней дате погашения", last_maturity_df)
 
 except Exception as exc:
-    st.error(f"Ошибка подключения или запроса к PostgreSQL: {exc}")
-    st.info(
-        "Проверьте параметры подключения и убедитесь, что контейнер `moex_postgres` "
-        "запущен на 127.0.0.1:5433."
-    )
+    st.error(f"Ошибка подключения/чтения PostgreSQL: {exc}")
+    st.info("Проверьте, что Docker PostgreSQL доступен на 127.0.0.1:5433 и содержит нужные таблицы.")
