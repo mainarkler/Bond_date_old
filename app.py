@@ -2253,6 +2253,27 @@ def get_postgres_conn_from_secrets():
     )
 
 
+def ensure_market_statistics_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "Статистика рынка" (
+                date DATE NOT NULL,
+                emitent_title TEXT NOT NULL,
+                bonds_count INTEGER NOT NULL DEFAULT 0,
+                market_type TEXT NOT NULL DEFAULT 'bonds'
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS market_statistics_uq
+            ON "Статистика рынка" (date, emitent_title, market_type)
+            """
+        )
+    conn.commit()
+
+
 def get_market_statistics_table_columns(conn) -> set[str]:
     query = """
         SELECT column_name
@@ -2269,6 +2290,7 @@ def load_market_statistics_from_postgres(start_date: str, end_date: str, selecte
     selected_emitents = selected_emitents or []
 
     with get_postgres_conn_from_secrets() as conn:
+        ensure_market_statistics_table(conn)
         columns = get_market_statistics_table_columns(conn)
 
         query = """
@@ -2311,6 +2333,7 @@ def load_market_statistics_from_postgres(start_date: str, end_date: str, selecte
 
 def load_emitents_from_postgres(market_type: str = "bonds") -> list[str]:
     with get_postgres_conn_from_secrets() as conn:
+        ensure_market_statistics_table(conn)
         columns = get_market_statistics_table_columns(conn)
 
         query = """
