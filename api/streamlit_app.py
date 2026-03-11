@@ -1,69 +1,107 @@
+"""Streamlit app for browsing PostgreSQL market tables.
+
+Requirements implemented:
+- Connect to local Docker PostgreSQL instance (defaults provided below).
+- Discover all tables from `public` schema dynamically.
+- Show first 5 rows for each table.
+- Render each table inside an expandable block for удобство.
+"""
+
 import os
+from typing import List
 
 import pandas as pd
 import psycopg2
+from psycopg2 import sql
 import streamlit as st
 
-
-st.set_page_config(page_title="Market Statistics", page_icon="📈", layout="wide")
-st.title("📈 Market Statistics")
-st.caption("Данные читаются только из PostgreSQL, наполняемого loader/moex_loader.py")
-
-
-def get_connection():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", "5433"),
-        dbname=os.getenv("DB_NAME", "marketdata"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "password"),
-    )
+# -----------------------------------------------------------------------------
+# Streamlit page config
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Статистика рынка", page_icon="📈", layout="wide")
+st.title("📈 Статистика рынка")
+st.caption("Просмотр таблиц PostgreSQL (schema: public) и первых 5 строк каждой таблицы.")
 
 
-def query_df(conn, sql: str) -> pd.DataFrame:
-    return pd.read_sql_query(sql, conn)
+# -----------------------------------------------------------------------------
+# DB configuration
+# Priority: environment variables -> requested default values
+# -----------------------------------------------------------------------------
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "127.0.0.1"),
+    "port": os.getenv("DB_PORT", "5433"),
+    "dbname": os.getenv("DB_NAME", "postgres"),
+    "user": os.getenv("DB_USER", "postgres"),
+    "password": os.getenv("DB_PASSWORD", "6f_@%DB&hA2+$f_"),
+}
 
 
+def get_connection() -> psycopg2.extensions.connection:
+    """Create a PostgreSQL connection.
+
+    Kept as a separate function so it can be reused by future modules and tests.
+    """
+    return psycopg2.connect(**DB_CONFIG)
+
+
+def fetch_public_tables(conn: psycopg2.extensions.connection) -> List[str]:
+    """Return all table names from public schema in a stable order."""
+    tables_sql = """
+        SELECT tablename
+        FROM pg_catalog.pg_tables
+        WHERE schemaname = 'public'
+        ORDER BY tablename;
+    """
+    tables_df = pd.read_sql_query(tables_sql, conn)
+    return tables_df["tablename"].tolist()
+
+
+def fetch_table_preview(
+    conn: psycopg2.extensions.connection,
+    table_name: str,
+    limit: int = 5,
+) -> pd.DataFrame:
+    """Load first `limit` rows for selected table safely.
+
+    Uses psycopg2.sql.Identifier to avoid SQL injection in table names.
+    """
+    query = sql.SQL("SELECT * FROM {} LIMIT %s").format(sql.Identifier(table_name))
+    return pd.read_sql_query(query.as_string(conn), conn, params=[limit])
+
+
+def render_table_section(conn: psycopg2.extensions.connection, table_name: str) -> None:
+    """Render one table preview block with title + expander + dataframe."""
+    st.markdown(f"### Таблица: `{table_name}`")
+    with st.expander(f"Показать первые 5 строк: {table_name}", expanded=False):
+        preview_df = fetch_table_preview(conn, table_name, limit=5)
+        if preview_df.empty:
+            st.info("Таблица существует, но не содержит строк.")
+        else:
+            st.dataframe(preview_df, use_container_width=True)
+
+
+# -----------------------------------------------------------------------------
+# Main rendering logic
+# -----------------------------------------------------------------------------
 try:
     with get_connection() as conn:
-        total_bonds = query_df(conn, "SELECT COUNT(*) AS total_bonds FROM bonds")
-        unique_issuers = query_df(
-            conn,
-            """
-            SELECT COUNT(DISTINCT COALESCE(NULLIF(emitent_title, ''), emitent_id)) AS unique_issuers
-            FROM bonds
-            """,
-        )
-        avg_coupon = query_df(
-            conn,
-            "SELECT ROUND(AVG(coupon_percent)::numeric, 4) AS avg_coupon FROM bonds WHERE coupon_percent IS NOT NULL",
-        )
-        distribution = query_df(
-            conn,
-            """
-            SELECT
-                COALESCE(NULLIF(emitent_title, ''), emitent_id, 'UNKNOWN') AS issuer,
-                COUNT(*) AS bonds_count
-            FROM bonds
-            GROUP BY 1
-            ORDER BY bonds_count DESC, issuer
-            """,
+        st.success(
+            f"Подключение успешно: {DB_CONFIG['host']}:{DB_CONFIG['port']} / DB={DB_CONFIG['dbname']}"
         )
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total number of bonds", int(total_bonds.loc[0, "total_bonds"]))
-        col2.metric("Number of unique issuers", int(unique_issuers.loc[0, "unique_issuers"]))
+        table_names = fetch_public_tables(conn)
+        st.subheader("Список таблиц схемы public")
 
-        avg_coupon_value = avg_coupon.loc[0, "avg_coupon"]
-        col3.metric("Average coupon", f"{avg_coupon_value}%" if pd.notna(avg_coupon_value) else "N/A")
-
-        st.subheader("Distribution by issuer")
-        if distribution.empty:
-            st.info("No rows in bonds table. Run: python loader/moex_loader.py")
+        if not table_names:
+            st.warning("В схеме public не найдено таблиц.")
         else:
-            st.bar_chart(distribution.set_index("issuer")["bonds_count"], use_container_width=True)
-            st.dataframe(distribution, use_container_width=True)
+            st.write(f"Найдено таблиц: **{len(table_names)}**")
+            for table_name in table_names:
+                render_table_section(conn, table_name)
 
 except Exception as exc:
-    st.error(f"Database query failed: {exc}")
-    st.info("Проверьте DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD и запустите loader.")
+    st.error(f"Ошибка подключения или запроса к PostgreSQL: {exc}")
+    st.info(
+        "Проверьте параметры подключения и убедитесь, что контейнер `moex_postgres` "
+        "запущен на 127.0.0.1:5433."
+    )
