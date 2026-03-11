@@ -1,0 +1,17 @@
+services:
+  moex_postgres:
+    image: postgres:15
+    container_name: moex_postgres
+    restart: always
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-6f_@%DB&hA2+$f_}
+      POSTGRES_DB: ${DB_NAME:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+volumes:
+  pgdata:
