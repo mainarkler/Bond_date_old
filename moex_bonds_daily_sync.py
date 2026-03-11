@@ -18,13 +18,35 @@ MARKET_TYPE = "bonds"
 
 def get_postgres_conn():
     """Create PostgreSQL connection from Streamlit secrets."""
-    cfg = st.secrets["postgres"]
-    return psycopg2.connect(
-        host=cfg["host"],
-        dbname=cfg["dbname"],
-        user=cfg["user"],
-        password=cfg["password"],
-        port=cfg["port"],
+    cfg = st.secrets.get("postgres", st.secrets)
+
+    host = str(cfg.get("host", "localhost")).strip()
+    dbname = str(cfg.get("dbname", "postgres")).strip()
+    user = str(cfg.get("user", "postgres")).strip()
+    password = str(cfg.get("password", "")).strip()
+    port = int(cfg.get("port", 5432))
+    connect_timeout = int(cfg.get("connect_timeout", 5))
+
+    hosts_to_try = [host]
+    if host == "localhost":
+        hosts_to_try.extend(["127.0.0.1", "host.docker.internal"])
+
+    last_exc = None
+    for candidate_host in dict.fromkeys(hosts_to_try):
+        try:
+            return psycopg2.connect(
+                host=candidate_host,
+                dbname=dbname,
+                user=user,
+                password=password,
+                port=port,
+                connect_timeout=connect_timeout,
+            )
+        except Exception as exc:
+            last_exc = exc
+
+    raise RuntimeError(
+        f"Не удалось подключиться к PostgreSQL (host={host}, port={port}, dbname={dbname}, user={user}): {last_exc}"
     )
 
 

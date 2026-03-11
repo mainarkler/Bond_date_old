@@ -2202,15 +2202,35 @@ if st.session_state["active_view"] == "moex_turnover":
 def get_postgres_conn_from_secrets():
     import psycopg2
 
-    cfg = st.secrets["postgres"]
+    cfg = st.secrets.get("postgres", st.secrets)
+
+    host = str(cfg.get("host", "localhost")).strip()
+    dbname = str(cfg.get("dbname", "postgres")).strip()
+    user = str(cfg.get("user", "postgres")).strip()
+    password = str(cfg.get("password", "")).strip()
+    port = int(cfg.get("port", 5432))
     connect_timeout = int(cfg.get("connect_timeout", 5))
-    return psycopg2.connect(
-        host=cfg["host"],
-        dbname=cfg["dbname"],
-        user=cfg["user"],
-        password=cfg["password"],
-        port=cfg["port"],
-        connect_timeout=connect_timeout,
+
+    hosts_to_try = [host]
+    if host == "localhost":
+        hosts_to_try.extend(["127.0.0.1", "host.docker.internal"])
+
+    last_exc = None
+    for candidate_host in dict.fromkeys(hosts_to_try):
+        try:
+            return psycopg2.connect(
+                host=candidate_host,
+                dbname=dbname,
+                user=user,
+                password=password,
+                port=port,
+                connect_timeout=connect_timeout,
+            )
+        except Exception as exc:
+            last_exc = exc
+
+    raise RuntimeError(
+        f"Не удалось подключиться к PostgreSQL (host={host}, port={port}, dbname={dbname}, user={user}): {last_exc}"
     )
 
 
@@ -2321,10 +2341,10 @@ if st.session_state["active_view"] == "market_statistics":
                 with st.spinner("Загружаем список эмитентов из PostgreSQL..."):
                     st.session_state[emitent_cache_key] = load_emitents_from_postgres(market_type)
                     st.session_state[emitent_loaded_key] = True
-            except Exception:
+            except Exception as exc:
                 st.session_state[emitent_cache_key] = []
                 st.session_state[emitent_loaded_key] = False
-                st.error("Не удалось подключиться к PostgreSQL. Проверьте secrets и доступность БД.")
+                st.error(f"Не удалось подключиться к PostgreSQL: {exc}")
     with emitent_controls_col2:
         st.caption("Список эмитентов загружается из PostgreSQL по кнопке.")
 
@@ -2441,8 +2461,8 @@ if st.session_state["active_view"] == "market_statistics":
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"market_statistics_excel_postgres_{market_type}",
                     )
-        except Exception:
-            st.error("Ошибка подключения к PostgreSQL. Проверьте secrets и доступность БД.")
+        except Exception as exc:
+            st.error(f"Ошибка подключения к PostgreSQL: {exc}")
 
     st.stop()
 
