@@ -1593,7 +1593,7 @@ if st.session_state["active_view"] == "vm":
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
-                limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + position_vm
+                limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0; position_vm))
                 st.session_state["vm_last_report"] = {
                     "TRADE_NAME": vm_data["TRADE_NAME"],
                     "SECID": vm_data["SECID"],
