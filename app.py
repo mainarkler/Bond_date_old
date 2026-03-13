@@ -409,11 +409,11 @@ def load_turnover_components_via_iss(
     regular_boards = boards_df[
         (boards_df["market"].astype(str) == market_kind)
         & (boards_df["boardid"].astype(str).str.upper() != "SPEQ")
-    ][["market", "boardid"]]
-    speq_boards = boards_df[boards_df["boardid"].astype(str).str.upper() == "SPEQ"][["market", "boardid"]]
-    ndm_boards = boards_df[boards_df["market"].astype(str).str.contains("ndm", case=False, na=False)][
-        ["market", "boardid"]
-    ]
+    ][["boardid"]].drop_duplicates()
+    speq_boards = boards_df[boards_df["boardid"].astype(str).str.upper() == "SPEQ"][["boardid"]].drop_duplicates()
+    ndm_boards = boards_df[
+        boards_df["market"].astype(str).str.contains("ndm", case=False, na=False)
+    ][["boardid"]].drop_duplicates()
 
     def load_category(board_pairs: pd.DataFrame, category_name: str) -> pd.DataFrame:
         cat_rows = []
@@ -421,7 +421,7 @@ def load_turnover_components_via_iss(
             start = 0
             while True:
                 payload = request_json(
-                    f"https://iss.moex.com/iss/history/engines/stock/markets/{row.market}/securities/{secid}.json",
+                    f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/securities/{secid}.json",
                     params={
                         "from": start_date,
                         "till": end_date,
