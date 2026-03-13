@@ -2520,17 +2520,24 @@ if st.session_state["active_view"] == "turnover_export":
     )
 
     show_stats_settings = st.checkbox(
-        "Показать настройки статистики ликвидности (ADTV / MDTV / сигма)",
+        "Показать настройки статистики ликвидности",
         value=False,
         key="turnover_export_show_stats",
     )
-    calculate_stats = False
+    stat_adtv = False
+    stat_mdtv = False
+    stat_sigma = False
     if show_stats_settings:
-        calculate_stats = st.checkbox(
-            "Рассчитать статистику ликвидности",
-            value=True,
-            key="turnover_export_calculate_stats",
-        )
+        st.caption("Выберите только нужные метрики, чтобы не перегружать отчёт.")
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        with stat_col1:
+            stat_adtv = st.checkbox("ADTV", value=True, key="turnover_export_stat_adtv")
+        with stat_col2:
+            stat_mdtv = st.checkbox("MDTV", value=True, key="turnover_export_stat_mdtv")
+        with stat_col3:
+            stat_sigma = st.checkbox("SIGMA", value=True, key="turnover_export_stat_sigma")
+
+    calculate_stats = stat_adtv or stat_mdtv or stat_sigma
 
     date_col_left, date_col_right = st.columns(2)
     with date_col_left:
@@ -2628,7 +2635,15 @@ if st.session_state["active_view"] == "turnover_export":
                             on="SECID",
                             how="left",
                         )
-                        stats_df = stats_df[["INPUT", "SECID", "ISIN", "SHORTNAME", "ADTV", "MDTV", "SIGMA"]]
+                        selected_stats_cols = []
+                        if stat_adtv:
+                            selected_stats_cols.append("ADTV")
+                        if stat_mdtv:
+                            selected_stats_cols.append("MDTV")
+                        if stat_sigma:
+                            selected_stats_cols.append("SIGMA")
+
+                        stats_df = stats_df[["INPUT", "SECID", "ISIN", "SHORTNAME", *selected_stats_cols]]
                         st.markdown("**Статистика ликвидности**")
                         st.dataframe(stats_df, use_container_width=True)
 
