@@ -2682,8 +2682,16 @@ if st.session_state["active_view"] == "turnover_export":
             daily_rows = []
             errors = []
 
+            unique_identifiers = list(dict.fromkeys(raw_identifiers))
+            total_identifiers = len(unique_identifiers)
+            progress_bar = st.progress(0, text="Подготовка к загрузке оборотов...")
+
             with st.spinner("Загружаем обороты..."):
-                for identifier in list(dict.fromkeys(raw_identifiers)):
+                for idx, identifier in enumerate(unique_identifiers, start=1):
+                    progress_bar.progress(
+                        int((idx - 1) / max(total_identifiers, 1) * 100),
+                        text=f"Обрабатываем {idx}/{total_identifiers}: {identifier}",
+                    )
                     try:
                         profile = resolve_market_security_profile(identifier, market_kind)
                         daily_df, totals = load_turnover_components_via_iss(
@@ -2719,6 +2727,8 @@ if st.session_state["active_view"] == "turnover_export":
                         )
                     except Exception as exc:
                         errors.append(f"{identifier}: {exc}")
+
+                progress_bar.progress(100, text="Загрузка оборотов завершена")
 
             if report_rows:
                 report_df = pd.DataFrame(report_rows).sort_values("TOTAL_SELECTED", ascending=False)
