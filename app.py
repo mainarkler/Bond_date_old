@@ -114,6 +114,12 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_index_analytics", use_container_width=True):
             st.session_state["active_view"] = "index_analytics"
             trigger_rerun()
+
+        st.markdown("### Выгрузка оборотов")
+        st.caption("Обороты акций/облигаций за период с опцией NDM и Excel-отчётом.")
+        if st.button("Открыть", key="open_turnover_export", use_container_width=True):
+            st.session_state["active_view"] = "turnover_export"
+            trigger_rerun()
     with bottom_right:
         st.markdown("### Sell_stress")
         st.caption("Оценка рыночного давления для акций и облигаций.")
@@ -2778,6 +2784,19 @@ if st.session_state["active_view"] == "turnover_export":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="turnover_export_excel",
                 )
+
+                if calculate_stats and not stats_df.empty:
+                    stats_excel_buffer = BytesIO()
+                    with pd.ExcelWriter(stats_excel_buffer, engine="openpyxl") as stats_writer:
+                        stats_df.to_excel(stats_writer, index=False, sheet_name="liquidity_stats")
+                    stats_excel_buffer.seek(0)
+                    st.download_button(
+                        label="💾 Скачать статистические показатели (Excel)",
+                        data=stats_excel_buffer.getvalue(),
+                        file_name=f"turnover_stats_{market_kind}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="turnover_export_stats_excel",
+                    )
 
             if errors:
                 st.warning("Не удалось обработать часть инструментов:")
