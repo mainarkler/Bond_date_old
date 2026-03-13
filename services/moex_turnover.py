@@ -39,7 +39,9 @@ class MoexTurnoverClient:
                 f"MOEX ISS вернул не-JSON для {url} (status={response.status_code}): {body_preview}"
             ) from exc
 
-    def get_boards(self, secid: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+    def get_boards(
+        self, secid: str, market_kind: str = "shares"
+    ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
         """Get traded boards with markets for categories: regular, SPEQ, NDM."""
         url = f"{BASE_URL}/securities/{secid}/boards.json"
         payload = self._get_json(url, params={"iss.meta": "off"})
@@ -48,7 +50,7 @@ class MoexTurnoverClient:
 
         regular = [
             (str(row.market), str(row.boardid))
-            for row in df[(df["market"] == "shares") & (df["boardid"] != "SPEQ")].itertuples()
+            for row in df[(df["market"] == market_kind) & (df["boardid"] != "SPEQ")].itertuples()
         ]
         speq = [
             (str(row.market), str(row.boardid))
@@ -56,7 +58,7 @@ class MoexTurnoverClient:
         ]
         ndm = [
             (str(row.market), str(row.boardid))
-            for row in df[df["market"].isin(["ndm", "sharesndm"])].itertuples()
+            for row in df[df["market"].astype(str).str.contains("ndm", case=False, na=False)].itertuples()
         ]
         return regular, speq, ndm
 
@@ -114,11 +116,13 @@ class MoexTurnoverClient:
         df_all = pd.concat(frames, ignore_index=True)
         return df_all.groupby("TRADEDATE", as_index=False)["TURNOVER"].sum()
 
-    def get_history(self, secid: str, date_from: str, date_to: str | None = None) -> pd.DataFrame:
+    def get_history(
+        self, secid: str, date_from: str, date_to: str | None = None, market_kind: str = "shares"
+    ) -> pd.DataFrame:
         """Download history VALUE by day."""
         start = 0
         frames: list[pd.DataFrame] = []
-        url = f"{BASE_URL}/history/engines/stock/markets/shares/securities/{secid}.json"
+        url = f"{BASE_URL}/history/engines/stock/markets/{market_kind}/securities/{secid}.json"
 
         while True:
             params = {
@@ -146,9 +150,11 @@ class MoexTurnoverClient:
             return pd.DataFrame(columns=["TRADEDATE", "VALUE"])
         return pd.concat(frames, ignore_index=True)
 
-    def fetch_combined_daily(self, secid: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
+    def fetch_combined_daily(
+        self, secid: str, start_date: str, end_date: str | None = None, market_kind: str = "shares"
+    ) -> pd.DataFrame:
         """Get daily category values + history and combine into single table."""
-        regular_boards, speq_boards, ndm_boards = self.get_boards(secid)
+        regular_boards, speq_boards, ndm_boards = self.get_boards(secid, market_kind=market_kind)
         categories = {"REGULAR": regular_boards, "SPEQ": speq_boards, "NDM": ndm_boards}
 
         category_frames: dict[str, pd.DataFrame] = {}
@@ -178,7 +184,7 @@ class MoexTurnoverClient:
                 category_frames[category] = pd.DataFrame(columns=["TRADEDATE", category])
 
         try:
-            hist_df = self.get_history(secid, start_date, end_date)
+            hist_df = self.get_history(secid, start_date, end_date, market_kind=market_kind)
         except Exception:
             hist_df = pd.DataFrame(columns=["TRADEDATE", "VALUE"])
 
@@ -215,9 +221,11 @@ class MoexTurnoverClient:
         combined_df.insert(0, "SECID", secid)
         return combined_df[["SECID", "TRADEDATE", "HISTORY_VALUE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]]
 
-    def get_turnover(self, secid: str, start_date: str, end_date: str | None = None) -> Dict[str, object]:
+    def get_turnover(
+        self, secid: str, start_date: str, end_date: str | None = None, market_kind: str = "shares"
+    ) -> Dict[str, object]:
         """Return totals compatible with app UI based on combined daily data."""
-        combined_df = self.fetch_combined_daily(secid, start_date, end_date)
+        combined_df = self.fetch_combined_daily(secid, start_date, end_date, market_kind=market_kind)
         total_regular = float(pd.to_numeric(combined_df["REGULAR"], errors="coerce").sum())
         total_speq = float(pd.to_numeric(combined_df["SPEQ"], errors="coerce").sum())
         total_ndm = float(pd.to_numeric(combined_df["NDM"], errors="coerce").sum())
