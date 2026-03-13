@@ -166,6 +166,22 @@ def request_get(url: str, timeout: int = 15, params=None):
     return response
 
 
+def request_json(url: str, timeout: int = 15, params=None, attempts: int = 3) -> dict:
+    last_exc = None
+    for _ in range(max(1, attempts)):
+        response = request_get(url, timeout=timeout, params=params)
+        try:
+            return response.json()
+        except ValueError as exc:
+            last_exc = exc
+            body_preview = (response.text or "")[:200].replace("\n", " ")
+            if body_preview:
+                continue
+    raise RuntimeError(
+        f"MOEX ISS вернул не-JSON для {url}. Последняя ошибка: {last_exc}"
+    ) from last_exc
+
+
 def open_index_analytics_sheet():
     ia.render_index_analytics_view(
         request_get=request_get,
@@ -379,12 +395,11 @@ def load_turnover_components_via_iss(
     start_date: str,
     end_date: str,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
-    boards_response = request_get(
+    boards_js = request_json(
         f"https://iss.moex.com/iss/securities/{secid}/boards.json",
         params={"iss.meta": "off"},
         timeout=200,
     )
-    boards_js = boards_response.json()
     boards_df = pd.DataFrame(boards_js["boards"]["data"], columns=boards_js["boards"]["columns"])
     if boards_df.empty:
         empty_daily = pd.DataFrame(columns=["SECID", "TRADEDATE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"])
@@ -405,7 +420,7 @@ def load_turnover_components_via_iss(
         for row in board_pairs.itertuples(index=False):
             start = 0
             while True:
-                response = request_get(
+                payload = request_json(
                     f"https://iss.moex.com/iss/history/engines/stock/markets/{row.market}/securities/{secid}.json",
                     params={
                         "from": start_date,
@@ -416,8 +431,7 @@ def load_turnover_components_via_iss(
                         "history.columns": "TRADEDATE,BOARDID,VALUE",
                     },
                     timeout=200,
-                )
-                payload = response.json().get("history", {})
+                ).get("history", {})
                 data = payload.get("data", [])
                 cols = payload.get("columns", [])
                 if not data:
