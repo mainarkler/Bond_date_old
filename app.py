@@ -51,6 +51,7 @@ if FORCED_ACTIVE_VIEW in {
     "index_analytics",
     "moex_turnover",
     "market_statistics",
+    "turnover_export",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -113,6 +114,12 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_index_analytics", use_container_width=True):
             st.session_state["active_view"] = "index_analytics"
             trigger_rerun()
+
+        st.markdown("### Выгрузка оборотов")
+        st.caption("Обороты акций/облигаций за период с опцией NDM и Excel-отчётом.")
+        if st.button("Открыть", key="open_turnover_export_home", use_container_width=True):
+            st.session_state["active_view"] = "turnover_export"
+            trigger_rerun()
     with bottom_right:
         st.markdown("### Sell_stress")
         st.caption("Оценка рыночного давления для акций и облигаций.")
@@ -158,6 +165,22 @@ def request_get(url: str, timeout: int = 15, params=None):
     response = HTTP_SESSION.get(url, timeout=timeout, params=params)
     response.raise_for_status()
     return response
+
+
+def request_json(url: str, timeout: int = 15, params=None, attempts: int = 3) -> dict:
+    last_exc = None
+    for _ in range(max(1, attempts)):
+        response = request_get(url, timeout=timeout, params=params)
+        try:
+            return response.json()
+        except ValueError as exc:
+            last_exc = exc
+            body_preview = (response.text or "")[:200].replace("\n", " ")
+            if body_preview:
+                continue
+    raise RuntimeError(
+        f"MOEX ISS вернул не-JSON для {url}. Последняя ошибка: {last_exc}"
+    ) from last_exc
 
 
 def open_index_analytics_sheet():
@@ -351,6 +374,114 @@ def load_security_emitents_map(market_kind: str) -> pd.DataFrame:
 def normalize_emitent_title(value: str) -> str:
     title = str(value or "").strip()
     return title if title else "Не указан"
+
+
+def calculate_turnover_liquidity_stats(history_df: pd.DataFrame) -> pd.DataFrame:
+    if history_df.empty:
+        return pd.DataFrame(columns=["SECID", "ADTV", "MDTV", "SIGMA"])
+
+    work_df = history_df.copy()
+    work_df["VALUE"] = pd.to_numeric(work_df["VALUE"], errors="coerce").fillna(0.0)
+
+    return (
+        work_df.groupby("SECID", as_index=False)
+        .agg(ADTV=("VALUE", "mean"), MDTV=("VALUE", "median"), SIGMA=("VALUE", "std"))
+        .fillna(0.0)
+    )
+
+
+def load_turnover_components_via_iss(
+    secid: str,
+    market_kind: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    boards_js = request_json(
+        f"https://iss.moex.com/iss/securities/{secid}/boards.json",
+        params={"iss.meta": "off"},
+        timeout=200,
+    )
+    boards_df = pd.DataFrame(boards_js["boards"]["data"], columns=boards_js["boards"]["columns"])
+    if boards_df.empty:
+        empty_daily = pd.DataFrame(columns=["SECID", "TRADEDATE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"])
+        return empty_daily, {"TOTAL_regular": 0.0, "TOTAL_SPEQ": 0.0, "TOTAL_NDM": 0.0, "TOTAL_all": 0.0}
+
+    boards_df = boards_df[boards_df["is_traded"] == 1].copy()
+    regular_boards = boards_df[
+        (boards_df["market"].astype(str) == market_kind)
+        & (boards_df["boardid"].astype(str).str.upper() != "SPEQ")
+    ][["boardid"]].drop_duplicates()
+    speq_boards = boards_df[boards_df["boardid"].astype(str).str.upper() == "SPEQ"][["boardid"]].drop_duplicates()
+    ndm_boards = boards_df[
+        boards_df["market"].astype(str).str.contains("ndm", case=False, na=False)
+    ][["boardid"]].drop_duplicates()
+
+    def load_category(board_pairs: pd.DataFrame, category_name: str) -> pd.DataFrame:
+        cat_rows = []
+        for row in board_pairs.itertuples(index=False):
+            start = 0
+            while True:
+                payload = request_json(
+                    f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/securities/{secid}.json",
+                    params={
+                        "from": start_date,
+                        "till": end_date,
+                        "start": start,
+                        "iss.only": "history",
+                        "iss.meta": "off",
+                        "history.columns": "TRADEDATE,BOARDID,VALUE",
+                    },
+                    timeout=200,
+                ).get("history", {})
+                data = payload.get("data", [])
+                cols = payload.get("columns", [])
+                if not data:
+                    break
+
+                df_part = pd.DataFrame(data, columns=cols)
+                if "BOARDID" in df_part.columns:
+                    df_part = df_part[df_part["BOARDID"].astype(str).str.upper() == str(row.boardid).upper()]
+                if not df_part.empty and {"TRADEDATE", "VALUE"}.issubset(df_part.columns):
+                    df_part = df_part[["TRADEDATE", "VALUE"]].copy()
+                    df_part[category_name] = pd.to_numeric(df_part["VALUE"], errors="coerce").fillna(0.0)
+                    cat_rows.append(df_part[["TRADEDATE", category_name]])
+                start += len(data)
+
+        if not cat_rows:
+            return pd.DataFrame(columns=["TRADEDATE", category_name])
+        cat_df = pd.concat(cat_rows, ignore_index=True)
+        return cat_df.groupby("TRADEDATE", as_index=False)[category_name].sum()
+
+    reg_df = load_category(regular_boards, "REGULAR")
+    speq_df = load_category(speq_boards, "SPEQ")
+    ndm_df = load_category(ndm_boards, "NDM")
+
+    all_dates = pd.DataFrame(columns=["TRADEDATE"])
+    for frame in [reg_df, speq_df, ndm_df]:
+        if not frame.empty:
+            all_dates = pd.concat([all_dates, frame[["TRADEDATE"]]], ignore_index=True)
+
+    if all_dates.empty:
+        daily_df = pd.DataFrame(columns=["SECID", "TRADEDATE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"])
+    else:
+        daily_df = all_dates.drop_duplicates().merge(reg_df, on="TRADEDATE", how="left")
+        daily_df = daily_df.merge(speq_df, on="TRADEDATE", how="left")
+        daily_df = daily_df.merge(ndm_df, on="TRADEDATE", how="left")
+        daily_df[["REGULAR", "SPEQ", "NDM"]] = daily_df[["REGULAR", "SPEQ", "NDM"]].fillna(0.0)
+        daily_df["TOTAL_TRADES"] = daily_df[["REGULAR", "SPEQ", "NDM"]].sum(axis=1)
+        daily_df.insert(0, "SECID", secid)
+
+    total_regular = float(pd.to_numeric(daily_df.get("REGULAR", 0.0), errors="coerce").sum()) if not daily_df.empty else 0.0
+    total_speq = float(pd.to_numeric(daily_df.get("SPEQ", 0.0), errors="coerce").sum()) if not daily_df.empty else 0.0
+    total_ndm = float(pd.to_numeric(daily_df.get("NDM", 0.0), errors="coerce").sum()) if not daily_df.empty else 0.0
+
+    totals = {
+        "TOTAL_regular": total_regular,
+        "TOTAL_SPEQ": total_speq,
+        "TOTAL_NDM": total_ndm,
+        "TOTAL_all": total_regular + total_speq + total_ndm,
+    }
+    return daily_df, totals
 
 
 # ---------------------------
@@ -2466,6 +2597,209 @@ if st.session_state["active_view"] == "market_statistics":
 
             if not full_rows:
                 st.error("Не удалось получить статистику ни для одного инструмента.")
+
+    st.stop()
+
+
+# ---------------------------
+# Turnover export view
+# ---------------------------
+if st.session_state["active_view"] == "turnover_export":
+    st.subheader("📊 Выгрузка оборотов по акциям и облигациям")
+    st.markdown("Выгрузка оборотов за период по списку бумаг в Excel с опциональной статистикой ликвидности.")
+
+    turnover_mode = st.radio(
+        "Тип инструментов",
+        options=["Акции", "Облигации"],
+        horizontal=True,
+        key="turnover_export_mode",
+    )
+    market_kind = "shares" if turnover_mode == "Акции" else "bonds"
+
+    identifiers_input = st.text_area(
+        "ISIN / TICKER / SECID (каждый инструмент с новой строки)",
+        value="",
+        placeholder="SBER\nGAZP\nRU000A105SN8",
+        key="turnover_export_identifiers",
+    )
+
+    include_otc = st.checkbox(
+        "Выгрузка внебиржевых оборотов (NDM)",
+        value=False,
+        key="turnover_export_include_otc",
+        help="По аналогии с MOEX turnover: при включении добавляется NDM.",
+    )
+
+    show_stats_settings = st.checkbox(
+        "Показать настройки статистики ликвидности",
+        value=False,
+        key="turnover_export_show_stats",
+    )
+    stat_adtv = False
+    stat_mdtv = False
+    stat_sigma = False
+    if show_stats_settings:
+        st.caption("Выберите только нужные метрики, чтобы не перегружать отчёт.")
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        with stat_col1:
+            stat_adtv = st.checkbox("ADTV", value=True, key="turnover_export_stat_adtv")
+        with stat_col2:
+            stat_mdtv = st.checkbox("MDTV", value=True, key="turnover_export_stat_mdtv")
+        with stat_col3:
+            stat_sigma = st.checkbox("SIGMA", value=True, key="turnover_export_stat_sigma")
+
+    calculate_stats = stat_adtv or stat_mdtv or stat_sigma
+
+    date_col_left, date_col_right = st.columns(2)
+    with date_col_left:
+        start_date = st.date_input(
+            "START_DATE",
+            value=datetime.now().date() - timedelta(days=90),
+            key="turnover_export_start_date",
+        )
+    with date_col_right:
+        end_date = st.date_input(
+            "END_DATE",
+            value=datetime.now().date(),
+            key="turnover_export_end_date",
+        )
+
+    if end_date < start_date:
+        st.error("END_DATE не может быть раньше START_DATE.")
+        st.stop()
+
+    if st.button("Сформировать выгрузку", key="turnover_export_run"):
+        raw_identifiers = [line.strip().upper() for line in identifiers_input.splitlines() if line.strip()]
+        if not raw_identifiers:
+            st.error("Укажите хотя бы один ISIN / TICKER / SECID.")
+        else:
+            report_rows = []
+            daily_rows = []
+            errors = []
+
+            with st.spinner("Загружаем обороты..."):
+                for identifier in list(dict.fromkeys(raw_identifiers)):
+                    try:
+                        profile = resolve_market_security_profile(identifier, market_kind)
+                        daily_df, totals = load_turnover_components_via_iss(
+                            profile["secid"],
+                            market_kind,
+                            start_date.strftime("%Y-%m-%d"),
+                            end_date.strftime("%Y-%m-%d"),
+                        )
+
+                        daily_df["INPUT"] = profile["input"]
+                        daily_df["ISIN"] = profile["isin"]
+                        daily_df["SHORTNAME"] = profile["shortname"]
+                        daily_rows.append(daily_df)
+
+                        total_regular = float(totals["TOTAL_regular"])
+                        total_speq = float(totals["TOTAL_SPEQ"])
+                        total_ndm = float(totals["TOTAL_NDM"])
+                        total_exchange = total_regular + total_speq
+                        total_selected = total_exchange + total_ndm if include_otc else total_exchange
+
+                        report_rows.append(
+                            {
+                                "INPUT": profile["input"],
+                                "SECID": profile["secid"],
+                                "ISIN": profile["isin"],
+                                "SHORTNAME": profile["shortname"],
+                                "TOTAL_REGULAR": total_regular,
+                                "TOTAL_SPEQ": total_speq,
+                                "TOTAL_NDM": total_ndm,
+                                "TOTAL_EXCHANGE": total_exchange,
+                                "TOTAL_SELECTED": total_selected,
+                            }
+                        )
+                    except Exception as exc:
+                        errors.append(f"{identifier}: {exc}")
+
+            if report_rows:
+                report_df = pd.DataFrame(report_rows).sort_values("TOTAL_SELECTED", ascending=False)
+                st.success("Выгрузка сформирована")
+                st.dataframe(report_df, use_container_width=True)
+
+                detailed_df = pd.concat(daily_rows, ignore_index=True) if daily_rows else pd.DataFrame()
+                stats_df = pd.DataFrame()
+                if not detailed_df.empty:
+                    detailed_df["TRADEDATE"] = pd.to_datetime(detailed_df["TRADEDATE"], errors="coerce")
+                    detailed_df = detailed_df.dropna(subset=["TRADEDATE"])
+                    detailed_df["VALUE"] = (
+                        pd.to_numeric(detailed_df["REGULAR"], errors="coerce").fillna(0.0)
+                        + pd.to_numeric(detailed_df["SPEQ"], errors="coerce").fillna(0.0)
+                    )
+                    if include_otc:
+                        detailed_df["VALUE"] += pd.to_numeric(detailed_df["NDM"], errors="coerce").fillna(0.0)
+
+                    if calculate_stats:
+                        stats_df = calculate_turnover_liquidity_stats(detailed_df)
+                        stats_df = stats_df.merge(
+                            report_df[["SECID", "INPUT", "ISIN", "SHORTNAME"]].drop_duplicates(),
+                            on="SECID",
+                            how="left",
+                        )
+                        selected_stats_cols = []
+                        if stat_adtv:
+                            selected_stats_cols.append("ADTV")
+                        if stat_mdtv:
+                            selected_stats_cols.append("MDTV")
+                        if stat_sigma:
+                            selected_stats_cols.append("SIGMA")
+
+                        stats_df = stats_df[["INPUT", "SECID", "ISIN", "SHORTNAME", *selected_stats_cols]]
+                        st.markdown("**Статистика ликвидности**")
+                        st.dataframe(stats_df, use_container_width=True)
+
+                    chart_df = detailed_df.groupby("TRADEDATE", as_index=False)["VALUE"].sum().sort_values("TRADEDATE")
+                    st.markdown("**Динамика оборотов по дням**")
+                    st.line_chart(chart_df.set_index("TRADEDATE")["VALUE"], use_container_width=True)
+
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    report_df.to_excel(writer, index=False, sheet_name="turnover_totals")
+
+                    if detailed_df.empty:
+                        pd.DataFrame(columns=["TRADEDATE", "SECID", "VALUE"]).to_excel(
+                            writer, index=False, sheet_name="turnover_daily"
+                        )
+                    else:
+                        export_df = detailed_df.copy()
+                        export_df["TRADEDATE"] = export_df["TRADEDATE"].dt.strftime("%Y-%m-%d")
+                        export_df.to_excel(writer, index=False, sheet_name="turnover_daily")
+
+                    if calculate_stats and not stats_df.empty:
+                        stats_df.to_excel(writer, index=False, sheet_name="liquidity_stats")
+                excel_buffer.seek(0)
+
+                st.download_button(
+                    label="💾 Скачать Excel с оборотами",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"turnover_export_{market_kind}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="turnover_export_excel",
+                )
+
+                if calculate_stats and not stats_df.empty:
+                    stats_excel_buffer = BytesIO()
+                    with pd.ExcelWriter(stats_excel_buffer, engine="openpyxl") as stats_writer:
+                        stats_df.to_excel(stats_writer, index=False, sheet_name="liquidity_stats")
+                    stats_excel_buffer.seek(0)
+                    st.download_button(
+                        label="💾 Скачать статистические показатели (Excel)",
+                        data=stats_excel_buffer.getvalue(),
+                        file_name=f"turnover_stats_{market_kind}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="turnover_export_stats_excel",
+                    )
+
+            if errors:
+                st.warning("Не удалось обработать часть инструментов:")
+                for error in errors:
+                    st.write(f"- {error}")
+
+            if not report_rows:
+                st.error("Не удалось получить обороты ни для одного инструмента.")
 
     st.stop()
 
