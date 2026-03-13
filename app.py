@@ -373,6 +373,102 @@ def calculate_turnover_liquidity_stats(history_df: pd.DataFrame) -> pd.DataFrame
     )
 
 
+def load_turnover_components_via_iss(
+    secid: str,
+    market_kind: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    boards_response = request_get(
+        f"https://iss.moex.com/iss/securities/{secid}/boards.json",
+        params={"iss.meta": "off"},
+        timeout=200,
+    )
+    boards_js = boards_response.json()
+    boards_df = pd.DataFrame(boards_js["boards"]["data"], columns=boards_js["boards"]["columns"])
+    if boards_df.empty:
+        empty_daily = pd.DataFrame(columns=["SECID", "TRADEDATE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"])
+        return empty_daily, {"TOTAL_regular": 0.0, "TOTAL_SPEQ": 0.0, "TOTAL_NDM": 0.0, "TOTAL_all": 0.0}
+
+    boards_df = boards_df[boards_df["is_traded"] == 1].copy()
+    regular_boards = boards_df[
+        (boards_df["market"].astype(str) == market_kind)
+        & (boards_df["boardid"].astype(str).str.upper() != "SPEQ")
+    ][["market", "boardid"]]
+    speq_boards = boards_df[boards_df["boardid"].astype(str).str.upper() == "SPEQ"][["market", "boardid"]]
+    ndm_boards = boards_df[boards_df["market"].astype(str).str.contains("ndm", case=False, na=False)][
+        ["market", "boardid"]
+    ]
+
+    def load_category(board_pairs: pd.DataFrame, category_name: str) -> pd.DataFrame:
+        cat_rows = []
+        for row in board_pairs.itertuples(index=False):
+            start = 0
+            while True:
+                response = request_get(
+                    f"https://iss.moex.com/iss/history/engines/stock/markets/{row.market}/securities/{secid}.json",
+                    params={
+                        "from": start_date,
+                        "till": end_date,
+                        "start": start,
+                        "iss.only": "history",
+                        "iss.meta": "off",
+                        "history.columns": "TRADEDATE,BOARDID,VALUE",
+                    },
+                    timeout=200,
+                )
+                payload = response.json().get("history", {})
+                data = payload.get("data", [])
+                cols = payload.get("columns", [])
+                if not data:
+                    break
+
+                df_part = pd.DataFrame(data, columns=cols)
+                if "BOARDID" in df_part.columns:
+                    df_part = df_part[df_part["BOARDID"].astype(str).str.upper() == str(row.boardid).upper()]
+                if not df_part.empty and {"TRADEDATE", "VALUE"}.issubset(df_part.columns):
+                    df_part = df_part[["TRADEDATE", "VALUE"]].copy()
+                    df_part[category_name] = pd.to_numeric(df_part["VALUE"], errors="coerce").fillna(0.0)
+                    cat_rows.append(df_part[["TRADEDATE", category_name]])
+                start += len(data)
+
+        if not cat_rows:
+            return pd.DataFrame(columns=["TRADEDATE", category_name])
+        cat_df = pd.concat(cat_rows, ignore_index=True)
+        return cat_df.groupby("TRADEDATE", as_index=False)[category_name].sum()
+
+    reg_df = load_category(regular_boards, "REGULAR")
+    speq_df = load_category(speq_boards, "SPEQ")
+    ndm_df = load_category(ndm_boards, "NDM")
+
+    all_dates = pd.DataFrame(columns=["TRADEDATE"])
+    for frame in [reg_df, speq_df, ndm_df]:
+        if not frame.empty:
+            all_dates = pd.concat([all_dates, frame[["TRADEDATE"]]], ignore_index=True)
+
+    if all_dates.empty:
+        daily_df = pd.DataFrame(columns=["SECID", "TRADEDATE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"])
+    else:
+        daily_df = all_dates.drop_duplicates().merge(reg_df, on="TRADEDATE", how="left")
+        daily_df = daily_df.merge(speq_df, on="TRADEDATE", how="left")
+        daily_df = daily_df.merge(ndm_df, on="TRADEDATE", how="left")
+        daily_df[["REGULAR", "SPEQ", "NDM"]] = daily_df[["REGULAR", "SPEQ", "NDM"]].fillna(0.0)
+        daily_df["TOTAL_TRADES"] = daily_df[["REGULAR", "SPEQ", "NDM"]].sum(axis=1)
+        daily_df.insert(0, "SECID", secid)
+
+    total_regular = float(pd.to_numeric(daily_df.get("REGULAR", 0.0), errors="coerce").sum()) if not daily_df.empty else 0.0
+    total_speq = float(pd.to_numeric(daily_df.get("SPEQ", 0.0), errors="coerce").sum()) if not daily_df.empty else 0.0
+    total_ndm = float(pd.to_numeric(daily_df.get("NDM", 0.0), errors="coerce").sum()) if not daily_df.empty else 0.0
+
+    totals = {
+        "TOTAL_regular": total_regular,
+        "TOTAL_SPEQ": total_speq,
+        "TOTAL_NDM": total_ndm,
+        "TOTAL_all": total_regular + total_speq + total_ndm,
+    }
+    return daily_df, totals
+
+
 # ---------------------------
 # Sell_stres helpers (Share)
 # ---------------------------
@@ -2562,7 +2658,6 @@ if st.session_state["active_view"] == "turnover_export":
         if not raw_identifiers:
             st.error("Укажите хотя бы один ISIN / TICKER / SECID.")
         else:
-            client = MoexTurnoverClient(timeout=60)
             report_rows = []
             daily_rows = []
             errors = []
@@ -2571,17 +2666,11 @@ if st.session_state["active_view"] == "turnover_export":
                 for identifier in list(dict.fromkeys(raw_identifiers)):
                     try:
                         profile = resolve_market_security_profile(identifier, market_kind)
-                        totals = client.get_turnover(
+                        daily_df, totals = load_turnover_components_via_iss(
                             profile["secid"],
+                            market_kind,
                             start_date.strftime("%Y-%m-%d"),
                             end_date.strftime("%Y-%m-%d"),
-                            market_kind=market_kind,
-                        )
-                        daily_df = client.fetch_combined_daily(
-                            profile["secid"],
-                            start_date.strftime("%Y-%m-%d"),
-                            end_date.strftime("%Y-%m-%d"),
-                            market_kind=market_kind,
                         )
 
                         daily_df["INPUT"] = profile["input"]
