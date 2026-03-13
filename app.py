@@ -117,7 +117,7 @@ if st.session_state["active_view"] == "home":
 
         st.markdown("### Выгрузка оборотов")
         st.caption("Обороты акций/облигаций за период с опцией NDM и Excel-отчётом.")
-        if st.button("Открыть", key="open_turnover_export", use_container_width=True):
+        if st.button("Открыть", key="open_turnover_export_home", use_container_width=True):
             st.session_state["active_view"] = "turnover_export"
             trigger_rerun()
     with bottom_right:
