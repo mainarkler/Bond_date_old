@@ -2793,6 +2793,7 @@ if st.session_state["active_view"] == "turnover_export":
                     file_name=f"turnover_export_{market_kind}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="turnover_export_excel",
+                    on_click="ignore",
                 )
 
                 if calculate_stats and not stats_df.empty:
@@ -2806,6 +2807,7 @@ if st.session_state["active_view"] == "turnover_export":
                         file_name=f"turnover_stats_{market_kind}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="turnover_export_stats_excel",
+                        on_click="ignore",
                     )
 
             if errors:
