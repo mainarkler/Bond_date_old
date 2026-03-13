@@ -138,6 +138,11 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_market_statistics", use_container_width=True):
             st.session_state["active_view"] = "market_statistics"
             trigger_rerun()
+        st.markdown("### Выгрузка оборотов")
+        st.caption("Обороты акций/облигаций за период с опцией NDM и Excel-отчётом.")
+        if st.button("Открыть", key="open_turnover_export", use_container_width=True):
+            st.session_state["active_view"] = "turnover_export"
+            trigger_rerun()
     st.stop()
 
 # ---------------------------
