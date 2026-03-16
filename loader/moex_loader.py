@@ -18,6 +18,19 @@ BATCH_SIZE = 1000
 PAGE_SIZE = 100
 
 
+def _is_non_empty_env(name: str) -> bool:
+    return bool((os.getenv(name) or "").strip())
+
+
+def should_skip_in_ci() -> bool:
+    """Skip loader in GitHub Actions when DB secrets are not configured."""
+    if os.getenv("GITHUB_ACTIONS") != "true":
+        return False
+
+    required = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+    return not all(_is_non_empty_env(name) for name in required)
+
+
 def get_db_connection():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "127.0.0.1"),
@@ -206,6 +219,10 @@ def refresh_bond_emitters(conn) -> None:
 
 
 def main() -> None:
+    if should_skip_in_ci():
+        print("Skipping loader: DB_* secrets are not configured for this GitHub Actions run.")
+        return
+
     conn = get_db_connection()
     try:
         ensure_schema(conn)
