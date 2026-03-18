@@ -19,6 +19,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.moex_turnover import MoexTurnoverClient
+from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 
 # ---------------------------
 # Streamlit page setup
@@ -52,6 +53,7 @@ if FORCED_ACTIVE_VIEW in {
     "moex_turnover",
     "market_statistics",
     "turnover_export",
+    "moex_news",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -119,6 +121,12 @@ if st.session_state["active_view"] == "home":
         st.caption("Обороты акций/облигаций за период с опцией NDM и Excel-отчётом.")
         if st.button("Открыть", key="open_turnover_export_home", use_container_width=True):
             st.session_state["active_view"] = "turnover_export"
+            trigger_rerun()
+
+        st.markdown("### Новости MOEX")
+        st.caption("Поиск новостей MOEX по дате и ISIN с подбором связанных публикаций эмитента.")
+        if st.button("Открыть", key="open_moex_news", use_container_width=True):
+            st.session_state["active_view"] = "moex_news"
             trigger_rerun()
     with bottom_right:
         st.markdown("### Sell_stress")
@@ -2207,6 +2215,112 @@ if st.session_state["active_view"] == "sell_stres":
             render_email_compose_section("Sell_stres Bond отчёт", "bond_report", "sell_stres_bond_deltaP_all.xlsx", bond_downloads.get("delta_xlsx") if bond_downloads else None)
 
     st.stop()
+
+@st.cache_data(ttl=900)
+def load_moex_news(limit: int):
+    return get_news(limit=limit)
+
+
+@st.cache_data(ttl=900)
+def load_moex_news_by_date(date_value: str):
+    return get_news_by_date(date_value)
+
+
+@st.cache_data(ttl=900)
+def load_moex_news_by_isin(isin: str, days: int):
+    return get_news_by_isin(isin, days=days)
+
+
+def render_news_items(news_items: list[dict], empty_message: str) -> None:
+    if not news_items:
+        st.info(empty_message)
+        return
+
+    for item in news_items:
+        item_datetime = item.get("datetime")
+        datetime_label = item_datetime.strftime("%Y-%m-%d %H:%M:%S") if item_datetime else f"{item.get('date', '')} {item.get('time', '')}".strip()
+        category = item.get("category") or "general"
+        with st.container(border=True):
+            st.markdown(f"**{item.get('title', 'Без заголовка')}**")
+            meta_left, meta_right = st.columns([2, 3])
+            with meta_left:
+                st.caption(f"{datetime_label} · {item.get('source', 'MOEX')}")
+            with meta_right:
+                st.caption(f"ID: {item.get('id', 'n/a')} · category: {category}")
+
+
+# ---------------------------
+# MOEX news view
+# ---------------------------
+if st.session_state["active_view"] == "moex_news":
+    st.subheader("📰 Новости MOEX")
+    st.markdown("Поиск новостей MOEX ISS `/iss/sitenews.json` по дате публикации и по ISIN эмитента.")
+
+    latest_col, date_col, isin_col = st.tabs(["Последние", "По дате", "По ISIN"])
+
+    with latest_col:
+        latest_limit = st.number_input(
+            "Количество новостей", min_value=1, max_value=500, value=20, step=10, key="moex_news_limit"
+        )
+        if st.button("Загрузить последние новости", key="moex_news_load_latest"):
+            try:
+                latest_news = load_moex_news(limit=int(latest_limit))
+            except (NewsServiceError, requests.RequestException) as exc:
+                st.error(f"Не удалось загрузить новости MOEX: {exc}")
+            else:
+                st.success(f"Получено новостей: {len(latest_news)}")
+                render_news_items(latest_news, "Нет новостей для отображения.")
+
+    with date_col:
+        selected_news_date = st.date_input(
+            "Дата публикации",
+            value=datetime.now().date(),
+            key="moex_news_date_filter",
+        )
+        if st.button("Найти новости по дате", key="moex_news_load_by_date"):
+            try:
+                date_news = load_moex_news_by_date(selected_news_date.strftime("%Y-%m-%d"))
+            except (ValueError, NewsServiceError, requests.RequestException) as exc:
+                st.error(f"Не удалось получить новости по дате: {exc}")
+            else:
+                st.success(f"Новостей за {selected_news_date:%Y-%m-%d}: {len(date_news)}")
+                render_news_items(date_news, "За выбранную дату новости не найдены.")
+
+    with isin_col:
+        news_isin = st.text_input(
+            "ISIN",
+            value="RU000A1008P1",
+            placeholder="Например, RU000A1008P1",
+            key="moex_news_isin_input",
+        )
+        related_days = st.number_input(
+            "Глубина related_news, дней", min_value=0, max_value=365, value=7, step=1, key="moex_news_days"
+        )
+        if st.button("Найти новости по ISIN", key="moex_news_load_by_isin"):
+            if not news_isin.strip():
+                st.error("Введите ISIN для поиска новостей.")
+            else:
+                try:
+                    isin_result = load_moex_news_by_isin(news_isin.strip().upper(), int(related_days))
+                except (ValueError, NewsServiceError, requests.RequestException) as exc:
+                    st.error(f"Не удалось получить новости по ISIN: {exc}")
+                else:
+                    metric_col1, metric_col2 = st.columns(2)
+                    metric_col1.metric("Target news", len(isin_result.get("target_news", [])))
+                    metric_col2.metric("Related news", len(isin_result.get("related_news", [])))
+                    st.markdown("#### Target news")
+                    render_news_items(
+                        isin_result.get("target_news", []),
+                        f"Новости с явным упоминанием ISIN {isin_result.get('isin', news_isin)} не найдены.",
+                    )
+                    st.markdown("#### Related news")
+                    render_news_items(
+                        isin_result.get("related_news", []),
+                        "Связанные новости эмитента за выбранный период не найдены.",
+                    )
+
+    st.stop()
+
 
 # ---------------------------
 # Index analytics view
