@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -166,78 +166,152 @@ def _fetch_index_snapshot(index_name: str, date_str: str, _request_get_func) -> 
     return snapshot_df, prev_date
 
 
+
+
+def _parse_manual_dates(raw_dates: str) -> List[pd.Timestamp]:
+    if not raw_dates or not raw_dates.strip():
+        raise ValueError("Укажите хотя бы одну дату в списке.")
+
+    normalized_tokens = raw_dates.replace(";", "\n").replace(",", "\n")
+    dates: List[pd.Timestamp] = []
+    invalid_tokens: List[str] = []
+
+    for token in normalized_tokens.splitlines():
+        value = token.strip()
+        if not value:
+            continue
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            invalid_tokens.append(value)
+            continue
+        dates.append(parsed.normalize())
+
+    if invalid_tokens:
+        raise ValueError(
+            "Не удалось распознать даты: " + ", ".join(invalid_tokens[:5])
+        )
+
+    if not dates:
+        raise ValueError("Укажите хотя бы одну корректную дату.")
+
+    unique_dates = sorted(set(dates))
+    return unique_dates
+
+
+def _collect_index_snapshots(
+    request_get,
+    index_name: str,
+    requested_dates: Iterable[pd.Timestamp],
+) -> pd.DataFrame:
+    collected: List[pd.DataFrame] = []
+    seen_dates: Set[pd.Timestamp] = set()
+
+    for requested_dt in sorted(set(requested_dates)):
+        snapshot_df, _ = _fetch_index_snapshot(
+            index_name=index_name,
+            date_str=requested_dt.strftime("%Y-%m-%d"),
+            _request_get_func=request_get,
+        )
+        if snapshot_df.empty:
+            continue
+
+        effective_dt = snapshot_df["Date"].max().normalize()
+        if effective_dt in seen_dates:
+            continue
+
+        day_df = snapshot_df[snapshot_df["Date"].dt.normalize() == effective_dt]
+        if day_df.empty:
+            continue
+
+        collected.append(day_df)
+        seen_dates.add(effective_dt)
+
+    if not collected:
+        return _empty_index_weights_df()
+
+    return pd.concat(collected, ignore_index=True)
+
 def fetch_index_weights(
     request_get,
     index_name: str,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    requested_dates: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     index_name = str(index_name).strip().upper()
     if not index_name:
         raise ValueError("Укажите код индекса, например IMOEX")
 
-    end_dt = pd.to_datetime(date_to if date_to else datetime.today().date(), errors="coerce")
-    start_dt = pd.to_datetime(date_from if date_from else end_dt, errors="coerce")
+    if requested_dates is not None:
+        parsed_dates = [pd.to_datetime(date_value, errors="coerce") for date_value in requested_dates]
+        if any(pd.isna(dt) for dt in parsed_dates):
+            raise ValueError("В списке дат есть некорректные значения")
 
-    if pd.isna(start_dt) or pd.isna(end_dt):
-        raise ValueError("Некорректные даты периода")
-
-    start_dt = start_dt.normalize()
-    end_dt = end_dt.normalize()
-
-    if start_dt > end_dt:
-        raise ValueError("Дата 'с' не может быть больше даты 'по'.")
-
-    single_date_mode = start_dt == end_dt
-
-    collected: List[pd.DataFrame] = []
-    seen_dates: Set[pd.Timestamp] = set()
-
-    current_dt = end_dt
-    while True:
-        if current_dt < start_dt and not (single_date_mode and not collected):
-            break
-        snapshot_df, prev_dt = _fetch_index_snapshot(
-            index_name=index_name,
-            date_str=current_dt.strftime("%Y-%m-%d"),
-            _request_get_func=request_get,
-        )
-
-        if snapshot_df.empty:
-            if prev_dt is not None and prev_dt < current_dt:
-                current_dt = prev_dt
-                continue
-            break
-
-        effective_dt = snapshot_df["Date"].max().normalize()
-        if effective_dt < start_dt and not (single_date_mode and not collected):
-            break
-
-        if effective_dt not in seen_dates:
-            day_df = snapshot_df[snapshot_df["Date"].dt.normalize() == effective_dt]
-            if not day_df.empty:
-                collected.append(day_df)
-                seen_dates.add(effective_dt)
-
-        if prev_dt is None or prev_dt >= current_dt:
-            break
-
-        current_dt = prev_dt
-
-    if not collected:
-        return _empty_index_weights_df()
-
-    df = pd.concat(collected, ignore_index=True)
-    if single_date_mode:
-        requested_day = start_dt.date()
-        same_day_df = df[df["Date"].dt.date == requested_day]
-        if same_day_df.empty:
-            fallback_day = df["Date"].max().normalize()
-            df = df[df["Date"].dt.normalize() == fallback_day]
-        else:
-            df = same_day_df
+        normalized_dates = [dt.normalize() for dt in parsed_dates]
+        df = _collect_index_snapshots(request_get, index_name, normalized_dates)
     else:
-        df = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
+        end_dt = pd.to_datetime(date_to if date_to else datetime.today().date(), errors="coerce")
+        start_dt = pd.to_datetime(date_from if date_from else end_dt, errors="coerce")
+
+        if pd.isna(start_dt) or pd.isna(end_dt):
+            raise ValueError("Некорректные даты периода")
+
+        start_dt = start_dt.normalize()
+        end_dt = end_dt.normalize()
+
+        if start_dt > end_dt:
+            raise ValueError("Дата 'с' не может быть больше даты 'по'.")
+
+        single_date_mode = start_dt == end_dt
+
+        collected: List[pd.DataFrame] = []
+        seen_dates: Set[pd.Timestamp] = set()
+
+        current_dt = end_dt
+        while True:
+            if current_dt < start_dt and not (single_date_mode and not collected):
+                break
+            snapshot_df, prev_dt = _fetch_index_snapshot(
+                index_name=index_name,
+                date_str=current_dt.strftime("%Y-%m-%d"),
+                _request_get_func=request_get,
+            )
+
+            if snapshot_df.empty:
+                if prev_dt is not None and prev_dt < current_dt:
+                    current_dt = prev_dt
+                    continue
+                break
+
+            effective_dt = snapshot_df["Date"].max().normalize()
+            if effective_dt < start_dt and not (single_date_mode and not collected):
+                break
+
+            if effective_dt not in seen_dates:
+                day_df = snapshot_df[snapshot_df["Date"].dt.normalize() == effective_dt]
+                if not day_df.empty:
+                    collected.append(day_df)
+                    seen_dates.add(effective_dt)
+
+            if prev_dt is None or prev_dt >= current_dt:
+                break
+
+            current_dt = prev_dt
+
+        if not collected:
+            return _empty_index_weights_df()
+
+        df = pd.concat(collected, ignore_index=True)
+        if single_date_mode:
+            requested_day = start_dt.date()
+            same_day_df = df[df["Date"].dt.date == requested_day]
+            if same_day_df.empty:
+                fallback_day = df["Date"].max().normalize()
+                df = df[df["Date"].dt.normalize() == fallback_day]
+            else:
+                df = same_day_df
+        else:
+            df = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt)]
 
     if df.empty:
         return _empty_index_weights_df()
@@ -272,16 +346,22 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
             key="idx_code_input",
         )
     with idx_col2:
-        load_period = st.checkbox(
-            "Загружать за период",
-            value=False,
-            help="По умолчанию загружается состав на одну дату.",
-            key="idx_use_period",
+        load_mode = st.radio(
+            "Режим загрузки",
+            options=["Одна дата", "Период", "Список дат"],
+            index=0,
+            horizontal=False,
+            key="idx_load_mode",
+            help="Можно загрузить одну дату, диапазон дат или список дат, введенный вручную.",
         )
 
     st.caption("Если код индекса не указан, используется IMOEX.")
 
-    if load_period:
+    date_from = None
+    date_to = None
+    manual_dates_raw = ""
+
+    if load_mode == "Период":
         date_col1, date_col2 = st.columns(2)
         with date_col1:
             date_from = st.date_input(
@@ -295,6 +375,15 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
                 value=datetime.today().date(),
                 key="idx_date_to",
             )
+    elif load_mode == "Список дат":
+        manual_dates_raw = st.text_area(
+            "Список дат",
+            value="",
+            height=140,
+            placeholder="2026-03-01\n2026-03-05\n2026-03-10",
+            help="Вносите даты вручную: по одной на строку, либо через запятую/точку с запятой.",
+            key="idx_manual_dates",
+        )
     else:
         single_date = st.date_input(
             "Дата",
@@ -306,16 +395,25 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
 
     if st.button("Загрузить данные индекса", key="load_index_analytics"):
         index_code = (index_code or "IMOEX").strip().upper()
-        if date_from > date_to:
+        try:
+            manual_dates = _parse_manual_dates(manual_dates_raw) if load_mode == "Список дат" else None
+        except ValueError as exc:
+            st.error(str(exc))
+            manual_dates = None
+
+        if load_mode == "Период" and date_from > date_to:
             st.error("Дата 'с' не может быть больше даты 'по'.")
+        elif load_mode == "Список дат" and not manual_dates:
+            pass
         else:
             with st.spinner("Формируется..."):
                 try:
                     df_index = fetch_index_weights(
                         request_get=request_get,
                         index_name=index_code,
-                        date_from=date_from.strftime("%Y-%m-%d"),
-                        date_to=date_to.strftime("%Y-%m-%d"),
+                        date_from=date_from.strftime("%Y-%m-%d") if date_from else None,
+                        date_to=date_to.strftime("%Y-%m-%d") if date_to else None,
+                        requested_dates=[dt.strftime("%Y-%m-%d") for dt in manual_dates] if manual_dates else None,
                     )
                     st.session_state["index_matrix_df"] = df_index
                     st.session_state["index_weight_matrix"] = None
