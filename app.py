@@ -2239,14 +2239,19 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
     for item in news_items:
         item_datetime = item.get("datetime")
         datetime_label = item_datetime.strftime("%Y-%m-%d %H:%M:%S") if item_datetime else f"{item.get('date', '')} {item.get('time', '')}".strip()
-        category = item.get("category") or "general"
+        event_type = item.get("event_type") or "general"
+        emitter = item.get("emitter") or "—"
+        isin = item.get("isin") or "—"
         with st.container(border=True):
             st.markdown(f"**{item.get('title', 'Без заголовка')}**")
             meta_left, meta_right = st.columns([2, 3])
             with meta_left:
                 st.caption(f"{datetime_label} · {item.get('source', 'MOEX')}")
             with meta_right:
-                st.caption(f"ID: {item.get('id', 'n/a')} · category: {category}")
+                st.caption(f"ID: {item.get('id', 'n/a')} · event_type: {event_type}")
+            detail_left, detail_right = st.columns(2)
+            detail_left.caption(f"Emitter: {emitter}")
+            detail_right.caption(f"ISIN: {isin}")
 
 
 # ---------------------------
@@ -2254,7 +2259,7 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
 # ---------------------------
 if st.session_state["active_view"] == "moex_news":
     st.subheader("📰 Новости MOEX")
-    st.markdown("Поиск новостей MOEX ISS `/iss/sitenews.json` по дате публикации и по ISIN эмитента.")
+    st.markdown("Поиск событий MOEX ISS `/iss/sitenews.json` по заголовкам новостей: извлекаются `event_type`, `isin` и `emitter` без загрузки полного текста новости.")
 
     latest_col, date_col, isin_col = st.tabs(["Последние", "По дате", "По ISIN"])
 

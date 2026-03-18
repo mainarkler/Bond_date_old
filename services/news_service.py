@@ -1,4 +1,4 @@
-"""Utilities for fetching and filtering MOEX site news."""
+"""Utilities for fetching and transforming MOEX sitenews into structured events."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
 SOURCE_NAME = "MOEX"
+ISIN_PATTERN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b")
 _EMITTER_STOP_WORDS = {
     "акции",
     "акций",
@@ -39,7 +40,6 @@ _EMITTER_STOP_WORDS = {
     "ценные",
     "бумаги",
     "бумаг",
-    "isn",
     "isin",
 }
 
@@ -48,14 +48,20 @@ class NewsServiceError(RuntimeError):
     """Raised when MOEX news cannot be loaded or parsed."""
 
 
+Event = dict[str, Any]
+
+
 def _build_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
-    session.headers.update({
-        "User-Agent": "python-requests/iss-moex-news-service",
-        "Accept": "application/json,text/plain,*/*",
-    })
+    session.headers.update(
+        {
+            "User-Agent": "python-requests/iss-moex-news-service",
+            "Accept": "application/json,text/plain,*/*",
+        }
+    )
     return session
+
 
 
 def _request_news(limit: int) -> dict[str, Any]:
@@ -86,14 +92,13 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return None
 
     normalized = value.strip().replace("Z", "+00:00")
-    for parser in (datetime.fromisoformat,):
-        try:
-            parsed = parser(normalized)
-            if parsed.tzinfo is not None:
-                return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            return parsed
-        except ValueError:
-            continue
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
 
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
@@ -109,87 +114,9 @@ def _parse_datetime(value: str | None) -> datetime | None:
 
 
 
-def classify_news(title: str) -> str:
-    """Return a simple rule-based category for a MOEX news title."""
-    title_lower = title.lower()
-
-    rules = (
-        ("listing", ("листинг", "допуск", "включен", "включены", "торгам")),
-        ("bond", ("облигац", "выпуск", "купон", "погашен")),
-        ("equity", ("акци", "дивиденд", "дрд")),
-        ("fund", ("пиф", "etf", "бпиф", "пай")),
-        ("issuer_disclosure", ("отчет", "раскрытие", "сообщение")),
-        ("trading", ("торги", "режим", "аукцион", "сделок")),
-    )
-
-    for category, keywords in rules:
-        if any(keyword in title_lower for keyword in keywords):
-            return category
-    return "general"
-
-
-
-def _normalize_news_item(item: dict[str, Any]) -> dict[str, Any]:
-    published_at = str(
-        item.get("published_at")
-        or item.get("PUBLISHED_AT")
-        or item.get("date")
-        or item.get("DATE")
-        or ""
-    ).strip()
-    title = unescape(str(item.get("title") or item.get("TITLE") or "").strip())
-    news_datetime = _parse_datetime(published_at)
-
-    return {
-        "id": int(item.get("id") or item.get("ID") or 0),
-        "title": title,
-        "datetime": news_datetime,
-        "date": news_datetime.strftime("%Y-%m-%d") if news_datetime else published_at[:10],
-        "time": news_datetime.strftime("%H:%M:%S") if news_datetime else published_at[11:19],
-        "source": SOURCE_NAME,
-        "category": classify_news(title),
-        "published_at": published_at,
-    }
-
-
-
-def parse_news(response_json: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert MOEX sitenews JSON payload into normalized news dictionaries."""
-    sitenews_payload = response_json.get("sitenews") or {}
-    columns = sitenews_payload.get("columns") or []
-    data = sitenews_payload.get("data") or []
-
-    if not isinstance(columns, list) or not isinstance(data, list):
-        raise NewsServiceError("Unexpected MOEX sitenews payload structure")
-
-    raw_items = _zip_rows(columns, data)
-    return [_normalize_news_item(item) for item in raw_items]
-
-
-
-def get_news(limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
-    """Fetch the latest MOEX site news."""
-    if limit <= 0:
-        raise ValueError("limit must be a positive integer")
-
-    payload = _request_news(limit=limit)
-    return parse_news(payload)
-
-
-
-def get_news_by_date(date: str) -> list[dict[str, Any]]:
-    """Return MOEX news filtered by YYYY-MM-DD and sorted by time descending."""
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError("date must be in YYYY-MM-DD format") from exc
-
-    filtered_news = [news for news in get_news() if str(news.get("published_at", "")).startswith(date)]
-    return sorted(
-        filtered_news,
-        key=lambda news: news.get("datetime") or datetime.min,
-        reverse=True,
-    )
+def _extract_isin(title: str) -> str | None:
+    match = ISIN_PATTERN.search(title.upper())
+    return match.group(0) if match else None
 
 
 
@@ -198,8 +125,103 @@ def _extract_parenthesized_fragments(title: str) -> list[str]:
 
 
 
-def _tokenize_emitter(text: str) -> list[str]:
-    cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё\- ]+", " ", text)
+def _extract_emitter(title: str, isin: str | None) -> str | None:
+    fragments = _extract_parenthesized_fragments(title)
+    for fragment in fragments:
+        candidate = fragment
+        if isin:
+            candidate = re.sub(re.escape(isin), "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s+", " ", candidate).strip(" ,;:-")
+        if candidate and not ISIN_PATTERN.search(candidate.upper()):
+            return candidate
+    return None
+
+
+
+def classify_news(title: str) -> str:
+    """Return a rule-based event type derived only from the news title."""
+    title_lower = title.lower()
+    rules = (
+        ("listing", ("листинг", "допуск", "включен", "включены", "торгам")),
+        ("bond_placement", ("размещ", "выпуск", "облигац", "купон", "погашен")),
+        ("equity_event", ("акци", "дивиденд", "дрд")),
+        ("fund_event", ("пиф", "etf", "бпиф", "пай")),
+        ("issuer_disclosure", ("отчет", "раскрытие", "сообщение")),
+        ("trading_mode", ("торги", "режим", "аукцион", "сделок")),
+    )
+    for event_type, keywords in rules:
+        if any(keyword in title_lower for keyword in keywords):
+            return event_type
+    return "general"
+
+
+
+def _build_event(item: dict[str, Any]) -> Event:
+    published_at = str(
+        item.get("published_at")
+        or item.get("PUBLISHED_AT")
+        or item.get("date")
+        or item.get("DATE")
+        or ""
+    ).strip()
+    title = unescape(str(item.get("title") or item.get("TITLE") or "").strip())
+    event_datetime = _parse_datetime(published_at)
+    isin = _extract_isin(title)
+    emitter = _extract_emitter(title, isin)
+
+    return {
+        "id": int(item.get("id") or item.get("ID") or 0),
+        "title": title,
+        "datetime": event_datetime,
+        "date": event_datetime.strftime("%Y-%m-%d") if event_datetime else published_at[:10],
+        "time": event_datetime.strftime("%H:%M:%S") if event_datetime else published_at[11:19],
+        "source": SOURCE_NAME,
+        "event_type": classify_news(title),
+        "isin": isin,
+        "emitter": emitter,
+        "published_at": published_at,
+    }
+
+
+
+def parse_news(response_json: dict[str, Any]) -> list[Event]:
+    """Convert MOEX sitenews payload into normalized event dictionaries."""
+    sitenews_payload = response_json.get("sitenews") or {}
+    columns = sitenews_payload.get("columns") or []
+    data = sitenews_payload.get("data") or []
+
+    if not isinstance(columns, list) or not isinstance(data, list):
+        raise NewsServiceError("Unexpected MOEX sitenews payload structure")
+
+    raw_items = _zip_rows(columns, data)
+    return [_build_event(item) for item in raw_items]
+
+
+
+def get_news(limit: int = DEFAULT_LIMIT) -> list[Event]:
+    """Fetch the latest MOEX site news and convert them to events."""
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    return parse_news(_request_news(limit=limit))
+
+
+
+def get_news_by_date(date: str) -> list[Event]:
+    """Return MOEX events filtered by YYYY-MM-DD and sorted descending."""
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("date must be in YYYY-MM-DD format") from exc
+
+    filtered_events = [event for event in get_news() if str(event.get("published_at", "")).startswith(date)]
+    return sorted(filtered_events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
+
+
+
+def _tokenize_emitter(emitter: str | None) -> list[str]:
+    if not emitter:
+        return []
+    cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё\- ]+", " ", emitter)
     return [
         token
         for token in (part.strip(" -") for part in cleaned.split())
@@ -208,95 +230,45 @@ def _tokenize_emitter(text: str) -> list[str]:
 
 
 
-def _extract_emitter_keywords(title: str, isin: str) -> list[str]:
-    isin_upper = isin.upper()
-    title_clean = re.sub(r"\s+", " ", title).strip()
-    fragments = _extract_parenthesized_fragments(title_clean)
-    candidates: list[str] = []
-
-    for fragment in fragments:
-        if isin_upper not in fragment.upper():
-            candidates.append(fragment)
-
-    if not candidates and isin_upper in title_clean.upper():
-        parts = re.split(re.escape(isin_upper), title_clean, maxsplit=1, flags=re.IGNORECASE)
-        if len(parts) == 2:
-            before, after = parts
-            candidates.extend([before.strip(" :-,;()"), after.strip(" :-,;()")])
-
-    if not candidates:
-        candidates.append(title_clean.replace(isin, " "))
-
-    keywords: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        for token in _tokenize_emitter(candidate):
-            key = token.lower()
-            if key not in seen:
-                seen.add(key)
-                keywords.append(token)
-    return keywords[:5]
-
-
-
-def _is_related_news(news_item: dict[str, Any], keywords: list[str], since: datetime, isin: str) -> bool:
-    news_datetime = news_item.get("datetime")
-    if news_datetime is None or news_datetime < since:
+def _event_matches_related(event: Event, emitter_keywords: list[str], since: datetime, isin: str) -> bool:
+    event_datetime = event.get("datetime")
+    if event_datetime is None or event_datetime < since:
         return False
 
-    title = str(news_item.get("title") or "")
-    title_lower = title.lower()
+    title_lower = str(event.get("title") or "").lower()
     if isin.lower() in title_lower:
         return False
 
-    return any(keyword.lower() in title_lower for keyword in keywords)
+    event_emitter = str(event.get("emitter") or "")
+    haystacks = [title_lower, event_emitter.lower()]
+    return any(keyword.lower() in haystack for haystack in haystacks for keyword in emitter_keywords)
 
 
 
 def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
-    """Return direct and related MOEX news for a given ISIN."""
+    """Return explicit ISIN events and related issuer events for a given ISIN."""
     normalized_isin = isin.strip().upper()
     if not normalized_isin:
         raise ValueError("isin must be a non-empty string")
     if days < 0:
         raise ValueError("days must be greater than or equal to zero")
 
-    news_items = get_news(limit=MAX_NEWS_LIMIT)
-    target_news = [
-        news for news in news_items if normalized_isin in str(news.get("title") or "").upper()
-    ]
-    target_news = sorted(
-        target_news,
-        key=lambda news: news.get("datetime") or datetime.min,
-        reverse=True,
-    )
+    events = get_news(limit=MAX_NEWS_LIMIT)
+    target_news = [event for event in events if event.get("isin") == normalized_isin]
+    target_news = sorted(target_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
-    emitter_keywords: list[str] = []
-    for news in target_news:
-        emitter_keywords.extend(_extract_emitter_keywords(news["title"], normalized_isin))
-
-    unique_keywords: list[str] = []
-    seen_keywords: set[str] = set()
-    for keyword in emitter_keywords:
-        lowered = keyword.lower()
-        if lowered not in seen_keywords:
-            seen_keywords.add(lowered)
-            unique_keywords.append(keyword)
+    emitter = next((event.get("emitter") for event in target_news if event.get("emitter")), None)
+    emitter_keywords = _tokenize_emitter(str(emitter) if emitter else None)
 
     since = datetime.utcnow() - timedelta(days=days)
     related_news = [
-        news
-        for news in news_items
-        if _is_related_news(news, unique_keywords, since, normalized_isin)
+        event for event in events if _event_matches_related(event, emitter_keywords, since, normalized_isin)
     ]
-    related_news = sorted(
-        related_news,
-        key=lambda news: news.get("datetime") or datetime.min,
-        reverse=True,
-    )
+    related_news = sorted(related_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
     return {
         "isin": normalized_isin,
+        "emitter": emitter,
         "target_news": target_news,
         "related_news": related_news,
     }
