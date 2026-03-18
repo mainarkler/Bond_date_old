@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 import json
 import re
-from typing import Any
+from typing import Any, Protocol, Sequence
+from xml.etree import ElementTree as ET
 
 import requests
 
@@ -51,6 +52,16 @@ class NewsServiceError(RuntimeError):
 Event = dict[str, Any]
 
 
+class NewsProvider(Protocol):
+    """Interface for event providers with a shared event schema."""
+
+    source_name: str
+
+    def fetch_events(self, limit: int = DEFAULT_LIMIT) -> list[Event]:
+        """Return normalized events from a source."""
+
+
+
 def _build_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -82,6 +93,14 @@ def _request_news(limit: int) -> dict[str, Any]:
 
 
 
+def _request_text(url: str, params: dict[str, Any] | None = None, timeout: int = DEFAULT_TIMEOUT) -> str:
+    session = _build_session()
+    response = session.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    return response.text
+
+
+
 def _zip_rows(columns: list[str], data: list[list[Any]]) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in data]
 
@@ -105,9 +124,14 @@ def _parse_datetime(value: str | None) -> datetime | None:
         "%Y-%m-%d %H:%M",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S GMT",
     ):
         try:
-            return datetime.strptime(normalized, fmt)
+            parsed = datetime.strptime(normalized, fmt)
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed
         except ValueError:
             continue
     return None
@@ -156,7 +180,35 @@ def classify_news(title: str) -> str:
 
 
 
-def _build_event(item: dict[str, Any]) -> Event:
+def build_event(
+    *,
+    title: str,
+    published_at: str | None,
+    source: str,
+    event_id: int | str | None = None,
+) -> Event:
+    """Build a normalized event from any provider using title-derived structure only."""
+    normalized_title = unescape(title.strip())
+    event_datetime = _parse_datetime(published_at)
+    isin = _extract_isin(normalized_title)
+    emitter = _extract_emitter(normalized_title, isin)
+
+    return {
+        "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
+        "title": normalized_title,
+        "datetime": event_datetime,
+        "date": event_datetime.strftime("%Y-%m-%d") if event_datetime else str(published_at or "")[:10],
+        "time": event_datetime.strftime("%H:%M:%S") if event_datetime else str(published_at or "")[11:19],
+        "source": source,
+        "event_type": classify_news(normalized_title),
+        "isin": isin,
+        "emitter": emitter,
+        "published_at": str(published_at or "").strip(),
+    }
+
+
+
+def _build_moex_event(item: dict[str, Any]) -> Event:
     published_at = str(
         item.get("published_at")
         or item.get("PUBLISHED_AT")
@@ -164,23 +216,13 @@ def _build_event(item: dict[str, Any]) -> Event:
         or item.get("DATE")
         or ""
     ).strip()
-    title = unescape(str(item.get("title") or item.get("TITLE") or "").strip())
-    event_datetime = _parse_datetime(published_at)
-    isin = _extract_isin(title)
-    emitter = _extract_emitter(title, isin)
-
-    return {
-        "id": int(item.get("id") or item.get("ID") or 0),
-        "title": title,
-        "datetime": event_datetime,
-        "date": event_datetime.strftime("%Y-%m-%d") if event_datetime else published_at[:10],
-        "time": event_datetime.strftime("%H:%M:%S") if event_datetime else published_at[11:19],
-        "source": SOURCE_NAME,
-        "event_type": classify_news(title),
-        "isin": isin,
-        "emitter": emitter,
-        "published_at": published_at,
-    }
+    title = str(item.get("title") or item.get("TITLE") or "")
+    return build_event(
+        title=title,
+        published_at=published_at,
+        source=SOURCE_NAME,
+        event_id=item.get("id") or item.get("ID"),
+    )
 
 
 
@@ -194,15 +236,70 @@ def parse_news(response_json: dict[str, Any]) -> list[Event]:
         raise NewsServiceError("Unexpected MOEX sitenews payload structure")
 
     raw_items = _zip_rows(columns, data)
-    return [_build_event(item) for item in raw_items]
+    return [_build_moex_event(item) for item in raw_items]
+
+
+class MoexNewsProvider:
+    """Provider wrapper for MOEX ISS sitenews."""
+
+    source_name = SOURCE_NAME
+
+    def fetch_events(self, limit: int = DEFAULT_LIMIT) -> list[Event]:
+        if limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        return parse_news(_request_news(limit=limit))
+
+
+class RSSNewsProvider:
+    """Generic RSS/Atom-like title-based provider for external sources."""
+
+    def __init__(self, source_name: str, feed_url: str, item_limit: int = DEFAULT_LIMIT) -> None:
+        self.source_name = source_name
+        self.feed_url = feed_url
+        self.item_limit = item_limit
+
+    def fetch_events(self, limit: int = DEFAULT_LIMIT) -> list[Event]:
+        xml_text = _request_text(self.feed_url)
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as exc:
+            raise NewsServiceError(f"Invalid RSS/XML feed for {self.source_name}") from exc
+
+        events: list[Event] = []
+        max_items = min(limit, self.item_limit)
+        for item in root.findall(".//item")[:max_items]:
+            title = (item.findtext("title") or "").strip()
+            published_at = (item.findtext("pubDate") or item.findtext("published") or "").strip()
+            guid = (item.findtext("guid") or "").strip()
+            if not title:
+                continue
+            events.append(
+                build_event(
+                    title=title,
+                    published_at=published_at,
+                    source=self.source_name,
+                    event_id=guid if guid.isdigit() else None,
+                )
+            )
+        return sorted(events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
+
+
+
+def collect_news_events(
+    providers: Sequence[NewsProvider],
+    limit_per_source: int = DEFAULT_LIMIT,
+) -> list[Event]:
+    """Collect normalized events from MOEX and any additional providers."""
+    events: list[Event] = []
+    for provider in providers:
+        events.extend(provider.fetch_events(limit=limit_per_source))
+    return sorted(events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
 
 
 def get_news(limit: int = DEFAULT_LIMIT) -> list[Event]:
     """Fetch the latest MOEX site news and convert them to events."""
-    if limit <= 0:
-        raise ValueError("limit must be a positive integer")
-    return parse_news(_request_news(limit=limit))
+    return MoexNewsProvider().fetch_events(limit=limit)
 
 
 
@@ -277,3 +374,8 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
 if __name__ == "__main__":
     print(get_news_by_date("2026-03-18"))
     print(get_news_by_isin("RU000A1008P1"))
+    providers: list[NewsProvider] = [
+        MoexNewsProvider(),
+        RSSNewsProvider(source_name="ExternalRSS", feed_url="https://example.com/rss.xml"),
+    ]
+    print(collect_news_events(providers, limit_per_source=20))
