@@ -2241,7 +2241,8 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
         datetime_label = item_datetime.strftime("%Y-%m-%d %H:%M:%S") if item_datetime else f"{item.get('date', '')} {item.get('time', '')}".strip()
         event_type = item.get("event_type") or "general"
         emitter = item.get("emitter") or "—"
-        isin = item.get("isin") or "—"
+        isins = item.get("related_isins") or []
+        isin = ", ".join(isins) if isins else (item.get("isin") or "—")
         with st.container(border=True):
             st.markdown(f"**{item.get('title', 'Без заголовка')}**")
             body = str(item.get("body") or "").strip()
@@ -2253,7 +2254,7 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
             with meta_right:
                 st.caption(f"ID: {item.get('id', 'n/a')} · event_type: {event_type}")
             detail_left, detail_right = st.columns(2)
-            detail_left.caption(f"Emitter: {emitter}")
+            detail_left.caption(f"Эмитент: {emitter}")
             detail_right.caption(f"ISIN: {isin}")
 
 
@@ -2262,7 +2263,7 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
 # ---------------------------
 if st.session_state["active_view"] == "moex_news":
     st.subheader("📰 Новости MOEX")
-    st.markdown("Поиск событий MOEX ISS `/iss/sitenews.json` по заголовкам новостей: извлекаются `event_type`, `isin` и `emitter` без загрузки полного текста новости.")
+    st.markdown("Поиск событий MOEX ISS `/iss/sitenews.json`: для вкладки ISIN поиск связанных новостей идет по всем другим ISIN того же эмитента, найденным через внутренний `emitent/emitter id`, а в карточке новости показывается полный текст, подтянутый через ID новости.")
 
     latest_col, date_col, isin_col = st.tabs(["Последние", "По дате", "По ISIN"])
 
@@ -2313,9 +2314,15 @@ if st.session_state["active_view"] == "moex_news":
                 except (ValueError, NewsServiceError, requests.RequestException) as exc:
                     st.error(f"Не удалось получить новости по ISIN: {exc}")
                 else:
-                    metric_col1, metric_col2 = st.columns(2)
+                    metric_col1, metric_col2, metric_col3 = st.columns(3)
                     metric_col1.metric("Target news", len(isin_result.get("target_news", [])))
                     metric_col2.metric("Related news", len(isin_result.get("related_news", [])))
+                    metric_col3.metric("Other issuer ISINs", len(isin_result.get("other_isins", [])))
+                    emitter_name = isin_result.get("emitter") or "—"
+                    st.caption(f"Эмитент: {emitter_name}")
+                    other_isins = isin_result.get("other_isins", [])
+                    if other_isins:
+                        st.caption("Другие ISIN этого эмитента: " + ", ".join(other_isins))
                     st.markdown("#### Target news")
                     render_news_items(
                         isin_result.get("target_news", []),
