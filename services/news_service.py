@@ -186,9 +186,11 @@ def build_event(
     published_at: str | None,
     source: str,
     event_id: int | str | None = None,
+    body: str | None = None,
 ) -> Event:
-    """Build a normalized event from any provider using title-derived structure only."""
+    """Build a normalized event from provider payload, including optional news body."""
     normalized_title = unescape(title.strip())
+    normalized_body = unescape(str(body or "").strip())
     event_datetime = _parse_datetime(published_at)
     isin = _extract_isin(normalized_title)
     emitter = _extract_emitter(normalized_title, isin)
@@ -196,6 +198,7 @@ def build_event(
     return {
         "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
         "title": normalized_title,
+        "body": normalized_body,
         "datetime": event_datetime,
         "date": event_datetime.strftime("%Y-%m-%d") if event_datetime else str(published_at or "")[:10],
         "time": event_datetime.strftime("%H:%M:%S") if event_datetime else str(published_at or "")[11:19],
@@ -217,11 +220,21 @@ def _build_moex_event(item: dict[str, Any]) -> Event:
         or ""
     ).strip()
     title = str(item.get("title") or item.get("TITLE") or "")
+    body = str(
+        item.get("body")
+        or item.get("BODY")
+        or item.get("text")
+        or item.get("TEXT")
+        or item.get("content")
+        or item.get("CONTENT")
+        or ""
+    )
     return build_event(
         title=title,
         published_at=published_at,
         source=SOURCE_NAME,
         event_id=item.get("id") or item.get("ID"),
+        body=body,
     )
 
 

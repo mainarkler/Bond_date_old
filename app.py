@@ -2244,6 +2244,9 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
         isin = item.get("isin") or "—"
         with st.container(border=True):
             st.markdown(f"**{item.get('title', 'Без заголовка')}**")
+            body = str(item.get("body") or "").strip()
+            if body:
+                st.markdown(body)
             meta_left, meta_right = st.columns([2, 3])
             with meta_left:
                 st.caption(f"{datetime_label} · {item.get('source', 'MOEX')}")
