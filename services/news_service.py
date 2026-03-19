@@ -12,6 +12,7 @@ from xml.etree import ElementTree as ET
 import requests
 
 MOEX_SITENEWS_URL = "https://iss.moex.com/iss/sitenews.json"
+MOEX_SITENEWS_DETAIL_URL = "https://iss.moex.com/iss/sitenews/{news_id}.json"
 DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
@@ -75,21 +76,29 @@ def _build_session() -> requests.Session:
 
 
 
-def _request_news(limit: int) -> dict[str, Any]:
-    session = _build_session()
-    response = session.get(
-        MOEX_SITENEWS_URL,
-        params={"iss.meta": "off", "limit": limit},
-        timeout=DEFAULT_TIMEOUT,
-    )
+def _request_json(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    session = session or _build_session()
+    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     try:
         return response.json()
     except json.JSONDecodeError as exc:
         body_preview = (response.text or "")[:200].replace("\n", " ")
-        raise NewsServiceError(
-            f"MOEX ISS returned a non-JSON response for site news: {body_preview}"
-        ) from exc
+        raise NewsServiceError(f"MOEX ISS returned a non-JSON response: {body_preview}") from exc
+
+
+
+def _request_news(limit: int, session: requests.Session | None = None) -> dict[str, Any]:
+    return _request_json(
+        MOEX_SITENEWS_URL,
+        params={"iss.meta": "off", "limit": limit},
+        session=session,
+    )
 
 
 
@@ -103,6 +112,56 @@ def _request_text(url: str, params: dict[str, Any] | None = None, timeout: int =
 
 def _zip_rows(columns: list[str], data: list[list[Any]]) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in data]
+
+
+
+def _extract_body_from_payload(payload: Any) -> str:
+    if isinstance(payload, dict):
+        direct_body = payload.get("body") or payload.get("BODY")
+        if isinstance(direct_body, str) and direct_body.strip():
+            return direct_body.strip()
+
+        for block_name in ("content", "CONTENT", "sitenews", "SITENEWS", "text", "TEXT"):
+            block = payload.get(block_name)
+            if isinstance(block, dict):
+                columns = block.get("columns") or []
+                data = block.get("data") or []
+                if isinstance(columns, list) and isinstance(data, list):
+                    for row in _zip_rows(columns, data):
+                        extracted = _extract_body_from_payload(row)
+                        if extracted:
+                            return extracted
+                extracted = _extract_body_from_payload(block)
+                if extracted:
+                    return extracted
+            elif isinstance(block, str) and block.strip():
+                return block.strip()
+
+        for value in payload.values():
+            extracted = _extract_body_from_payload(value)
+            if extracted:
+                return extracted
+
+    elif isinstance(payload, list):
+        for value in payload:
+            extracted = _extract_body_from_payload(value)
+            if extracted:
+                return extracted
+
+    elif isinstance(payload, str) and payload.strip():
+        return payload.strip()
+
+    return ""
+
+
+
+def _request_news_body(event_id: int, session: requests.Session | None = None) -> str:
+    detail_payload = _request_json(
+        MOEX_SITENEWS_DETAIL_URL.format(news_id=event_id),
+        params={"iss.meta": "off"},
+        session=session,
+    )
+    return _extract_body_from_payload(detail_payload)
 
 
 
@@ -186,9 +245,11 @@ def build_event(
     published_at: str | None,
     source: str,
     event_id: int | str | None = None,
+    body: str | None = None,
 ) -> Event:
-    """Build a normalized event from any provider using title-derived structure only."""
+    """Build a normalized event from provider payload, including optional news body."""
     normalized_title = unescape(title.strip())
+    normalized_body = unescape(str(body or "").strip())
     event_datetime = _parse_datetime(published_at)
     isin = _extract_isin(normalized_title)
     emitter = _extract_emitter(normalized_title, isin)
@@ -196,6 +257,7 @@ def build_event(
     return {
         "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
         "title": normalized_title,
+        "body": normalized_body,
         "datetime": event_datetime,
         "date": event_datetime.strftime("%Y-%m-%d") if event_datetime else str(published_at or "")[:10],
         "time": event_datetime.strftime("%H:%M:%S") if event_datetime else str(published_at or "")[11:19],
@@ -208,7 +270,7 @@ def build_event(
 
 
 
-def _build_moex_event(item: dict[str, Any]) -> Event:
+def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
     published_at = str(
         item.get("published_at")
         or item.get("PUBLISHED_AT")
@@ -222,11 +284,15 @@ def _build_moex_event(item: dict[str, Any]) -> Event:
         published_at=published_at,
         source=SOURCE_NAME,
         event_id=item.get("id") or item.get("ID"),
+        body=body,
     )
 
 
 
-def parse_news(response_json: dict[str, Any]) -> list[Event]:
+def parse_news(
+    response_json: dict[str, Any],
+    session: requests.Session | None = None,
+) -> list[Event]:
     """Convert MOEX sitenews payload into normalized event dictionaries."""
     sitenews_payload = response_json.get("sitenews") or {}
     columns = sitenews_payload.get("columns") or []
@@ -236,7 +302,14 @@ def parse_news(response_json: dict[str, Any]) -> list[Event]:
         raise NewsServiceError("Unexpected MOEX sitenews payload structure")
 
     raw_items = _zip_rows(columns, data)
-    return [_build_moex_event(item) for item in raw_items]
+    events: list[Event] = []
+    for item in raw_items:
+        event_id = item.get("id") or item.get("ID")
+        body = ""
+        if isinstance(event_id, int) or str(event_id or "").isdigit():
+            body = _request_news_body(int(event_id), session=session)
+        events.append(_build_moex_event(item, body=body))
+    return events
 
 
 class MoexNewsProvider:
@@ -247,7 +320,8 @@ class MoexNewsProvider:
     def fetch_events(self, limit: int = DEFAULT_LIMIT) -> list[Event]:
         if limit <= 0:
             raise ValueError("limit must be a positive integer")
-        return parse_news(_request_news(limit=limit))
+        session = _build_session()
+        return parse_news(_request_news(limit=limit, session=session), session=session)
 
 
 class RSSNewsProvider:
