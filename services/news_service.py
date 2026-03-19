@@ -14,6 +14,10 @@ import requests
 
 MOEX_SITENEWS_URL = "https://iss.moex.com/iss/sitenews.json"
 MOEX_SITENEWS_DETAIL_URL = "https://iss.moex.com/iss/sitenews/{news_id}.json"
+MOEX_SITENEWS_DETAIL_XML_URL = "https://iss.moex.com/iss/sitenews/{news_id}"
+MOEX_SECURITY_URL = "https://iss.moex.com/iss/securities/{security_id}.json"
+MOEX_SECURITY_XML_URL = "https://iss.moex.com/iss/securities/{security_id}.xml"
+MOEX_BONDS_SECURITY_URL = "https://iss.moex.com/iss/engines/stock/markets/bonds/securities/{secid}.json"
 DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
@@ -158,13 +162,43 @@ def _extract_body_from_payload(payload: Any) -> str:
 
 
 
+def _extract_body_from_xml(xml_text: str) -> str:
+    if not xml_text.strip():
+        return ""
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise NewsServiceError("MOEX ISS returned malformed XML for sitenews detail") from exc
+
+    for row in root.findall(".//row"):
+        body = (row.attrib.get("body") or "").strip()
+        if body:
+            return body
+
+    return ""
+
+
 def _request_news_body(event_id: int, session: requests.Session | None = None) -> str:
-    detail_payload = _request_json(
-        MOEX_SITENEWS_DETAIL_URL.format(news_id=event_id),
+    try:
+        detail_payload = _request_json(
+            MOEX_SITENEWS_DETAIL_URL.format(news_id=event_id),
+            params={"iss.meta": "off"},
+            session=session,
+        )
+    except Exception:
+        detail_payload = {}
+
+    body = _extract_body_from_payload(detail_payload)
+    if body:
+        return body
+
+    xml_text = _request_text(
+        MOEX_SITENEWS_DETAIL_XML_URL.format(news_id=event_id),
         params={"iss.meta": "off"},
-        session=session,
+        timeout=DEFAULT_TIMEOUT,
     )
-    return _extract_body_from_payload(detail_payload)
+    return _extract_body_from_xml(xml_text)
 
 
 
@@ -205,34 +239,107 @@ def _extract_isin(title: str) -> str | None:
     return match.group(0) if match else None
 
 
+def _extract_security_row(payload: dict[str, Any]) -> dict[str, Any]:
+    for block_name in ("securities", "SECURITIES"):
+        block = payload.get(block_name) or {}
+        columns = block.get("columns") or []
+        data = block.get("data") or []
+        if isinstance(columns, list) and isinstance(data, list) and data:
+            return _zip_rows(columns, data)[0]
+    return {}
+
+
+def _extract_security_row_from_xml(xml_text: str) -> dict[str, str]:
+    if not xml_text.strip():
+        return {}
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+
+    for row in root.findall(".//row"):
+        attributes = {str(key): str(value) for key, value in row.attrib.items()}
+        upper_attributes = {str(key).upper(): str(value) for key, value in row.attrib.items()}
+        merged = dict(attributes)
+        merged.update(upper_attributes)
+        if any(field in merged for field in ("ISIN", "SECID", "EMITTER_ID", "EMITENT_ID", "EMITTERID", "EMITENTID")):
+            return merged
+    return {}
+
+
+def _normalize_security_profile(row: dict[str, Any]) -> dict[str, str | None]:
+    if not row:
+        return {"isin": None, "secid": None, "emitter_id": None, "emitent_title": None}
+
+    normalized = {str(key).upper(): value for key, value in row.items()}
+
+    def _pick(*keys: str) -> str | None:
+        for key in keys:
+            value = normalized.get(key)
+            if value is None:
+                continue
+            text_value = str(value).strip()
+            if text_value:
+                return text_value
+        return None
+
+    return {
+        "isin": (_pick("ISIN") or "").upper() or None,
+        "secid": _pick("SECID"),
+        "emitter_id": _pick("EMITTER_ID", "EMITTERID", "EMITENT_ID", "EMITENTID"),
+        "emitent_title": _pick("EMITENT_TITLE", "EMITTER_TITLE", "SHORTNAME", "SECNAME", "NAME"),
+    }
+
+
 @lru_cache(maxsize=2048)
-def _resolve_emitter_id_by_isin(isin: str) -> str | None:
+def _resolve_security_profile_by_isin(isin: str) -> dict[str, str | None]:
     normalized_isin = str(isin or "").strip().upper()
     if not normalized_isin:
-        return None
+        return {"isin": None, "secid": None, "emitter_id": None, "emitent_title": None}
+
+    session = _build_session()
+    profile = {"isin": normalized_isin, "secid": None, "emitter_id": None, "emitent_title": None}
 
     try:
         payload = _request_json(
-            f"https://iss.moex.com/iss/securities/{normalized_isin}.json",
+            MOEX_SECURITY_URL.format(security_id=normalized_isin),
             params={"iss.meta": "off"},
-            session=_build_session(),
+            session=session,
         )
+        profile.update({k: v for k, v in _normalize_security_profile(_extract_security_row(payload)).items() if v})
     except Exception:
-        return None
+        pass
 
-    securities = payload.get("securities") or {}
-    columns = securities.get("columns") or []
-    data = securities.get("data") or []
-    if not isinstance(columns, list) or not isinstance(data, list) or not data:
-        return None
+    if not profile.get("emitter_id") or not profile.get("secid"):
+        try:
+            xml_text = _request_text(
+                MOEX_SECURITY_XML_URL.format(security_id=normalized_isin),
+                params={"iss.meta": "off"},
+                timeout=DEFAULT_TIMEOUT,
+            )
+            profile.update({k: v for k, v in _normalize_security_profile(_extract_security_row_from_xml(xml_text)).items() if v})
+        except Exception:
+            pass
 
-    row = _zip_rows(columns, data)[0]
-    emitter_id = row.get("EMITTER_ID") or row.get("EMITTERID") or row.get("emitent_id") or row.get("emitentid")
-    if emitter_id is None:
-        return None
+    secid = profile.get("secid")
+    if secid and (not profile.get("emitter_id") or not profile.get("emitent_title")):
+        try:
+            payload = _request_json(
+                MOEX_BONDS_SECURITY_URL.format(secid=secid),
+                params={"iss.meta": "off"},
+                session=session,
+            )
+            profile.update({k: v for k, v in _normalize_security_profile(_extract_security_row(payload)).items() if v})
+        except Exception:
+            pass
 
-    normalized_emitter_id = str(emitter_id).strip()
-    return normalized_emitter_id or None
+    return profile
+
+
+@lru_cache(maxsize=2048)
+def _resolve_emitter_id_by_isin(isin: str) -> str | None:
+    return _resolve_security_profile_by_isin(isin).get("emitter_id")
 
 
 def _extract_isins(text: str) -> list[str]:
@@ -302,11 +409,15 @@ def build_event(
     event_datetime = _parse_datetime(published_at)
     related_isins = _extract_isins(f"{normalized_title}\n{normalized_body}")
     isin = related_isins[0] if related_isins else None
-    emitter = _extract_emitter(normalized_title, isin)
+    related_profiles = [_resolve_security_profile_by_isin(candidate_isin) for candidate_isin in related_isins]
+    emitter = next(
+        (str(profile.get("emitent_title") or "").strip() for profile in related_profiles if profile.get("emitent_title")),
+        None,
+    ) or _extract_emitter(normalized_title, isin)
     related_emitter_ids = [
-        emitter_id
-        for emitter_id in (_resolve_emitter_id_by_isin(candidate_isin) for candidate_isin in related_isins)
-        if emitter_id
+        str(profile.get("emitter_id")).strip()
+        for profile in related_profiles
+        if profile.get("emitter_id")
     ]
 
     return {
@@ -505,7 +616,8 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     if days < 0:
         raise ValueError("days must be greater than or equal to zero")
 
-    emitter_id = _resolve_emitter_id_by_isin(normalized_isin)
+    security_profile = _resolve_security_profile_by_isin(normalized_isin)
+    emitter_id = security_profile.get("emitter_id")
     events = get_news(limit=MAX_NEWS_LIMIT)
     target_news = [
         event
@@ -514,7 +626,7 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     ]
     target_news = sorted(target_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
-    emitter = next((event.get("emitter") for event in target_news if event.get("emitter")), None)
+    emitter = security_profile.get("emitent_title") or next((event.get("emitter") for event in target_news if event.get("emitter")), None)
     emitter_keywords = _tokenize_emitter(str(emitter) if emitter else None)
 
     since = datetime.utcnow() - timedelta(days=days)
