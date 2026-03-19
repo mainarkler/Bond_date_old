@@ -637,12 +637,22 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     ]
     related_news = sorted(related_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
+    other_isins = sorted(
+        {
+            str(related_isin).upper()
+            for event in related_news
+            for related_isin in (event.get("related_isins") or [])
+            if str(related_isin).strip() and str(related_isin).upper() != normalized_isin
+        }
+    )
+
     return {
         "isin": normalized_isin,
         "emitter": emitter,
         "emitter_id": emitter_id,
         "target_news": target_news,
         "related_news": related_news,
+        "other_isins": other_isins,
     }
 
 
