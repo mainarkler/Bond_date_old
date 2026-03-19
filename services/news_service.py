@@ -649,6 +649,7 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     return {
         "isin": normalized_isin,
         "emitter": emitter,
+        "emitter_id": emitter_id,
         "target_news": target_news,
         "related_news": related_news,
         "other_isins": other_isins,
