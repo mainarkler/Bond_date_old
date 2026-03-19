@@ -12,6 +12,7 @@ from xml.etree import ElementTree as ET
 import requests
 
 MOEX_SITENEWS_URL = "https://iss.moex.com/iss/sitenews.json"
+MOEX_SITENEWS_DETAIL_URL = "https://iss.moex.com/iss/sitenews/{news_id}.json"
 DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
@@ -75,21 +76,28 @@ def _build_session() -> requests.Session:
 
 
 
-def _request_news(limit: int) -> dict[str, Any]:
+def _request_json(url: str, params: dict[str, Any] | None = None, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
     session = _build_session()
-    response = session.get(
-        MOEX_SITENEWS_URL,
-        params={"iss.meta": "off", "limit": limit},
-        timeout=DEFAULT_TIMEOUT,
-    )
+    response = session.get(url, params=params, timeout=timeout)
     response.raise_for_status()
     try:
         return response.json()
     except json.JSONDecodeError as exc:
         body_preview = (response.text or "")[:200].replace("\n", " ")
-        raise NewsServiceError(
-            f"MOEX ISS returned a non-JSON response for site news: {body_preview}"
-        ) from exc
+        raise NewsServiceError(f"MOEX ISS returned a non-JSON response: {body_preview}") from exc
+
+
+
+def _request_news(limit: int) -> dict[str, Any]:
+    return _request_json(MOEX_SITENEWS_URL, params={"iss.meta": "off", "limit": limit})
+
+
+
+def _request_news_detail(news_id: int | str) -> dict[str, Any]:
+    return _request_json(
+        MOEX_SITENEWS_DETAIL_URL.format(news_id=news_id),
+        params={"iss.meta": "off"},
+    )
 
 
 
@@ -186,16 +194,21 @@ def build_event(
     published_at: str | None,
     source: str,
     event_id: int | str | None = None,
+    body: str | None = None,
 ) -> Event:
     """Build a normalized event from any provider using title-derived structure only."""
     normalized_title = unescape(title.strip())
+    normalized_body = unescape((body or "").strip()) or None
     event_datetime = _parse_datetime(published_at)
     isin = _extract_isin(normalized_title)
     emitter = _extract_emitter(normalized_title, isin)
+    raw_id = str(event_id or "").strip()
+    event_identifier = f"sitenews/{raw_id}" if source == SOURCE_NAME and raw_id else raw_id or ""
 
     return {
-        "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
+        "id": event_identifier,
         "title": normalized_title,
+        "body": normalized_body,
         "datetime": event_datetime,
         "date": event_datetime.strftime("%Y-%m-%d") if event_datetime else str(published_at or "")[:10],
         "time": event_datetime.strftime("%H:%M:%S") if event_datetime else str(published_at or "")[11:19],
@@ -208,6 +221,16 @@ def build_event(
 
 
 
+def _extract_first_row(payload: dict[str, Any]) -> dict[str, Any]:
+    sitenews_payload = payload.get("sitenews") or {}
+    columns = sitenews_payload.get("columns") or []
+    data = sitenews_payload.get("data") or []
+    if isinstance(columns, list) and isinstance(data, list) and data:
+        return dict(zip(columns, data[0]))
+    return {}
+
+
+
 def _build_moex_event(item: dict[str, Any]) -> Event:
     published_at = str(
         item.get("published_at")
@@ -217,11 +240,24 @@ def _build_moex_event(item: dict[str, Any]) -> Event:
         or ""
     ).strip()
     title = str(item.get("title") or item.get("TITLE") or "")
+    news_id = item.get("id") or item.get("ID")
+    detail_payload = _request_news_detail(news_id) if news_id not in (None, "") else {}
+    detail_row = _extract_first_row(detail_payload)
+    body = detail_row.get("body") or detail_row.get("BODY") or item.get("body") or item.get("BODY")
+    detail_title = detail_row.get("title") or detail_row.get("TITLE") or title
+    detail_published_at = (
+        detail_row.get("published_at")
+        or detail_row.get("PUBLISHED_AT")
+        or detail_row.get("date")
+        or detail_row.get("DATE")
+        or published_at
+    )
     return build_event(
-        title=title,
-        published_at=published_at,
+        title=str(detail_title or title),
+        published_at=str(detail_published_at or published_at),
         source=SOURCE_NAME,
-        event_id=item.get("id") or item.get("ID"),
+        event_id=news_id,
+        body=str(body or "") or None,
     )
 
 
@@ -271,6 +307,7 @@ class RSSNewsProvider:
             title = (item.findtext("title") or "").strip()
             published_at = (item.findtext("pubDate") or item.findtext("published") or "").strip()
             guid = (item.findtext("guid") or "").strip()
+            description = (item.findtext("description") or "").strip() or None
             if not title:
                 continue
             events.append(
@@ -278,7 +315,8 @@ class RSSNewsProvider:
                     title=title,
                     published_at=published_at,
                     source=self.source_name,
-                    event_id=guid if guid.isdigit() else None,
+                    event_id=guid if guid else None,
+                    body=description,
                 )
             )
         return sorted(events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
@@ -337,7 +375,8 @@ def _event_matches_related(event: Event, emitter_keywords: list[str], since: dat
         return False
 
     event_emitter = str(event.get("emitter") or "")
-    haystacks = [title_lower, event_emitter.lower()]
+    event_body = str(event.get("body") or "")
+    haystacks = [title_lower, event_emitter.lower(), event_body.lower()]
     return any(keyword.lower() in haystack for haystack in haystacks for keyword in emitter_keywords)
 
 

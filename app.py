@@ -2252,6 +2252,9 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
             detail_left, detail_right = st.columns(2)
             detail_left.caption(f"Emitter: {emitter}")
             detail_right.caption(f"ISIN: {isin}")
+            if item.get('body'):
+                with st.expander('Body', expanded=False):
+                    st.markdown(str(item.get('body')))
 
 
 # ---------------------------
@@ -2259,7 +2262,7 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
 # ---------------------------
 if st.session_state["active_view"] == "moex_news":
     st.subheader("📰 Новости MOEX")
-    st.markdown("Поиск событий MOEX ISS `/iss/sitenews.json` по заголовкам новостей: извлекаются `event_type`, `isin` и `emitter` без загрузки полного текста новости.")
+    st.markdown("Поиск событий MOEX ISS: список загружается из `/iss/sitenews.json`, а для каждой новости body подтягивается из `/iss/sitenews/{id}.json`. Из данных извлекаются `event_type`, `isin` и `emitter`.")
 
     latest_col, date_col, isin_col = st.tabs(["Последние", "По дате", "По ISIN"])
 
