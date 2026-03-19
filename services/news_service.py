@@ -21,6 +21,7 @@ MOEX_BONDS_SECURITY_URL = "https://iss.moex.com/iss/engines/stock/markets/bonds/
 DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
+MOEX_PAGE_SIZE = 50
 SOURCE_NAME = "MOEX"
 ISIN_PATTERN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b")
 _HTML_BREAK_RE = re.compile(r"<(?:br|/p|/div|/li|/tr|/h[1-6])\b[^>]*>", re.IGNORECASE)
@@ -100,12 +101,48 @@ def _request_json(
 
 
 
-def _request_news(limit: int, session: requests.Session | None = None) -> dict[str, Any]:
+def _request_news_page(limit: int, start: int = 0, session: requests.Session | None = None) -> dict[str, Any]:
     return _request_json(
         MOEX_SITENEWS_URL,
-        params={"iss.meta": "off", "limit": limit},
+        params={"iss.meta": "off", "limit": limit, "start": start},
         session=session,
     )
+
+
+def _request_news(limit: int, session: requests.Session | None = None) -> dict[str, Any]:
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+
+    session = session or _build_session()
+    start = 0
+    remaining = limit
+    aggregated_payload: dict[str, Any] | None = None
+    aggregated_data: list[list[Any]] = []
+
+    while remaining > 0:
+        page_limit = min(remaining, MOEX_PAGE_SIZE)
+        page_payload = _request_news_page(page_limit, start=start, session=session)
+        sitenews_payload = page_payload.get("sitenews") or {}
+        page_data = sitenews_payload.get("data") or []
+
+        if aggregated_payload is None:
+            aggregated_payload = page_payload
+        aggregated_data.extend(page_data)
+
+        received = len(page_data)
+        if received < page_limit:
+            break
+
+        start += received
+        remaining -= received
+
+    if aggregated_payload is None:
+        aggregated_payload = {"sitenews": {"columns": [], "data": []}}
+
+    aggregated_sitenews = dict(aggregated_payload.get("sitenews") or {})
+    aggregated_sitenews["data"] = aggregated_data[:limit]
+    aggregated_payload["sitenews"] = aggregated_sitenews
+    return aggregated_payload
 
 
 
