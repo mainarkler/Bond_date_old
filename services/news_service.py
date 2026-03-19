@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from html import unescape
 import json
 import re
@@ -18,6 +19,8 @@ DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
 SOURCE_NAME = "MOEX"
 ISIN_PATTERN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b")
+_HTML_BREAK_RE = re.compile(r"<(?:br|/p|/div|/li|/tr|/h[1-6])\b[^>]*>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 _EMITTER_STOP_WORDS = {
     "акции",
     "акций",
@@ -202,6 +205,52 @@ def _extract_isin(title: str) -> str | None:
     return match.group(0) if match else None
 
 
+@lru_cache(maxsize=2048)
+def _resolve_emitter_id_by_isin(isin: str) -> str | None:
+    normalized_isin = str(isin or "").strip().upper()
+    if not normalized_isin:
+        return None
+
+    try:
+        payload = _request_json(
+            f"https://iss.moex.com/iss/securities/{normalized_isin}.json",
+            params={"iss.meta": "off"},
+            session=_build_session(),
+        )
+    except Exception:
+        return None
+
+    securities = payload.get("securities") or {}
+    columns = securities.get("columns") or []
+    data = securities.get("data") or []
+    if not isinstance(columns, list) or not isinstance(data, list) or not data:
+        return None
+
+    row = _zip_rows(columns, data)[0]
+    emitter_id = row.get("EMITTER_ID") or row.get("EMITTERID") or row.get("emitent_id") or row.get("emitentid")
+    if emitter_id is None:
+        return None
+
+    normalized_emitter_id = str(emitter_id).strip()
+    return normalized_emitter_id or None
+
+
+def _extract_isins(text: str) -> list[str]:
+    return sorted({match.group(0) for match in ISIN_PATTERN.finditer((text or "").upper())})
+
+
+def _html_to_text(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    normalized = unescape(str(raw_html))
+    normalized = _HTML_BREAK_RE.sub("\n", normalized)
+    normalized = _HTML_TAG_RE.sub(" ", normalized)
+    normalized = normalized.replace(" ", " ")
+    normalized = re.sub(r"\n\s*\n+", "\n\n", normalized)
+    normalized = re.sub(r"[ 	]+", " ", normalized)
+    return normalized.strip()
+
+
 
 def _extract_parenthesized_fragments(title: str) -> list[str]:
     return [fragment.strip() for fragment in re.findall(r"\(([^()]+)\)", title) if fragment.strip()]
@@ -249,10 +298,16 @@ def build_event(
 ) -> Event:
     """Build a normalized event from provider payload, including optional news body."""
     normalized_title = unescape(title.strip())
-    normalized_body = unescape(str(body or "").strip())
+    normalized_body = _html_to_text(str(body or "").strip())
     event_datetime = _parse_datetime(published_at)
-    isin = _extract_isin(normalized_title)
+    related_isins = _extract_isins(f"{normalized_title}\n{normalized_body}")
+    isin = related_isins[0] if related_isins else None
     emitter = _extract_emitter(normalized_title, isin)
+    related_emitter_ids = [
+        emitter_id
+        for emitter_id in (_resolve_emitter_id_by_isin(candidate_isin) for candidate_isin in related_isins)
+        if emitter_id
+    ]
 
     return {
         "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
@@ -264,7 +319,10 @@ def build_event(
         "source": source,
         "event_type": classify_news(normalized_title),
         "isin": isin,
+        "related_isins": related_isins,
         "emitter": emitter,
+        "emitter_id": related_emitter_ids[0] if related_emitter_ids else None,
+        "related_emitter_ids": sorted(set(related_emitter_ids)),
         "published_at": str(published_at or "").strip(),
     }
 
@@ -279,7 +337,7 @@ def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
         or ""
     ).strip()
     title = str(item.get("title") or item.get("TITLE") or "")
-    body = str(
+    resolved_body = str(body or "").strip() or str(
         item.get("body")
         or item.get("BODY")
         or item.get("text")
@@ -293,7 +351,7 @@ def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
         published_at=published_at,
         source=SOURCE_NAME,
         event_id=item.get("id") or item.get("ID"),
-        body=body,
+        body=resolved_body,
     )
 
 
@@ -410,17 +468,31 @@ def _tokenize_emitter(emitter: str | None) -> list[str]:
 
 
 
-def _event_matches_related(event: Event, emitter_keywords: list[str], since: datetime, isin: str) -> bool:
+def _event_matches_related(
+    event: Event,
+    emitter_keywords: list[str],
+    emitter_id: str | None,
+    since: datetime,
+    isin: str,
+) -> bool:
     event_datetime = event.get("datetime")
     if event_datetime is None or event_datetime < since:
         return False
 
-    title_lower = str(event.get("title") or "").lower()
-    if isin.lower() in title_lower:
+    related_isins = [str(value).upper() for value in event.get("related_isins") or []]
+    if isin.upper() in related_isins:
         return False
 
-    event_emitter = str(event.get("emitter") or "")
-    haystacks = [title_lower, event_emitter.lower()]
+    event_emitter_ids = {str(value).strip() for value in event.get("related_emitter_ids") or [] if str(value).strip()}
+    if emitter_id and emitter_id in event_emitter_ids:
+        return True
+
+    if not emitter_keywords:
+        return False
+
+    title_lower = str(event.get("title") or "").lower()
+    body_lower = str(event.get("body") or "").lower()
+    haystacks = [title_lower, body_lower]
     return any(keyword.lower() in haystack for haystack in haystacks for keyword in emitter_keywords)
 
 
@@ -433,8 +505,13 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     if days < 0:
         raise ValueError("days must be greater than or equal to zero")
 
+    emitter_id = _resolve_emitter_id_by_isin(normalized_isin)
     events = get_news(limit=MAX_NEWS_LIMIT)
-    target_news = [event for event in events if event.get("isin") == normalized_isin]
+    target_news = [
+        event
+        for event in events
+        if normalized_isin in [str(value).upper() for value in event.get("related_isins") or []]
+    ]
     target_news = sorted(target_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
     emitter = next((event.get("emitter") for event in target_news if event.get("emitter")), None)
@@ -442,13 +519,16 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
 
     since = datetime.utcnow() - timedelta(days=days)
     related_news = [
-        event for event in events if _event_matches_related(event, emitter_keywords, since, normalized_isin)
+        event
+        for event in events
+        if _event_matches_related(event, emitter_keywords, emitter_id, since, normalized_isin)
     ]
     related_news = sorted(related_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
     return {
         "isin": normalized_isin,
         "emitter": emitter,
+        "emitter_id": emitter_id,
         "target_news": target_news,
         "related_news": related_news,
     }
