@@ -298,29 +298,14 @@ def render_gold_charts():
         if daily_close.empty:
             st.info("Нет дневных данных по золоту за последние 6 месяцев.")
         else:
-            fig = build_gold_chart_figure(
-                daily_close,
-                "Gold Daily Close (6M) - per gram",
-                color="#b7791f",
-                fill_color="#f6ad55",
-            )
-            st.pyplot(fig)
-            plt.close(fig)
+            st.line_chart(daily_close.rename("Price per gram"), use_container_width=True)
 
     with chart_columns[1]:
         st.markdown("#### Gold Intraday (1M) - per gram")
         if intraday_close.empty:
             st.info("Нет внутридневных данных по золоту за текущий день.")
         else:
-            fig = build_gold_chart_figure(
-                intraday_close,
-                "Gold Intraday (1M) - per gram",
-                color="#dd6b20",
-                fill_color="#fbd38d",
-                intraday=True,
-            )
-            st.pyplot(fig)
-            plt.close(fig)
+            st.line_chart(intraday_close.rename("Price per gram"), use_container_width=True)
 
 
 def get_intraday_chart_attachment():
