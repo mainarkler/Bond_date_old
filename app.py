@@ -254,12 +254,24 @@ def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
     ax.tick_params(axis="y", colors="#374151")
 
 
+def _apply_gold_y_padding(ax, series):
+    min_value = float(series.min())
+    max_value = float(series.max())
+    if min_value == max_value:
+        padding = abs(max_value) * 0.1 if max_value else 1.0
+        ax.set_ylim(min_value - padding, max_value + padding)
+        return
+    lower_bound = min_value * 0.9 if min_value >= 0 else min_value * 1.1
+    upper_bound = max_value * 1.1 if max_value >= 0 else max_value * 0.9
+    ax.set_ylim(lower_bound, upper_bound)
+
+
+
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
     ax.plot(series.index, series.values, color=color, linewidth=2.2)
-    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.18)
-    if len(series.index):
-        ax.scatter(series.index[-1], series.values[-1], color=color, s=36, zorder=3)
+    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.12)
+    _apply_gold_y_padding(ax, series)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
     _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
     fig.tight_layout()
@@ -298,14 +310,29 @@ def render_gold_charts():
         if daily_close.empty:
             st.info("Нет дневных данных по золоту за последние 6 месяцев.")
         else:
-            st.line_chart(daily_close.rename("Price per gram"), use_container_width=True)
+            fig = build_gold_chart_figure(
+                daily_close,
+                "Gold Daily Close (6M) - per gram",
+                color="#1f77b4",
+                fill_color="#93c5fd",
+            )
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
 
     with chart_columns[1]:
         st.markdown("#### Gold Intraday (1M) - per gram")
         if intraday_close.empty:
             st.info("Нет внутридневных данных по золоту за текущий день.")
         else:
-            st.line_chart(intraday_close.rename("Price per gram"), use_container_width=True)
+            fig = build_gold_chart_figure(
+                intraday_close,
+                "Gold Intraday (1M) - per gram",
+                color="#1f77b4",
+                fill_color="#93c5fd",
+                intraday=True,
+            )
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
 
 
 def get_intraday_chart_attachment():
@@ -316,8 +343,8 @@ def get_intraday_chart_attachment():
     fig = build_gold_chart_figure(
         intraday_close,
         "Gold Intraday (1M) - per gram",
-        color="#dd6b20",
-        fill_color="#fbd38d",
+        color="#1f77b4",
+        fill_color="#93c5fd",
         intraday=True,
     )
     png_bytes = figure_to_png_bytes(fig)
