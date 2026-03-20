@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -233,10 +234,43 @@ def calculate_var_results(result_D, K_values=None, t=0.95):
 def build_var_table(var_payload):
     var_results = var_payload.get("VAR_results", {})
     if not var_results:
-        return pd.DataFrame(columns=["K", "VaR, %"])
+        return pd.DataFrame(columns=["Дни", "VaR, %"])
     return pd.DataFrame(
-        [{"K": int(k), "VaR, %": float(v)} for k, v in var_results.items()]
+        [{"Дни": int(k), "VaR, %": float(v)} for k, v in var_results.items()]
     )
+
+
+def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
+    ax.set_title(title, fontsize=12, fontweight="bold", color="#1f2937", pad=12)
+    ax.set_xlabel(xlabel, color="#4b5563")
+    ax.set_ylabel(ylabel, color="#4b5563")
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.25)
+    ax.set_facecolor("#fffdf7")
+    for spine in ax.spines.values():
+        spine.set_color("#d1d5db")
+    if formatter is not None:
+        ax.xaxis.set_major_formatter(formatter)
+    ax.tick_params(axis="x", labelrotation=25, colors="#374151")
+    ax.tick_params(axis="y", colors="#374151")
+
+
+def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
+    fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
+    ax.plot(series.index, series.values, color=color, linewidth=2.2)
+    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.18)
+    if len(series.index):
+        ax.scatter(series.index[-1], series.values[-1], color=color, s=36, zorder=3)
+    formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
+    _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
+    fig.tight_layout()
+    return fig
+
+
+def figure_to_png_bytes(fig):
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def get_gold_var_payload(K_values=None, t=0.95):
@@ -264,14 +298,12 @@ def render_gold_charts():
         if daily_close.empty:
             st.info("Нет дневных данных по золоту за последние 6 месяцев.")
         else:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(daily_close.index, daily_close.values, color="goldenrod", linewidth=1.5)
-            ax.set_title("Gold Daily Close (6M) - per gram")
-            ax.set_xlabel("Date / Time")
-            ax.set_ylabel("Price per gram")
-            ax.grid(alpha=0.3)
-            fig.autofmt_xdate()
-            fig.tight_layout()
+            fig = build_gold_chart_figure(
+                daily_close,
+                "Gold Daily Close (6M) - per gram",
+                color="#b7791f",
+                fill_color="#f6ad55",
+            )
             st.pyplot(fig)
             plt.close(fig)
 
@@ -280,16 +312,32 @@ def render_gold_charts():
         if intraday_close.empty:
             st.info("Нет внутридневных данных по золоту за текущий день.")
         else:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(intraday_close.index, intraday_close.values, color="darkorange", linewidth=1.2)
-            ax.set_title("Gold Intraday (1M) - per gram")
-            ax.set_xlabel("Date / Time")
-            ax.set_ylabel("Price per gram")
-            ax.grid(alpha=0.3)
-            fig.autofmt_xdate()
-            fig.tight_layout()
+            fig = build_gold_chart_figure(
+                intraday_close,
+                "Gold Intraday (1M) - per gram",
+                color="#dd6b20",
+                fill_color="#fbd38d",
+                intraday=True,
+            )
             st.pyplot(fig)
             plt.close(fig)
+
+
+def get_intraday_chart_attachment():
+    _, intraday_raw = fetch_gold_chart_data()
+    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+    if intraday_close.empty:
+        return None
+    fig = build_gold_chart_figure(
+        intraday_close,
+        "Gold Intraday (1M) - per gram",
+        color="#dd6b20",
+        fill_color="#fbd38d",
+        intraday=True,
+    )
+    png_bytes = figure_to_png_bytes(fig)
+    plt.close(fig)
+    return ("gold_intraday_1m.png", png_bytes, "image", "png")
 
 
 def build_http_session():
@@ -1968,6 +2016,14 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
+        var_table_for_mail = build_var_table({"VAR_results": vm_report.get("VAR_RESULTS", {})})
+        if not var_table_for_mail.empty:
+            var_table_text = var_table_for_mail.to_string(index=False)
+        elif vm_report.get("VAR_ERROR"):
+            var_table_text = f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}"
+        else:
+            var_table_text = "Недостаточно данных result_D для расчета VaR."
+
         vm_mail_body = (
             "Коллеги, добрый день!\n\n"
             "Направляю отчёт по вариационной марже (VM).\n\n"
@@ -1979,13 +2035,17 @@ if st.session_state["active_view"] == "vm":
             f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
             f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
-            "Детали во вложении."
+            "Value at Risk (VaR):\n"
+            f"{var_table_text}\n\n"
+            "Во вложении: Excel-отчёт и график Gold Intraday (1M) - per gram.\n"
         )
 
         st.session_state["vm_report_default_body"] = vm_mail_body
 
+        intraday_chart_attachment = None
         try:
             render_gold_charts()
+            intraday_chart_attachment = get_intraday_chart_attachment()
         except Exception as exc:
             st.warning(f"Не удалось построить графики по золоту: {exc}")
 
@@ -1994,6 +2054,7 @@ if st.session_state["active_view"] == "vm":
             "vm_report",
             "vm_report.xlsx",
             vm_xlsx,
+            extra_attachments=[intraday_chart_attachment] if intraday_chart_attachment else None,
         )
 
     st.stop()
