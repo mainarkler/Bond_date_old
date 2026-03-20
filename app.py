@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
@@ -192,6 +193,50 @@ def _normalize_close_series(df):
     if isinstance(close_series, pd.DataFrame):
         close_series = close_series.iloc[:, 0]
     return close_series.dropna()
+
+
+def calculate_var_results(result_D, K_values=None, t=0.95):
+    result_D = np.asarray(result_D, dtype=float)
+    result_D = result_D[np.isfinite(result_D)]
+
+    if result_D.size == 0:
+        return {
+            "confidence_level": t,
+            "T": norm.ppf(t),
+            "Q": None,
+            "result_D": result_D,
+            "K_values": K_values or [],
+            "VAR_results": {},
+        }
+
+    if K_values is None:
+        K_values = [1, 5, 10]
+
+    T = norm.ppf(t)
+    Q = float(np.std(result_D))
+    var_results = {}
+    for K in K_values:
+        M = float(np.mean(result_D) * K)
+        var_percent = (-Q * np.sqrt(K) * T + M) * 100
+        var_results[int(K)] = float(var_percent)
+
+    return {
+        "confidence_level": t,
+        "T": float(T),
+        "Q": Q,
+        "result_D": result_D,
+        "K_values": [int(k) for k in K_values],
+        "VAR_results": var_results,
+    }
+
+
+def build_var_table(var_payload):
+    var_results = var_payload.get("VAR_results", {})
+    if not var_results:
+        return pd.DataFrame(columns=["K", "VaR, %"])
+    return pd.DataFrame(
+        [{"K": int(k), "VaR, %": float(v)} for k, v in var_results.items()]
+    )
 
 
 def render_gold_charts():
@@ -1820,6 +1865,10 @@ if st.session_state["active_view"] == "vm":
                 usd_rub = float(usd_rub_data["usd_rub"])
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
                 limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
+                daily_gold_raw, _ = fetch_gold_chart_data()
+                gold_close_series = convert_ounce_price_to_gram(_normalize_close_series(daily_gold_raw))
+                result_D = gold_close_series.pct_change().dropna().to_numpy()
+                var_payload = calculate_var_results(result_D)
                 st.session_state["vm_last_report"] = {
                     "TRADE_NAME": vm_data["TRADE_NAME"],
                     "SECID": vm_data["SECID"],
@@ -1836,6 +1885,12 @@ if st.session_state["active_view"] == "vm":
                     "USD_RUB": usd_rub_data["usd_rub"],
                     "USD_RUB_DATE": usd_rub_data["date"],
                     "LIMIT_SUM": limit_sum,
+                    "result_D": result_D.tolist(),
+                    "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
+                    "VAR_T": var_payload["T"],
+                    "VAR_Q": var_payload["Q"],
+                    "VAR_K_VALUES": var_payload["K_values"],
+                    "VAR_RESULTS": var_payload["VAR_results"],
                 }
             except Exception as exc:
                 st.error(str(exc))
@@ -1854,6 +1909,19 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
         st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
+
+        st.markdown("#### Value at Risk (VaR)")
+        var_results = vm_report.get("VAR_RESULTS", {})
+        if var_results:
+            st.caption(
+                f"Доверительный уровень: {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.2f}; "
+                f"T = {vm_report.get('VAR_T', 0):.4f}; "
+                f"Q = {vm_report.get('VAR_Q', 0):.6f}"
+            )
+            var_df = build_var_table({"VAR_results": var_results})
+            st.dataframe(var_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Недостаточно данных result_D для расчета VaR.")
 
         vm_df = pd.DataFrame([vm_report])
         vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
