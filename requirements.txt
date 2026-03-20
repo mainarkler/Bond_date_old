@@ -7,5 +7,6 @@ openpyxl
 httpx
 matplotlib
 numpy
+yfinance
 
 psycopg2-binary

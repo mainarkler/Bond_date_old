@@ -8,9 +8,11 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
@@ -156,6 +158,86 @@ if st.session_state["active_view"] == "home":
 # ---------------------------
 # HTTP session with retries
 # ---------------------------
+GRAMS_PER_TROY_OUNCE = 0.03574
+
+
+def convert_ounce_price_to_gram(price_series):
+    return price_series / GRAMS_PER_TROY_OUNCE
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_gold_chart_data():
+    daily = yf.download(
+        "GC=F",
+        period="6mo",
+        interval="1d",
+        progress=False,
+        auto_adjust=False,
+    )
+    intraday = yf.download(
+        "GC=F",
+        period="1d",
+        interval="1m",
+        progress=False,
+        auto_adjust=False,
+        prepost=False,
+    )
+    return daily, intraday
+
+
+def _normalize_close_series(df):
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    close_series = df["Close"]
+    if isinstance(close_series, pd.DataFrame):
+        close_series = close_series.iloc[:, 0]
+    return close_series.dropna()
+
+
+def render_gold_charts():
+    daily_raw, intraday_raw = fetch_gold_chart_data()
+    daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
+    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+
+    if daily_close.empty and intraday_close.empty:
+        st.info("Не удалось загрузить данные по золоту из yfinance для построения графиков.")
+        return
+
+    chart_columns = st.columns(2)
+
+    with chart_columns[0]:
+        st.markdown("#### Gold Daily Close (6M) - per gram")
+        if daily_close.empty:
+            st.info("Нет дневных данных по золоту за последние 6 месяцев.")
+        else:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(daily_close.index, daily_close.values, color="goldenrod", linewidth=1.5)
+            ax.set_title("Gold Daily Close (6M) - per gram")
+            ax.set_xlabel("Date / Time")
+            ax.set_ylabel("Price per gram")
+            ax.grid(alpha=0.3)
+            fig.autofmt_xdate()
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+    with chart_columns[1]:
+        st.markdown("#### Gold Intraday (1M) - per gram")
+        if intraday_close.empty:
+            st.info("Нет внутридневных данных по золоту за текущий день.")
+        else:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(intraday_close.index, intraday_close.values, color="darkorange", linewidth=1.2)
+            ax.set_title("Gold Intraday (1M) - per gram")
+            ax.set_xlabel("Date / Time")
+            ax.set_ylabel("Price per gram")
+            ax.grid(alpha=0.3)
+            fig.autofmt_xdate()
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+
 def build_http_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -1805,6 +1887,12 @@ if st.session_state["active_view"] == "vm":
         )
 
         st.session_state["vm_report_default_body"] = vm_mail_body
+
+        try:
+            render_gold_charts()
+        except Exception as exc:
+            st.warning(f"Не удалось построить графики по золоту: {exc}")
+
         render_email_compose_section(
             "VM отчёт",
             "vm_report",
