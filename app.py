@@ -270,7 +270,9 @@ def _apply_gold_y_padding(ax, series):
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
     ax.plot(series.index, series.values, color=color, linewidth=2.2)
-    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.12)
+    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.18)
+    if len(series.index):
+        ax.scatter(series.index[-1], series.values[-1], color=color, s=36, zorder=3)
     _apply_gold_y_padding(ax, series)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
     _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
@@ -313,8 +315,8 @@ def render_gold_charts():
             fig = build_gold_chart_figure(
                 daily_close,
                 "Gold Daily Close (6M) - per gram",
-                color="#1f77b4",
-                fill_color="#93c5fd",
+                color="#b7791f",
+                fill_color="#f6ad55",
             )
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
@@ -327,8 +329,8 @@ def render_gold_charts():
             fig = build_gold_chart_figure(
                 intraday_close,
                 "Gold Intraday (1M) - per gram",
-                color="#1f77b4",
-                fill_color="#93c5fd",
+                color="#dd6b20",
+                fill_color="#fbd38d",
                 intraday=True,
             )
             st.pyplot(fig, use_container_width=True)
@@ -343,8 +345,8 @@ def get_intraday_chart_attachment():
     fig = build_gold_chart_figure(
         intraday_close,
         "Gold Intraday (1M) - per gram",
-        color="#1f77b4",
-        fill_color="#93c5fd",
+        color="#dd6b20",
+        fill_color="#fbd38d",
         intraday=True,
     )
     png_bytes = figure_to_png_bytes(fig)
