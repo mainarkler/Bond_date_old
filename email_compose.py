@@ -61,8 +61,9 @@ def build_eml_attachment(
     cc_recipients: list[str],
     subject: str,
     body: str,
-    attachment_name: str,
-    attachment_bytes: bytes,
+    attachment_name: str | None = None,
+    attachment_bytes: bytes | None = None,
+    extra_attachments: list[tuple[str, bytes, str, str]] | None = None,
 ) -> bytes:
     message = EmailMessage()
     message["To"] = ", ".join(recipients)
@@ -70,12 +71,20 @@ def build_eml_attachment(
         message["Cc"] = ", ".join(cc_recipients)
     message["Subject"] = subject
     message.set_content(body)
-    message.add_attachment(
-        attachment_bytes,
-        maintype="application",
-        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=attachment_name,
-    )
+    if attachment_name and attachment_bytes:
+        message.add_attachment(
+            attachment_bytes,
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=attachment_name,
+        )
+    for extra_name, extra_bytes, maintype, subtype in extra_attachments or []:
+        message.add_attachment(
+            extra_bytes,
+            maintype=maintype,
+            subtype=subtype,
+            filename=extra_name,
+        )
     return message.as_bytes()
 
 
@@ -85,6 +94,7 @@ def render_email_compose_section(
     attachment_name: str | None = None,
     attachment_bytes: bytes | None = None,
     default_body: str | None = None,
+    extra_attachments: list[tuple[str, bytes, str, str]] | None = None,
 ):
     st.markdown("---")
     if st.button("📧 Подготовить письмо", key=f"{key_prefix}_open_compose"):
@@ -156,6 +166,7 @@ def render_email_compose_section(
                     body,
                     attachment_name,
                     attachment_bytes,
+                    extra_attachments=extra_attachments,
                 )
                 st.download_button(
                     "📎 Скачать черновик .eml с Excel-вложением",
