@@ -8,9 +8,13 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
 
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
+from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
@@ -156,6 +160,171 @@ if st.session_state["active_view"] == "home":
 # ---------------------------
 # HTTP session with retries
 # ---------------------------
+GRAMS_PER_TROY_OUNCE = 0.03574
+
+
+def convert_ounce_price_to_gram(price_series):
+    return price_series / GRAMS_PER_TROY_OUNCE
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_gold_chart_data():
+    daily = yf.download(
+        "GC=F",
+        period="6mo",
+        interval="1d",
+        progress=False,
+        auto_adjust=False,
+    )
+    intraday = yf.download(
+        "GC=F",
+        period="1d",
+        interval="1m",
+        progress=False,
+        auto_adjust=False,
+        prepost=False,
+    )
+    return daily, intraday
+
+
+def _normalize_close_series(df):
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    close_series = df["Close"]
+    if isinstance(close_series, pd.DataFrame):
+        close_series = close_series.iloc[:, 0]
+    return close_series.dropna()
+
+
+def calculate_var_results(result_D, K_values=None, t=0.95):
+    result_D = np.asarray(result_D, dtype=float)
+    result_D = result_D[np.isfinite(result_D)]
+
+    if result_D.size == 0:
+        return {
+            "confidence_level": t,
+            "T": norm.ppf(t),
+            "Q": None,
+            "result_D": result_D,
+            "K_values": K_values or [],
+            "VAR_results": {},
+        }
+
+    if K_values is None:
+        K_values = [1, 5, 10]
+
+    T = norm.ppf(t)
+    Q = float(np.std(result_D))
+    var_results = {}
+    for K in K_values:
+        M = float(np.mean(result_D) * K)
+        var_percent = (-Q * np.sqrt(K) * T + M) * 100
+        var_results[int(K)] = float(var_percent)
+
+    return {
+        "confidence_level": t,
+        "T": float(T),
+        "Q": Q,
+        "result_D": result_D,
+        "K_values": [int(k) for k in K_values],
+        "VAR_results": var_results,
+    }
+
+
+def build_var_table(var_payload):
+    var_results = var_payload.get("VAR_results", {})
+    if not var_results:
+        return pd.DataFrame(columns=["Дни", "VaR, %"])
+    return pd.DataFrame(
+        [{"Дни": int(k), "VaR, %": float(v)} for k, v in var_results.items()]
+    )
+
+
+def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
+    ax.set_title(title, fontsize=12, fontweight="bold", color="#1f2937", pad=12)
+    ax.set_xlabel(xlabel, color="#4b5563")
+    ax.set_ylabel(ylabel, color="#4b5563")
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.25)
+    ax.set_facecolor("#fffdf7")
+    for spine in ax.spines.values():
+        spine.set_color("#d1d5db")
+    if formatter is not None:
+        ax.xaxis.set_major_formatter(formatter)
+    ax.tick_params(axis="x", labelrotation=25, colors="#374151")
+    ax.tick_params(axis="y", colors="#374151")
+
+
+def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
+    fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
+    ax.plot(series.index, series.values, color=color, linewidth=2.2)
+    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.18)
+    if len(series.index):
+        ax.scatter(series.index[-1], series.values[-1], color=color, s=36, zorder=3)
+    formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
+    _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
+    fig.tight_layout()
+    return fig
+
+
+def figure_to_png_bytes(fig):
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def get_gold_var_payload(K_values=None, t=0.95):
+    daily_gold_raw, _ = fetch_gold_chart_data()
+    gold_close_series = convert_ounce_price_to_gram(_normalize_close_series(daily_gold_raw))
+    result_D = gold_close_series.pct_change().dropna().to_numpy()
+    var_payload = calculate_var_results(result_D, K_values=K_values, t=t)
+    var_payload["result_D"] = result_D.tolist()
+    return var_payload
+
+
+def render_gold_charts():
+    daily_raw, intraday_raw = fetch_gold_chart_data()
+    daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
+    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+
+    if daily_close.empty and intraday_close.empty:
+        st.info("Не удалось загрузить данные по золоту из yfinance для построения графиков.")
+        return
+
+    chart_columns = st.columns(2)
+
+    with chart_columns[0]:
+        st.markdown("#### Gold Daily Close (6M) - per gram")
+        if daily_close.empty:
+            st.info("Нет дневных данных по золоту за последние 6 месяцев.")
+        else:
+            st.line_chart(daily_close.rename("Price per gram"), use_container_width=True)
+
+    with chart_columns[1]:
+        st.markdown("#### Gold Intraday (1M) - per gram")
+        if intraday_close.empty:
+            st.info("Нет внутридневных данных по золоту за текущий день.")
+        else:
+            st.line_chart(intraday_close.rename("Price per gram"), use_container_width=True)
+
+
+def get_intraday_chart_attachment():
+    _, intraday_raw = fetch_gold_chart_data()
+    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+    if intraday_close.empty:
+        return None
+    fig = build_gold_chart_figure(
+        intraday_close,
+        "Gold Intraday (1M) - per gram",
+        color="#dd6b20",
+        fill_color="#fbd38d",
+        intraday=True,
+    )
+    png_bytes = figure_to_png_bytes(fig)
+    plt.close(fig)
+    return ("gold_intraday_1m.png", png_bytes, "image", "png")
+
+
 def build_http_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -1738,7 +1907,7 @@ if st.session_state["active_view"] == "vm":
                 usd_rub = float(usd_rub_data["usd_rub"])
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
                 limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
-                st.session_state["vm_last_report"] = {
+                vm_report = {
                     "TRADE_NAME": vm_data["TRADE_NAME"],
                     "SECID": vm_data["SECID"],
                     "TRADEDATE": vm_data["TRADEDATE"],
@@ -1754,7 +1923,30 @@ if st.session_state["active_view"] == "vm":
                     "USD_RUB": usd_rub_data["usd_rub"],
                     "USD_RUB_DATE": usd_rub_data["date"],
                     "LIMIT_SUM": limit_sum,
+                    "VM_SOURCE": "ISS MOEX",
+                    "VAR_SOURCE": "Yahoo Finance",
+                    "result_D": [],
+                    "VAR_CONFIDENCE_LEVEL": 0.95,
+                    "VAR_T": None,
+                    "VAR_Q": None,
+                    "VAR_K_VALUES": [],
+                    "VAR_RESULTS": {},
                 }
+                try:
+                    var_payload = get_gold_var_payload()
+                    vm_report.update(
+                        {
+                            "result_D": var_payload["result_D"],
+                            "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
+                            "VAR_T": var_payload["T"],
+                            "VAR_Q": var_payload["Q"],
+                            "VAR_K_VALUES": var_payload["K_values"],
+                            "VAR_RESULTS": var_payload["VAR_results"],
+                        }
+                    )
+                except Exception as exc:
+                    vm_report["VAR_ERROR"] = str(exc)
+                st.session_state["vm_last_report"] = vm_report
             except Exception as exc:
                 st.error(str(exc))
 
@@ -1773,6 +1965,25 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
 
+        st.markdown("#### Value at Risk (VaR)")
+        st.caption(
+            f"VM source: {vm_report.get('VM_SOURCE', 'ISS MOEX')}; "
+            f"VaR/charts source: {vm_report.get('VAR_SOURCE', 'Yahoo Finance')}"
+        )
+        var_results = vm_report.get("VAR_RESULTS", {})
+        if var_results:
+            st.caption(
+                f"Доверительный уровень: {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.2f}; "
+                f"T = {vm_report.get('VAR_T', 0):.4f}; "
+                f"Q = {vm_report.get('VAR_Q', 0):.6f}"
+            )
+            var_df = build_var_table({"VAR_results": var_results})
+            st.dataframe(var_df, use_container_width=True, hide_index=True)
+        elif vm_report.get("VAR_ERROR"):
+            st.info(f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}")
+        else:
+            st.info("Недостаточно данных result_D для расчета VaR.")
+
         vm_df = pd.DataFrame([vm_report])
         vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
         st.download_button(
@@ -1790,6 +2001,14 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
+        var_table_for_mail = build_var_table({"VAR_results": vm_report.get("VAR_RESULTS", {})})
+        if not var_table_for_mail.empty:
+            var_table_text = var_table_for_mail.to_string(index=False)
+        elif vm_report.get("VAR_ERROR"):
+            var_table_text = f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}"
+        else:
+            var_table_text = "Недостаточно данных result_D для расчета VaR."
+
         vm_mail_body = (
             "Коллеги, добрый день!\n\n"
             "Направляю отчёт по вариационной марже (VM).\n\n"
@@ -1801,15 +2020,26 @@ if st.session_state["active_view"] == "vm":
             f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
             f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
-            "Детали во вложении."
+            "Value at Risk (VaR):\n"
+            f"{var_table_text}\n\n"
+            "Во вложении: Excel-отчёт и график Gold Intraday (1M) - per gram.\n"
         )
 
         st.session_state["vm_report_default_body"] = vm_mail_body
+
+        intraday_chart_attachment = None
+        try:
+            render_gold_charts()
+            intraday_chart_attachment = get_intraday_chart_attachment()
+        except Exception as exc:
+            st.warning(f"Не удалось построить графики по золоту: {exc}")
+
         render_email_compose_section(
             "VM отчёт",
             "vm_report",
             "vm_report.xlsx",
             vm_xlsx,
+            extra_attachments=[intraday_chart_attachment] if intraday_chart_attachment else None,
         )
 
     st.stop()
