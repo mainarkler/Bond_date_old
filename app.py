@@ -239,6 +239,15 @@ def build_var_table(var_payload):
     )
 
 
+def get_gold_var_payload(K_values=None, t=0.95):
+    daily_gold_raw, _ = fetch_gold_chart_data()
+    gold_close_series = convert_ounce_price_to_gram(_normalize_close_series(daily_gold_raw))
+    result_D = gold_close_series.pct_change().dropna().to_numpy()
+    var_payload = calculate_var_results(result_D, K_values=K_values, t=t)
+    var_payload["result_D"] = result_D.tolist()
+    return var_payload
+
+
 def render_gold_charts():
     daily_raw, intraday_raw = fetch_gold_chart_data()
     daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
@@ -1865,11 +1874,7 @@ if st.session_state["active_view"] == "vm":
                 usd_rub = float(usd_rub_data["usd_rub"])
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
                 limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
-                daily_gold_raw, _ = fetch_gold_chart_data()
-                gold_close_series = convert_ounce_price_to_gram(_normalize_close_series(daily_gold_raw))
-                result_D = gold_close_series.pct_change().dropna().to_numpy()
-                var_payload = calculate_var_results(result_D)
-                st.session_state["vm_last_report"] = {
+                vm_report = {
                     "TRADE_NAME": vm_data["TRADE_NAME"],
                     "SECID": vm_data["SECID"],
                     "TRADEDATE": vm_data["TRADEDATE"],
@@ -1885,13 +1890,30 @@ if st.session_state["active_view"] == "vm":
                     "USD_RUB": usd_rub_data["usd_rub"],
                     "USD_RUB_DATE": usd_rub_data["date"],
                     "LIMIT_SUM": limit_sum,
-                    "result_D": result_D.tolist(),
-                    "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
-                    "VAR_T": var_payload["T"],
-                    "VAR_Q": var_payload["Q"],
-                    "VAR_K_VALUES": var_payload["K_values"],
-                    "VAR_RESULTS": var_payload["VAR_results"],
+                    "VM_SOURCE": "ISS MOEX",
+                    "VAR_SOURCE": "Yahoo Finance",
+                    "result_D": [],
+                    "VAR_CONFIDENCE_LEVEL": 0.95,
+                    "VAR_T": None,
+                    "VAR_Q": None,
+                    "VAR_K_VALUES": [],
+                    "VAR_RESULTS": {},
                 }
+                try:
+                    var_payload = get_gold_var_payload()
+                    vm_report.update(
+                        {
+                            "result_D": var_payload["result_D"],
+                            "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
+                            "VAR_T": var_payload["T"],
+                            "VAR_Q": var_payload["Q"],
+                            "VAR_K_VALUES": var_payload["K_values"],
+                            "VAR_RESULTS": var_payload["VAR_results"],
+                        }
+                    )
+                except Exception as exc:
+                    vm_report["VAR_ERROR"] = str(exc)
+                st.session_state["vm_last_report"] = vm_report
             except Exception as exc:
                 st.error(str(exc))
 
@@ -1911,6 +1933,10 @@ if st.session_state["active_view"] == "vm":
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
 
         st.markdown("#### Value at Risk (VaR)")
+        st.caption(
+            f"VM source: {vm_report.get('VM_SOURCE', 'ISS MOEX')}; "
+            f"VaR/charts source: {vm_report.get('VAR_SOURCE', 'Yahoo Finance')}"
+        )
         var_results = vm_report.get("VAR_RESULTS", {})
         if var_results:
             st.caption(
@@ -1920,6 +1946,8 @@ if st.session_state["active_view"] == "vm":
             )
             var_df = build_var_table({"VAR_results": var_results})
             st.dataframe(var_df, use_container_width=True, hide_index=True)
+        elif vm_report.get("VAR_ERROR"):
+            st.info(f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}")
         else:
             st.info("Недостаточно данных result_D для расчета VaR.")
 
