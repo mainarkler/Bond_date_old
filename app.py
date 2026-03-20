@@ -241,17 +241,19 @@ def build_var_table(var_payload):
 
 
 def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
-    ax.set_title(title, fontsize=12, fontweight="bold", color="#1f2937", pad=12)
-    ax.set_xlabel(xlabel, color="#4b5563")
-    ax.set_ylabel(ylabel, color="#4b5563")
-    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.25)
-    ax.set_facecolor("#fffdf7")
-    for spine in ax.spines.values():
-        spine.set_color("#d1d5db")
+    ax.set_title(title, fontsize=12, fontweight="normal", color="#262730", pad=10)
+    ax.set_xlabel(xlabel, color="#262730")
+    ax.set_ylabel(ylabel, color="#262730")
+    ax.grid(True, linestyle="-", linewidth=0.5, alpha=0.18, color="#d9d9d9")
+    ax.set_facecolor("#ffffff")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#d9d9d9")
+    ax.spines["bottom"].set_color("#d9d9d9")
     if formatter is not None:
         ax.xaxis.set_major_formatter(formatter)
-    ax.tick_params(axis="x", labelrotation=25, colors="#374151")
-    ax.tick_params(axis="y", colors="#374151")
+    ax.tick_params(axis="x", labelrotation=25, colors="#262730")
+    ax.tick_params(axis="y", colors="#262730")
 
 
 def _apply_gold_y_padding(ax, series):
@@ -269,10 +271,7 @@ def _apply_gold_y_padding(ax, series):
 
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
-    ax.plot(series.index, series.values, color=color, linewidth=2.2)
-    ax.fill_between(series.index, series.values, color=fill_color, alpha=0.18)
-    if len(series.index):
-        ax.scatter(series.index[-1], series.values[-1], color=color, s=36, zorder=3)
+    ax.plot(series.index, series.values, color=color, linewidth=2.0)
     _apply_gold_y_padding(ax, series)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
     _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
@@ -315,8 +314,8 @@ def render_gold_charts():
             fig = build_gold_chart_figure(
                 daily_close,
                 "Gold Daily Close (6M) - per gram",
-                color="#b7791f",
-                fill_color="#f6ad55",
+                color="#1f77b4",
+                fill_color="#1f77b4",
             )
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
@@ -329,8 +328,8 @@ def render_gold_charts():
             fig = build_gold_chart_figure(
                 intraday_close,
                 "Gold Intraday (1M) - per gram",
-                color="#dd6b20",
-                fill_color="#fbd38d",
+                color="#1f77b4",
+                fill_color="#1f77b4",
                 intraday=True,
             )
             st.pyplot(fig, use_container_width=True)
@@ -345,8 +344,8 @@ def get_intraday_chart_attachment():
     fig = build_gold_chart_figure(
         intraday_close,
         "Gold Intraday (1M) - per gram",
-        color="#dd6b20",
-        fill_color="#fbd38d",
+        color="#1f77b4",
+        fill_color="#1f77b4",
         intraday=True,
     )
     png_bytes = figure_to_png_bytes(fig)
