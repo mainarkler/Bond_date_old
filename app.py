@@ -1149,7 +1149,7 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     hist_params = {
         "iss.meta": "off",
         "iss.only": "history",
-        "history.columns": "TRADEDATE,SETTLEPRICEDAY",
+        "history.columns": "TRADEDATE,SETTLEPRICE",
         "sort_order": "desc",
         "limit": 1,
     }
