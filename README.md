@@ -1,6 +1,6 @@
 # Bond_date_old
 
-## News + Investment Analysis + Factor Signal Extension
+## Alpha Signal Engine
 
 ### File structure
 
@@ -22,6 +22,8 @@ services/
   cache_backend.py
   company_news_analysis.py
   factor_engine.py
+  market_context.py
+  signal_refiner.py
   signal_service.py
 storage/
   __init__.py
@@ -46,39 +48,11 @@ export SIGNAL_CACHE_TTL_SECONDS="600"
 export SIGNAL_STORE_PATH="storage/signals.db"
 ```
 
-### Unified analysis function
-
-```python
-from services.company_news_analysis import get_company_news_analysis
-
-result = await get_company_news_analysis("AAPL")
-print(result)
-```
-
-### Investment signal function
-
-```python
-from services.signal_service import get_investment_signal
-
-signal = await get_investment_signal("AAPL")
-print(signal)
-```
-
 ### API usage
 
 ```bash
 uvicorn api.company_news_api:app --reload
 ```
-
-Analyze endpoint:
-
-```bash
-curl -X POST http://127.0.0.1:8000/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"query":"AAPL"}'
-```
-
-Signal endpoint:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/signal \
@@ -92,6 +66,7 @@ curl -X POST http://127.0.0.1:8000/signal \
 {
   "signal": "BUY",
   "score": 0.2541,
+  "confidence": 0.71,
   "factors": {
     "earnings": 0.1601,
     "m&a": 0.0412,
@@ -105,9 +80,18 @@ curl -X POST http://127.0.0.1:8000/signal \
       "event_type": "earnings",
       "sentiment": 0.5,
       "confidence": 0.82,
+      "magnitude": 0.9,
+      "surprise": 0.8,
       "timestamp": "2026-03-25T09:15:00+00:00",
-      "title": "Apple beats quarterly earnings estimates"
+      "title": "Apple better than expected quarterly earnings"
     }
-  ]
+  ],
+  "market_context": {
+    "price_change_1d": 0.008,
+    "price_change_3d": 0.015,
+    "volatility": 2.18,
+    "volume_spike": 0.12
+  },
+  "explanation": "Signal=BUY; normalized_score=0.2541; strongest_factor=earnings (0.1601)."
 }
 ```

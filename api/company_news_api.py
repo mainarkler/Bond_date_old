@@ -18,8 +18,11 @@ class QueryRequest(BaseModel):
 class SignalResponse(BaseModel):
     signal: Literal["BUY", "HOLD", "SELL"]
     score: float
+    confidence: float
     factors: dict[str, float]
     top_events: list[dict[str, Any]]
+    market_context: dict[str, float]
+    explanation: str
 
 
 @app.post("/analyze")
@@ -33,6 +36,9 @@ async def signal(request: QueryRequest) -> SignalResponse:
     return SignalResponse(
         signal=payload["signal"],
         score=float(payload["score"]),
+        confidence=float(payload.get("confidence", 0.0)),
         factors={str(k): float(v) for k, v in payload.get("factors", {}).items()},
         top_events=[dict(event) for event in payload.get("top_events", [])],
+        market_context={str(k): float(v) for k, v in payload.get("market_context", {}).items()},
+        explanation=str(payload.get("explanation", "")),
     )

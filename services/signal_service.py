@@ -12,6 +12,8 @@ from news.scorer import NewsRelevanceScorer
 from news_agent_config import settings
 from services.cache_backend import HybridCache, make_signal_cache_key
 from services.factor_engine import NewsFactorEngine
+from services.market_context import get_market_context
+from services.signal_refiner import refine_signal
 from storage.signals_store import SignalsStore
 
 logger = logging.getLogger(__name__)
@@ -50,12 +52,15 @@ async def get_investment_signal(query: str) -> dict[str, Any]:
 
     events = _factor_engine.extract_events(analysis=analysis_dict, news=news_dict)
     factor_signal = _factor_engine.compute_factor_signal(events)
+    market_context = await get_market_context(query)
 
     top_events = [
         {
             "event_type": event.event_type,
             "sentiment": event.sentiment,
             "confidence": event.confidence,
+            "magnitude": event.magnitude,
+            "surprise": event.surprise,
             "timestamp": event.timestamp.isoformat(),
             "title": event.title,
         }
@@ -66,14 +71,18 @@ async def get_investment_signal(query: str) -> dict[str, Any]:
         "query": query,
         "signal": factor_signal.signal,
         "score": factor_signal.score,
+        "confidence": factor_signal.confidence,
         "factors": factor_signal.factors,
-        "explanation": factor_signal.explanation,
         "top_events": top_events,
+        "market_context": market_context,
+        "explanation": factor_signal.explanation,
         "analysis": analysis_dict,
         "news_count": len(ranked_news),
     }
 
-    await _cache.set_json(cache_key, payload, ttl_seconds=settings.signal_cache_ttl_seconds)
-    await _store.save_signal(query=query, signal_payload=payload)
+    refined_payload = refine_signal(payload, market_context)
 
-    return payload
+    await _cache.set_json(cache_key, refined_payload, ttl_seconds=settings.signal_cache_ttl_seconds)
+    await _store.save_signal(query=query, signal_payload=refined_payload)
+
+    return refined_payload
