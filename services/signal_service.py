@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -86,3 +87,7 @@ async def get_investment_signal(query: str) -> dict[str, Any]:
     await _store.save_signal(query=query, signal_payload=refined_payload)
 
     return refined_payload
+
+
+def get_investment_signal_sync(query: str) -> dict[str, Any]:
+    return asyncio.run(get_investment_signal(query=query))
