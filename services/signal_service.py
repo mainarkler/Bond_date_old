@@ -51,7 +51,7 @@ async def get_investment_signal(query: str) -> dict[str, Any]:
     analysis_dict = analysis.to_dict()
     news_dict = [item.to_dict() for item in ranked_news[:30]]
 
-    events = _factor_engine.extract_events(analysis=analysis_dict, news=news_dict)
+    events = _factor_engine.extract_events(analysis=analysis_dict, news=news_dict) if ranked_news else []
     factor_signal = _factor_engine.compute_factor_signal(events)
     market_context = await get_market_context(query)
 

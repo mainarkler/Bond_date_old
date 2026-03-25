@@ -27,13 +27,13 @@ class SignalResponse(BaseModel):
 
 
 class FundamentalResponse(BaseModel):
+    mode: Literal["full", "financial_only", "no_data"]
     financials: dict[str, float]
     ratios: dict[str, float]
-    news_summary: dict[str, Any]
     strengths: list[str]
     risks: list[str]
     valuation_view: str
-    final_assessment: str
+    trend_analysis: str
     confidence: float
 
 

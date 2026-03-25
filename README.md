@@ -1,28 +1,23 @@
 # Bond_date_old
 
-## Fundamental Analysis Engine (IFRS + News + AI)
+## Fundamental Analysis Engine (Financial-first)
 
 ### File structure
 
 ```text
 ifrs/
-  __init__.py
   loader.py
   parser.py
   extractor.py
   normalizer.py
-news/
-agent/
 services/
   fundamental_metrics.py
   fundamental_engine.py
-  signal_service.py
-  company_news_analysis.py
 api/
   company_news_api.py
 ```
 
-### API usage
+### Fundamental endpoint
 
 ```bash
 uvicorn api.company_news_api:app --reload
@@ -34,10 +29,11 @@ curl -X POST http://127.0.0.1:8000/fundamental \
   -d '{"query":"SBER"}'
 ```
 
-### Example fundamental response
+### Example response
 
 ```json
 {
+  "mode": "financial_only",
   "financials": {
     "revenue": 1250000000.0,
     "ebitda": 320000000.0,
@@ -55,15 +51,15 @@ curl -X POST http://127.0.0.1:8000/fundamental \
     "roe": 0.072,
     "free_cash_flow": 180000000.0
   },
-  "news_summary": {
-    "sentiment_score": 0.24,
-    "trend_analysis": "Positive trend with improving earnings quality.",
-    "valuation_view": "fair"
-  },
-  "strengths": ["Margin resilience", "Cash generation"],
-  "risks": ["Regulatory uncertainty"],
+  "strengths": [
+    "Revenue growth is positive.",
+    "EBITDA margin indicates strong operating profitability."
+  ],
+  "risks": [
+    "ROE is below target range."
+  ],
   "valuation_view": "fair",
-  "final_assessment": "Fundamentals are stable with balanced upside and risk.",
-  "confidence": 0.71
+  "trend_analysis": "Fundamental trend is improving.",
+  "confidence": 0.65
 }
 ```

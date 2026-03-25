@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -96,7 +96,7 @@ class InvestmentNewsAnalyzer:
             return InvestmentAnalysis(
                 sentiment_score=0.0,
                 key_events=[],
-                risks=["No relevant news found."],
+                risks=[],
                 opportunities=[],
                 strengths=[],
                 trend_analysis="No trend available due to missing recent news.",
@@ -113,3 +113,81 @@ class InvestmentNewsAnalyzer:
             logger.warning("llm_analysis_fallback", extra={"error": str(exc)})
             logger.debug("fallback_payload", extra={"payload": json.loads(user_prompt)})
             return HeuristicFallbackAnalyzer.analyze(news=news, company_or_ticker=company_or_ticker)
+
+    def analyze_fundamentals(
+        self,
+        *,
+        financials: dict[str, float],
+        ratios: dict[str, float],
+        news_analysis: InvestmentAnalysis | None = None,
+    ) -> dict[str, Any]:
+        strengths: list[str] = []
+        risks: list[str] = []
+
+        revenue_growth = float(ratios.get("revenue_growth", 0.0))
+        ebitda_margin = float(ratios.get("ebitda_margin", 0.0))
+        net_margin = float(ratios.get("net_margin", 0.0))
+        debt_to_equity = float(ratios.get("debt_to_equity", 0.0))
+        roe = float(ratios.get("roe", 0.0))
+        free_cash_flow = float(ratios.get("free_cash_flow", 0.0))
+
+        if revenue_growth > 0.05:
+            strengths.append("Revenue growth is positive.")
+        else:
+            risks.append("Revenue growth is weak or negative.")
+
+        if ebitda_margin > 0.2:
+            strengths.append("EBITDA margin indicates strong operating profitability.")
+        else:
+            risks.append("EBITDA margin is below preferred threshold.")
+
+        if net_margin > 0.1:
+            strengths.append("Net margin supports earnings quality.")
+        else:
+            risks.append("Net margin is thin.")
+
+        if debt_to_equity > 2.0:
+            risks.append("Leverage is elevated (high debt-to-equity).")
+        else:
+            strengths.append("Balance sheet leverage is manageable.")
+
+        if roe > 0.12:
+            strengths.append("ROE demonstrates efficient capital usage.")
+        else:
+            risks.append("ROE is below target range.")
+
+        if free_cash_flow < 0:
+            risks.append("Free cash flow is negative.")
+        else:
+            strengths.append("Free cash flow remains positive.")
+
+        valuation_view = "fair"
+        if revenue_growth > 0.1 and roe > 0.12 and debt_to_equity < 1.5:
+            valuation_view = "undervalued"
+        elif revenue_growth < 0 and net_margin < 0.05:
+            valuation_view = "overvalued"
+
+        trend_analysis = (
+            "Fundamental trend is improving." if revenue_growth > 0 and free_cash_flow >= 0 else "Fundamental trend is mixed or deteriorating."
+        )
+
+        if news_analysis is not None:
+            strengths.extend(news_analysis.strengths[:2])
+            risks.extend(news_analysis.risks[:2])
+            if news_analysis.valuation_view in {"undervalued", "overvalued"}:
+                valuation_view = news_analysis.valuation_view
+
+        confidence = 0.65
+        non_zero_financials = sum(1 for value in financials.values() if float(value) != 0.0)
+        if non_zero_financials < 4:
+            confidence = 0.4
+        if news_analysis is not None and news_analysis.confidence > 0:
+            confidence = min(1.0, (confidence + news_analysis.confidence) / 2)
+
+        return {
+            "strengths": list(dict.fromkeys(strengths)),
+            "risks": list(dict.fromkeys(risks)),
+            "valuation_view": valuation_view,
+            "trend_analysis": trend_analysis,
+            "confidence": round(confidence, 4),
+        }
