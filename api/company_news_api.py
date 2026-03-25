@@ -17,6 +17,7 @@ class QueryRequest(BaseModel):
 
 
 class SignalResponse(BaseModel):
+    news_status: Literal["ok", "empty", "error"]
     signal: Literal["BUY", "HOLD", "SELL"]
     score: float
     confidence: float
@@ -28,6 +29,7 @@ class SignalResponse(BaseModel):
 
 class FundamentalResponse(BaseModel):
     mode: Literal["full", "financial_only", "no_data"]
+    news_status: Literal["ok", "empty", "error"]
     financials: dict[str, float]
     ratios: dict[str, float]
     strengths: list[str]
@@ -46,6 +48,7 @@ async def analyze(request: QueryRequest) -> dict[str, Any]:
 async def signal(request: QueryRequest) -> SignalResponse:
     payload = await get_investment_signal(request.query)
     return SignalResponse(
+        news_status=str(payload.get("news_status", "empty")),
         signal=payload["signal"],
         score=float(payload["score"]),
         confidence=float(payload.get("confidence", 0.0)),

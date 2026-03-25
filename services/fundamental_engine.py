@@ -12,6 +12,7 @@ from news.fetcher import NewsFetcher
 from news.models import NewsQuery
 from news.scorer import NewsRelevanceScorer
 from services.fundamental_metrics import compute_fundamental_ratios
+from services.query_expander import expand_query
 
 
 def _has_financial_data(financials: dict[str, float]) -> bool:
@@ -41,6 +42,7 @@ async def analyze_company_fundamentals(query: str) -> dict[str, Any]:
     if not _has_financial_data(financials):
         return {
             "mode": "no_data",
+            "news_status": "empty",
             "financials": financials,
             "ratios": ratios,
             "strengths": [],
@@ -50,13 +52,17 @@ async def analyze_company_fundamentals(query: str) -> dict[str, Any]:
             "confidence": 0.0,
         }
 
-    news_items = await NewsFetcher().fetch_news(NewsQuery(query=query, language="en", limit=25))
-    ranked_news = NewsRelevanceScorer().score(NewsDeduplicator().deduplicate(news_items), query=query)
+    expansion = expand_query(query)
+    queries = [NewsQuery(q, language="en", limit=60) for q in expansion.expanded]
+
+    batch = await NewsFetcher().fetch_news_batch(queries)
+    deduped = NewsDeduplicator().deduplicate(batch.news)
+    ranked_news = NewsRelevanceScorer().score(deduped, query=" ".join(expansion.expanded))
 
     news_analysis = None
     mode = "financial_only"
     if ranked_news:
-        news_analysis = await analyzer.analyze(company_or_ticker=query, news=ranked_news[:15])
+        news_analysis = await analyzer.analyze(company_or_ticker=query, news=ranked_news[:20])
         mode = "full"
 
     foundation = analyzer.analyze_fundamentals(
@@ -67,6 +73,7 @@ async def analyze_company_fundamentals(query: str) -> dict[str, Any]:
 
     return {
         "mode": mode,
+        "news_status": batch.status,
         "financials": financials,
         "ratios": ratios,
         "strengths": foundation["strengths"],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import timezone
 from typing import Any, Protocol
 
@@ -19,6 +20,12 @@ class NewsFetchError(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class FetchBatchResult:
+    news: list[NewsItem]
+    status: str  # ok | empty | error
+
+
 class NewsProvider(Protocol):
     async def fetch(self, query: NewsQuery) -> list[NewsItem]:
         ...
@@ -27,7 +34,7 @@ class NewsProvider(Protocol):
 class BaseHTTPNewsProvider:
     provider_name = "base"
 
-    def __init__(self, timeout_seconds: float = settings.request_timeout_seconds, max_retries: int = 3) -> None:
+    def __init__(self, timeout_seconds: float = settings.request_timeout_seconds, max_retries: int = 2) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
 
@@ -56,7 +63,7 @@ class BaseHTTPNewsProvider:
                         "error": str(exc),
                     },
                 )
-                await asyncio.sleep(min(2**attempt, 6))
+                await asyncio.sleep(min(2**attempt, 4))
 
         raise NewsFetchError(f"{self.provider_name} failed after retries: {last_error}")
 
@@ -71,7 +78,6 @@ class NewsAPIProvider(BaseHTTPNewsProvider):
 
     async def fetch(self, query: NewsQuery) -> list[NewsItem]:
         if not self.api_key:
-            logger.info("newsapi_provider_skipped", extra={"reason": "missing_api_key"})
             return []
 
         params: dict[str, Any] = {
@@ -108,7 +114,6 @@ class GNewsProvider(BaseHTTPNewsProvider):
 
     async def fetch(self, query: NewsQuery) -> list[NewsItem]:
         if not self.api_key:
-            logger.info("gnews_provider_skipped", extra={"reason": "missing_api_key"})
             return []
 
         params: dict[str, Any] = {
@@ -128,21 +133,77 @@ class GNewsProvider(BaseHTTPNewsProvider):
         return normalize_gnews_articles(payload.get("articles") or [])
 
 
+class GoogleNewsRSSProvider(BaseHTTPNewsProvider):
+    provider_name = "google_rss"
+    endpoint = "https://news.google.com/rss/search"
+
+    async def fetch(self, query: NewsQuery) -> list[NewsItem]:
+        params = {"q": query.query, "hl": (query.language or "en"), "gl": "US", "ceid": "US:en"}
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.get(self.endpoint, params=params)
+            response.raise_for_status()
+            text = response.text
+
+        # Lightweight RSS parse without extra deps
+        import re
+        from datetime import datetime, timezone
+
+        items: list[NewsItem] = []
+        for block in re.findall(r"<item>(.*?)</item>", text, flags=re.DOTALL):
+            title_match = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", block, flags=re.DOTALL)
+            link_match = re.search(r"<link>(.*?)</link>", block, flags=re.DOTALL)
+            date_match = re.search(r"<pubDate>(.*?)</pubDate>", block, flags=re.DOTALL)
+            source_match = re.search(r"<source[^>]*>(.*?)</source>", block, flags=re.DOTALL)
+            if not title_match or not link_match:
+                continue
+            published = datetime.now(timezone.utc)
+            if date_match:
+                try:
+                    published = datetime.strptime(date_match.group(1).strip(), "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    pass
+
+            items.append(
+                NewsItem(
+                    title=title_match.group(1).strip(),
+                    source=(source_match.group(1).strip() if source_match else "Google News"),
+                    published_at=published,
+                    url=link_match.group(1).strip(),
+                    summary=title_match.group(1).strip(),
+                )
+            )
+        return items[: query.limit]
+
+
 class NewsFetcher:
     def __init__(self, providers: list[NewsProvider] | None = None) -> None:
-        self.providers = providers or [NewsAPIProvider(), GNewsProvider()]
+        self.providers = providers or [NewsAPIProvider(), GNewsProvider(), GoogleNewsRSSProvider()]
 
     async def fetch_news(self, query: NewsQuery) -> list[NewsItem]:
-        provider_results = await asyncio.gather(*(provider.fetch(query) for provider in self.providers), return_exceptions=True)
+        result = await self.fetch_news_batch([query])
+        return result.news
 
-        news: list[NewsItem] = []
-        for provider, result in zip(self.providers, provider_results):
-            if isinstance(result, Exception):
-                logger.exception(
-                    "news_provider_failed",
-                    extra={"provider": provider.__class__.__name__, "error": str(result)},
-                )
-                continue
-            news.extend(result)
+    async def fetch_news_batch(self, queries: list[NewsQuery]) -> FetchBatchResult:
+        all_news: list[NewsItem] = []
+        errors = 0
+        for query in queries:
+            provider_results = await asyncio.gather(
+                *(provider.fetch(query) for provider in self.providers),
+                return_exceptions=True,
+            )
+            for provider, result in zip(self.providers, provider_results):
+                if isinstance(result, Exception):
+                    errors += 1
+                    logger.error(
+                        "news_provider_failed",
+                        extra={"provider": provider.__class__.__name__, "query": query.query, "error": str(result)},
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                    continue
+                all_news.extend(result)
 
-        return news
+        if all_news:
+            return FetchBatchResult(news=all_news, status="ok")
+        if errors > 0:
+            return FetchBatchResult(news=[], status="error")
+        return FetchBatchResult(news=[], status="empty")
