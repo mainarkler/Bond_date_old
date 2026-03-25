@@ -1,6 +1,6 @@
 # Bond_date_old
 
-## News + Investment Analysis Extension
+## News + Investment Analysis + Factor Signal Extension
 
 ### File structure
 
@@ -19,7 +19,13 @@ agent/
   analyzer.py
   postprocessor.py
 services/
+  cache_backend.py
   company_news_analysis.py
+  factor_engine.py
+  signal_service.py
+storage/
+  __init__.py
+  signals_store.py
 api/
   company_news_api.py
 news_agent_config.py
@@ -34,9 +40,13 @@ export GNEWS_KEY="..."
 export OPENAI_API_KEY="..."
 export OPENAI_MODEL="gpt-4o-mini"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
+export REDIS_URL="redis://localhost:6379/0"   # optional
+export CACHE_TTL_SECONDS="300"
+export SIGNAL_CACHE_TTL_SECONDS="600"
+export SIGNAL_STORE_PATH="storage/signals.db"
 ```
 
-### Unified integration function
+### Unified analysis function
 
 ```python
 from services.company_news_analysis import get_company_news_analysis
@@ -45,19 +55,22 @@ result = await get_company_news_analysis("AAPL")
 print(result)
 ```
 
-### CLI usage
+### Investment signal function
 
-```bash
-python company_news_cli.py "AAPL"
+```python
+from services.signal_service import get_investment_signal
+
+signal = await get_investment_signal("AAPL")
+print(signal)
 ```
 
-### FastAPI usage
+### API usage
 
 ```bash
 uvicorn api.company_news_api:app --reload
 ```
 
-POST request:
+Analyze endpoint:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/analyze \
@@ -65,36 +78,36 @@ curl -X POST http://127.0.0.1:8000/analyze \
   -d '{"query":"AAPL"}'
 ```
 
-### Sample output
+Signal endpoint:
+
+```bash
+curl -X POST http://127.0.0.1:8000/signal \
+  -H "Content-Type: application/json" \
+  -d '{"query":"AAPL"}'
+```
+
+### Example signal output
 
 ```json
 {
-  "query": "AAPL",
-  "news_count": 12,
-  "news": [
+  "signal": "BUY",
+  "score": 0.2541,
+  "factors": {
+    "earnings": 0.1601,
+    "m&a": 0.0412,
+    "regulation": -0.0204,
+    "macro": 0.0189,
+    "product": 0.0462,
+    "litigation": 0.0081
+  },
+  "top_events": [
     {
-      "title": "Apple reports quarterly earnings beat",
-      "source": "Reuters",
-      "published_at": "2026-03-25T10:15:00+00:00",
-      "url": "https://example.com/apple-earnings",
-      "summary": "Apple beat consensus EPS and revenue guidance...",
-      "relevance_score": 0.92
+      "event_type": "earnings",
+      "sentiment": 0.5,
+      "confidence": 0.82,
+      "timestamp": "2026-03-25T09:15:00+00:00",
+      "title": "Apple beats quarterly earnings estimates"
     }
-  ],
-  "analysis": {
-    "sentiment_score": 0.44,
-    "key_events": [
-      "Quarterly earnings beat",
-      "New buyback authorization"
-    ],
-    "risks": [
-      "Regulatory pressure in the EU"
-    ],
-    "opportunities": [
-      "Services margin expansion"
-    ],
-    "final_assessment": "Constructive medium-term outlook with policy risk overhang.",
-    "confidence": 0.78
-  }
+  ]
 }
 ```

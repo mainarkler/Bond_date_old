@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from agent.agent import InvestmentNewsAgent
@@ -10,37 +10,19 @@ from news.deduplicator import NewsDeduplicator
 from news.fetcher import NewsFetcher
 from news.models import NewsQuery
 from news.scorer import NewsRelevanceScorer
+from news_agent_config import settings
+from services.cache_backend import HybridCache, make_analysis_cache_key
 
 logger = logging.getLogger(__name__)
 
-
-class _InMemoryCache:
-    def __init__(self, ttl_seconds: int = 300) -> None:
-        self.ttl_seconds = ttl_seconds
-        self._store: dict[str, tuple[datetime, dict[str, Any]]] = {}
-
-    def get(self, key: str) -> dict[str, Any] | None:
-        entry = self._store.get(key)
-        if not entry:
-            return None
-        expires_at, value = entry
-        if expires_at < datetime.now(timezone.utc):
-            self._store.pop(key, None)
-            return None
-        return value
-
-    def set(self, key: str, value: dict[str, Any]) -> None:
-        self._store[key] = (datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds), value)
-
-
-_cache = _InMemoryCache()
+_cache = HybridCache(redis_url=settings.redis_url or None)
 
 
 async def get_company_news_analysis(query: str) -> dict[str, Any]:
-    cache_key = query.strip().casefold()
-    cached = _cache.get(cache_key)
-    if cached:
-        logger.info("company_news_analysis_cache_hit", extra={"query": query})
+    cache_key = make_analysis_cache_key(query)
+    cached = await _cache.get_json(cache_key)
+    if cached is not None:
+        logger.info("company_news_analysis_cache_hit", extra={"query": query, "cache_key": cache_key})
         return cached
 
     fetcher = NewsFetcher()
@@ -59,7 +41,7 @@ async def get_company_news_analysis(query: str) -> dict[str, Any]:
         "news": [item.to_dict() for item in ranked_news[:20]],
         "analysis": analysis.to_dict(),
     }
-    _cache.set(cache_key, result)
+    await _cache.set_json(cache_key, result, ttl_seconds=settings.cache_ttl_seconds)
     return result
 
 

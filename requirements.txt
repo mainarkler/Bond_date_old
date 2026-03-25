@@ -11,3 +11,5 @@ yfinance
 scipy
 
 psycopg2-binary
+
+redis
