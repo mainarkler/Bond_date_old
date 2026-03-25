@@ -23,7 +23,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.moex_turnover import MoexTurnoverClient
+from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
+from services.signal_service import get_investment_signal_sync
 
 # ---------------------------
 # Streamlit page setup
@@ -58,6 +60,7 @@ if FORCED_ACTIVE_VIEW in {
     "market_statistics",
     "turnover_export",
     "moex_news",
+    "company_analysis",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -107,6 +110,11 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
+    st.markdown("### AI Анализ компании")
+    st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
+    if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
+        st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
         st.markdown("### Расчет VM")
@@ -1773,6 +1781,45 @@ def fetch_isins(isins, show_progress=True):
 # ---------------------------
 # Calendar view
 # ---------------------------
+if st.session_state["active_view"] == "company_analysis":
+    st.header("AI Анализ компании")
+    st.caption("Введите тикер или название компании, чтобы получить блок анализа и отдельный сигнал.")
+
+    query_value = st.text_input("Тикер/компания", value=st.session_state.get("company_analysis_query", "AAPL"))
+    st.session_state["company_analysis_query"] = query_value
+
+    if st.button("Запустить анализ", key="company_analysis_run", use_container_width=True):
+        user_query = query_value.strip()
+        if not user_query:
+            st.warning("Введите тикер или название компании.")
+        else:
+            with st.spinner("Собираем новости и считаем сигнал..."):
+                try:
+                    analysis_payload = get_company_news_analysis_sync(user_query)
+                    signal_payload = get_investment_signal_sync(user_query)
+                except Exception as exc:
+                    st.error(f"Ошибка анализа компании: {exc}")
+                else:
+                    st.subheader("Плитка: Анализ компании")
+                    tile_col1, tile_col2, tile_col3 = st.columns(3)
+                    tile_col1.metric("Сигнал", signal_payload.get("signal", "HOLD"))
+                    tile_col2.metric("Score", f"{float(signal_payload.get('score', 0.0)):.4f}")
+                    tile_col3.metric("Confidence", f"{float(signal_payload.get('confidence', 0.0)):.2f}")
+
+                    st.markdown("#### Инвест-анализ")
+                    st.json(analysis_payload.get("analysis", {}))
+
+                    st.markdown("#### Факторная модель")
+                    st.json(
+                        {
+                            "factors": signal_payload.get("factors", {}),
+                            "market_context": signal_payload.get("market_context", {}),
+                            "top_events": signal_payload.get("top_events", [])[:5],
+                            "explanation": signal_payload.get("explanation", ""),
+                        }
+                    )
+    st.stop()
+
 if st.session_state["active_view"] == "calendar":
     st.subheader("📅 Календарь выплат")
     st.markdown(
