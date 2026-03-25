@@ -68,6 +68,7 @@ class HeuristicFallbackAnalyzer:
         key_events = [n.title for n in news[:5]]
         risks = [n.title for n in news if any(t in f"{n.title} {n.summary}".casefold() for t in cls.NEGATIVE_HINTS)][:3]
         opportunities = [n.title for n in news if any(t in f"{n.title} {n.summary}".casefold() for t in cls.POSITIVE_HINTS)][:3]
+        strengths = opportunities.copy()
 
         assessment = (
             f"Heuristic view for {company_or_ticker}: sentiment appears "
@@ -78,6 +79,9 @@ class HeuristicFallbackAnalyzer:
             key_events=key_events,
             risks=risks,
             opportunities=opportunities,
+            strengths=strengths,
+            trend_analysis="News-flow trend appears stable with mixed catalysts.",
+            valuation_view="undervalued" if score > 0.2 else "overvalued" if score < -0.2 else "fair",
             final_assessment=assessment,
             confidence=0.35,
         )
@@ -94,6 +98,9 @@ class InvestmentNewsAnalyzer:
                 key_events=[],
                 risks=["No relevant news found."],
                 opportunities=[],
+                strengths=[],
+                trend_analysis="No trend available due to missing recent news.",
+                valuation_view="fair",
                 final_assessment=f"No recent news available for {company_or_ticker}.",
                 confidence=0.0,
             )

@@ -1,51 +1,25 @@
 # Bond_date_old
 
-## Alpha Signal Engine
+## Fundamental Analysis Engine (IFRS + News + AI)
 
 ### File structure
 
 ```text
-news/
+ifrs/
   __init__.py
-  fetcher.py
+  loader.py
   parser.py
-  deduplicator.py
-  scorer.py
-  models.py
+  extractor.py
+  normalizer.py
+news/
 agent/
-  __init__.py
-  agent.py
-  prompts.py
-  analyzer.py
-  postprocessor.py
 services/
-  cache_backend.py
-  company_news_analysis.py
-  factor_engine.py
-  market_context.py
-  signal_refiner.py
+  fundamental_metrics.py
+  fundamental_engine.py
   signal_service.py
-storage/
-  __init__.py
-  signals_store.py
+  company_news_analysis.py
 api/
   company_news_api.py
-news_agent_config.py
-company_news_cli.py
-```
-
-### Environment variables
-
-```bash
-export NEWSAPI_KEY="..."
-export GNEWS_KEY="..."
-export OPENAI_API_KEY="..."
-export OPENAI_MODEL="gpt-4o-mini"
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-export REDIS_URL="redis://localhost:6379/0"   # optional
-export CACHE_TTL_SECONDS="300"
-export SIGNAL_CACHE_TTL_SECONDS="600"
-export SIGNAL_STORE_PATH="storage/signals.db"
 ```
 
 ### API usage
@@ -55,43 +29,41 @@ uvicorn api.company_news_api:app --reload
 ```
 
 ```bash
-curl -X POST http://127.0.0.1:8000/signal \
+curl -X POST http://127.0.0.1:8000/fundamental \
   -H "Content-Type: application/json" \
-  -d '{"query":"AAPL"}'
+  -d '{"query":"SBER"}'
 ```
 
-### Example signal output
+### Example fundamental response
 
 ```json
 {
-  "signal": "BUY",
-  "score": 0.2541,
-  "confidence": 0.71,
-  "factors": {
-    "earnings": 0.1601,
-    "m&a": 0.0412,
-    "regulation": -0.0204,
-    "macro": 0.0189,
-    "product": 0.0462,
-    "litigation": 0.0081
+  "financials": {
+    "revenue": 1250000000.0,
+    "ebitda": 320000000.0,
+    "net_income": 180000000.0,
+    "assets": 5400000000.0,
+    "liabilities": 2900000000.0,
+    "equity": 2500000000.0,
+    "cash_flow": 240000000.0
   },
-  "top_events": [
-    {
-      "event_type": "earnings",
-      "sentiment": 0.5,
-      "confidence": 0.82,
-      "magnitude": 0.9,
-      "surprise": 0.8,
-      "timestamp": "2026-03-25T09:15:00+00:00",
-      "title": "Apple better than expected quarterly earnings"
-    }
-  ],
-  "market_context": {
-    "price_change_1d": 0.008,
-    "price_change_3d": 0.015,
-    "volatility": 2.18,
-    "volume_spike": 0.12
+  "ratios": {
+    "revenue_growth": 0.136364,
+    "ebitda_margin": 0.256,
+    "net_margin": 0.144,
+    "debt_to_equity": 1.16,
+    "roe": 0.072,
+    "free_cash_flow": 180000000.0
   },
-  "explanation": "Signal=BUY; normalized_score=0.2541; strongest_factor=earnings (0.1601)."
+  "news_summary": {
+    "sentiment_score": 0.24,
+    "trend_analysis": "Positive trend with improving earnings quality.",
+    "valuation_view": "fair"
+  },
+  "strengths": ["Margin resilience", "Cash generation"],
+  "risks": ["Regulatory uncertainty"],
+  "valuation_view": "fair",
+  "final_assessment": "Fundamentals are stable with balanced upside and risk.",
+  "confidence": 0.71
 }
 ```

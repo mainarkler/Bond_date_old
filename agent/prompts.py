@@ -12,6 +12,9 @@ Return JSON only with keys:
 - key_events (array of strings)
 - risks (array of strings)
 - opportunities (array of strings)
+- strengths (array of strings)
+- trend_analysis (string)
+- valuation_view ("undervalued" | "fair" | "overvalued")
 - final_assessment (string)
 - confidence (float 0 to 1)
 

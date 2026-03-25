@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from services.company_news_analysis import get_company_news_analysis
+from services.fundamental_engine import analyze_company_fundamentals
 from services.signal_service import get_investment_signal
 
 app = FastAPI(title="Company News Analysis API")
@@ -25,6 +26,17 @@ class SignalResponse(BaseModel):
     explanation: str
 
 
+class FundamentalResponse(BaseModel):
+    financials: dict[str, float]
+    ratios: dict[str, float]
+    news_summary: dict[str, Any]
+    strengths: list[str]
+    risks: list[str]
+    valuation_view: str
+    final_assessment: str
+    confidence: float
+
+
 @app.post("/analyze")
 async def analyze(request: QueryRequest) -> dict[str, Any]:
     return await get_company_news_analysis(request.query)
@@ -42,3 +54,9 @@ async def signal(request: QueryRequest) -> SignalResponse:
         market_context={str(k): float(v) for k, v in payload.get("market_context", {}).items()},
         explanation=str(payload.get("explanation", "")),
     )
+
+
+@app.post("/fundamental", response_model=FundamentalResponse)
+async def fundamental(request: QueryRequest) -> FundamentalResponse:
+    payload = await analyze_company_fundamentals(request.query)
+    return FundamentalResponse(**payload)
