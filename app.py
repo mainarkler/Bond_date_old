@@ -178,6 +178,11 @@ def convert_ounce_price_to_gram(price_series):
     return price_series / GRAMS_PER_TROY_OUNCE
 
 
+def format_int_with_sep(value):
+    rounded = int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return f"{rounded:,}".replace(",", " ")
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_gold_chart_data():
     daily = yf.download(
@@ -491,6 +496,13 @@ def build_vm_pdf_report(vm_report):
             fontsize=10.5,
             color="#262730",
         )
+        fig_cover.text(
+            0.03,
+            0.895,
+            f"Дата цены: {vm_report.get('TRADEDATE', 'н/д')} | Время цены: {vm_report.get('QUOTE_TIME') or 'н/д'}",
+            fontsize=9,
+            color="#3c4758",
+        )
         news_items = vm_report.get("XAUUSD_NEWS", [])
         if news_items:
             preview_lines = []
@@ -508,8 +520,8 @@ def build_vm_pdf_report(vm_report):
             ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
             ("VM", f"{vm_report['VM']:.2f}"),
             ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
-            ("Маржа позиции", f"{vm_report['POSITION_VM']:.2f}"),
-            ("Сумма ограничения", f"{vm_report['LIMIT_SUM']:.2f}"),
+            ("Маржа позиции", format_int_with_sep(vm_report["POSITION_VM"])),
+            ("Сумма ограничения", format_int_with_sep(vm_report["LIMIT_SUM"])),
             ("USD/RUB", f"{vm_report['USD_RUB']} ({vm_report['USD_RUB_DATE']})"),
         ]
         ax_table = fig_cover.add_axes([0.03, 0.53, 0.44, 0.33])
@@ -2312,8 +2324,8 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
         st.markdown(f"**Вариационная маржа (по последней цене):** {vm_report['VM']:.2f}")
         st.markdown(f"**VM клиринговая (SETTLEPRICEDAY - PREVSETTLEPRICE):** {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}")
-        st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
-        st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
+        st.markdown(f"**Маржа позиции (VM × Кол-во):** {format_int_with_sep(vm_report['POSITION_VM'])}")
+        st.markdown(f"**Сумма ограничения:** {format_int_with_sep(vm_report['LIMIT_SUM'])}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
 
         st.markdown("#### Value at Risk (VaR)")
@@ -2394,8 +2406,8 @@ if st.session_state["active_view"] == "vm":
             f"Кол-во: {vm_report['QUANTITY']}\n"
             f"VM (по последней цене): {vm_report['VM']:.2f}\n"
             f"VM клиринговая: {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}\n"
-            f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
-            f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
+            f"Маржа позиции: {format_int_with_sep(vm_report['POSITION_VM'])}\n"
+            f"Сумма ограничения: {format_int_with_sep(vm_report['LIMIT_SUM'])}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
             "Value at Risk (VaR):\n"
             f"{var_table_text}\n\n"
