@@ -272,15 +272,19 @@ def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
     ax.tick_params(axis="y", colors="#262730")
 
 
-def _apply_gold_y_padding(ax, series):
+def _apply_gold_y_padding(ax, series, intraday=False):
     min_value = float(series.min())
     max_value = float(series.max())
     if min_value == max_value:
         padding = abs(max_value) * 0.1 if max_value else 1.0
         ax.set_ylim(min_value - padding, max_value + padding)
         return
-    lower_bound = min_value * 0.9 if min_value >= 0 else min_value * 1.1
-    upper_bound = max_value * 1.1 if max_value >= 0 else max_value * 0.9
+    if intraday:
+        lower_bound = min_value * 0.9
+        upper_bound = max_value * 1.1
+    else:
+        lower_bound = min_value * 0.9 if min_value >= 0 else min_value * 1.1
+        upper_bound = max_value * 1.1 if max_value >= 0 else max_value * 0.9
     ax.set_ylim(lower_bound, upper_bound)
 
 
@@ -288,7 +292,7 @@ def _apply_gold_y_padding(ax, series):
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
     ax.plot(series.index, series.values, color=color, linewidth=2.0)
-    _apply_gold_y_padding(ax, series)
+    _apply_gold_y_padding(ax, series, intraday=intraday)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
     _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
     fig.tight_layout()
@@ -370,17 +374,17 @@ def build_vm_pdf_report(vm_report):
     pdf_buffer = BytesIO()
 
     with PdfPages(pdf_buffer) as pdf:
-        fig_cover = plt.figure(figsize=(8.27, 11.69), facecolor="#ffffff")
-        fig_cover.suptitle("VM Report", fontsize=20, fontweight="bold", y=0.97, color="#1f3a5f")
+        fig_cover = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
+        fig_cover.suptitle("VM Dashboard", fontsize=20, fontweight="bold", y=0.98, color="#1f3a5f")
         fig_cover.text(
-            0.06,
-            0.91,
-            f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']})\nДата клиринга: {vm_report['TRADEDATE']}",
-            fontsize=11,
+            0.03,
+            0.92,
+            f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']}) | "
+            f"Дата клиринга: {vm_report['TRADEDATE']} | Кол-во: {vm_report['QUANTITY']}",
+            fontsize=10.5,
             color="#262730",
         )
         vm_rows = [
-            ("Кол-во", f"{vm_report['QUANTITY']}"),
             ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
             ("VM", f"{vm_report['VM']:.2f}"),
             ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
@@ -388,7 +392,7 @@ def build_vm_pdf_report(vm_report):
             ("Сумма ограничения", f"{vm_report['LIMIT_SUM']:.2f}"),
             ("USD/RUB", f"{vm_report['USD_RUB']} ({vm_report['USD_RUB_DATE']})"),
         ]
-        ax_table = fig_cover.add_axes([0.06, 0.56, 0.88, 0.30])
+        ax_table = fig_cover.add_axes([0.03, 0.53, 0.44, 0.33])
         ax_table.axis("off")
         table = ax_table.table(
             cellText=[[key, value] for key, value in vm_rows],
@@ -406,41 +410,40 @@ def build_vm_pdf_report(vm_report):
                 cell.set_text_props(weight="bold", color="#1f3a5f")
             else:
                 cell.set_facecolor("#f8fbff" if row % 2 == 0 else "#ffffff")
-        fig_cover.text(
-            0.06,
-            0.45,
-            f"Источники: VM — {vm_report.get('VM_SOURCE', 'ISS MOEX')}, VaR/графики — {vm_report.get('VAR_SOURCE', 'Yahoo Finance')}",
-            fontsize=9,
-            color="#5f6b7a",
-        )
-        pdf.savefig(fig_cover, bbox_inches="tight")
-        plt.close(fig_cover)
-
-        fig_var = plt.figure(figsize=(8.27, 11.69), facecolor="#ffffff")
-        fig_var.suptitle("Value at Risk (VaR)", fontsize=18, fontweight="bold", y=0.97, color="#1f3a5f")
         var_results = vm_report.get("VAR_RESULTS", {})
+        ax_var_table = fig_cover.add_axes([0.53, 0.53, 0.44, 0.33])
+        ax_var_table.axis("off")
+        ax_var_table.text(
+            0.0,
+            1.05,
+            "Value at Risk (VaR)",
+            fontsize=13,
+            fontweight="bold",
+            color="#1f3a5f",
+            transform=ax_var_table.transAxes,
+        )
         if var_results:
-            fig_var.text(
-                0.06,
-                0.90,
+            ax_var_table.text(
+                0.0,
+                0.92,
                 f"Доверительный уровень: {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.2f} | "
                 f"T={vm_report.get('VAR_T', 0):.4f} | Q={vm_report.get('VAR_Q', 0):.6f}",
                 fontsize=10,
                 color="#262730",
+                transform=ax_var_table.transAxes,
             )
             var_df = build_var_table({"VAR_results": var_results})
-            ax_var_table = fig_var.add_axes([0.06, 0.68, 0.88, 0.18])
-            ax_var_table.axis("off")
             var_table = ax_var_table.table(
                 cellText=[[int(row["Дни"]), f"{float(row['VaR, %']):.4f}"] for _, row in var_df.iterrows()],
                 colLabels=["Горизонт, дни", "VaR, %"],
                 cellLoc="center",
                 colLoc="center",
-                loc="center",
+                loc="lower center",
+                bbox=[0, 0.15, 1.0, 0.65],
             )
             var_table.auto_set_font_size(False)
             var_table.set_fontsize(10)
-            var_table.scale(1, 1.5)
+            var_table.scale(1, 1.25)
             for (row, col), cell in var_table.get_celld().items():
                 if row == 0:
                     cell.set_facecolor("#e8f0fb")
@@ -448,32 +451,58 @@ def build_vm_pdf_report(vm_report):
                 else:
                     cell.set_facecolor("#f8fbff" if row % 2 == 0 else "#ffffff")
         elif vm_report.get("VAR_ERROR"):
-            fig_var.text(0.06, 0.86, f"VaR недоступен: {vm_report['VAR_ERROR']}", fontsize=10, color="#9b2c2c")
+            ax_var_table.text(
+                0.0,
+                0.72,
+                f"VaR недоступен: {vm_report['VAR_ERROR']}",
+                fontsize=10,
+                color="#9b2c2c",
+                transform=ax_var_table.transAxes,
+            )
         else:
-            fig_var.text(0.06, 0.86, "Недостаточно дневной истории золота для расчёта VaR.", fontsize=10, color="#9b2c2c")
-        pdf.savefig(fig_var, bbox_inches="tight")
-        plt.close(fig_var)
+            ax_var_table.text(
+                0.0,
+                0.72,
+                "Недостаточно дневной истории золота для расчёта VaR.",
+                fontsize=10,
+                color="#9b2c2c",
+                transform=ax_var_table.transAxes,
+            )
 
         if not daily_close.empty:
-            fig_daily = build_gold_chart_figure(
-                daily_close,
+            ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
+            ax_daily.plot(daily_close.index, daily_close.values, color="#1f77b4", linewidth=1.8)
+            _apply_gold_y_padding(ax_daily, daily_close, intraday=False)
+            _style_gold_axis(
+                ax_daily,
                 "Gold Daily Close (6M) - per gram",
-                color="#1f77b4",
-                fill_color="#1f77b4",
+                "Date / Time",
+                "Price per gram",
+                formatter=mdates.DateFormatter("%d.%m.%Y"),
             )
-            pdf.savefig(fig_daily, bbox_inches="tight")
-            plt.close(fig_daily)
+        else:
+            ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
+            ax_daily.axis("off")
+            ax_daily.text(0.5, 0.5, "Дневные данные временно недоступны.", ha="center", va="center", color="#9b2c2c")
 
         if not intraday_close.empty:
-            fig_intraday = build_gold_chart_figure(
-                intraday_close,
+            ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
+            ax_intraday.plot(intraday_close.index, intraday_close.values, color="#1f77b4", linewidth=1.8)
+            _apply_gold_y_padding(ax_intraday, intraday_close, intraday=True)
+            _style_gold_axis(
+                ax_intraday,
                 "Gold Intraday (1M) - per gram",
-                color="#1f77b4",
-                fill_color="#1f77b4",
-                intraday=True,
+                "Date / Time",
+                "Price per gram",
+                formatter=mdates.DateFormatter("%H:%M"),
             )
-            pdf.savefig(fig_intraday, bbox_inches="tight")
-            plt.close(fig_intraday)
+        else:
+            ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
+            ax_intraday.axis("off")
+            ax_intraday.text(0.5, 0.5, "Внутридневные данные временно недоступны.", ha="center", va="center", color="#9b2c2c")
+
+        pdf.savefig(fig_cover, bbox_inches="tight")
+        plt.close(fig_cover)
 
     pdf_buffer.seek(0)
     return pdf_buffer.getvalue()
