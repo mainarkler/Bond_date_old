@@ -536,13 +536,6 @@ def build_vm_pdf_report(vm_report):
             fontsize=10.5,
             color="#262730",
         )
-        fig_cover.text(
-            0.03,
-            0.895,
-            f"Дата цены: {vm_report.get('TRADEDATE', 'н/д')} | Время цены: {vm_report.get('QUOTE_TIME') or 'н/д'}",
-            fontsize=9,
-            color="#3c4758",
-        )
         news_items = vm_report.get("XAUUSD_NEWS", [])
         if news_items:
             preview_lines = []
@@ -558,6 +551,8 @@ def build_vm_pdf_report(vm_report):
             )
         vm_rows = [
             ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
+            ("Дата цены", vm_report.get("TRADEDATE", "н/д")),
+            ("Время цены", vm_report.get("QUOTE_TIME") or "н/д"),
             ("VM", f"{vm_report['VM']:.2f}"),
             ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
             ("Маржа позиции", format_int_with_sep(vm_report["POSITION_VM"])),
