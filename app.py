@@ -1,6 +1,7 @@
 import csv
 import os
 import math
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -10,6 +11,8 @@ from io import BytesIO, StringIO
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import requests
@@ -204,6 +207,108 @@ def _normalize_close_series(df):
     return close_series.dropna()
 
 
+def get_gold_close_series():
+    daily_raw, intraday_raw = fetch_gold_chart_data()
+    daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
+    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+    return daily_close, intraday_close
+
+
+def _extract_news_entries(payload, bucket):
+    if isinstance(payload, dict):
+        has_title = isinstance(payload.get("title"), str)
+        has_url = isinstance(payload.get("url"), str)
+        published = payload.get("publishedAt") or payload.get("datePublished") or payload.get("published")
+        if has_title and has_url and isinstance(published, str):
+            bucket.append(
+                {
+                    "title": payload.get("title", "").strip(),
+                    "url": payload.get("url", "").strip(),
+                    "published_at": str(published).strip(),
+                    "source": str(payload.get("publisher", "")) or "TradingView",
+                }
+            )
+        for value in payload.values():
+            _extract_news_entries(value, bucket)
+    elif isinstance(payload, list):
+        for item in payload:
+            _extract_news_entries(item, bucket)
+
+
+def _parse_news_datetime(value: str):
+    if not value:
+        return None
+    value = value.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is not None:
+            return dt.astimezone(tz=None).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_xauusd_tradingview_news():
+    url = "https://www.tradingview.com/symbols/XAUUSD/news/?exchange=OANDA"
+    response = HTTP_SESSION.get(
+        url,
+        timeout=20,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    response.raise_for_status()
+    html = response.text
+    scripts = re.findall(
+        r'<script[^>]*type="application/ld\\+json"[^>]*>(.*?)</script>',
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not scripts:
+        scripts = re.findall(
+            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+    if not scripts:
+        raise RuntimeError("Не удалось найти блоки новостей TradingView в HTML-ответе.")
+
+    parsed_entries = []
+    for block in scripts:
+        try:
+            payload = json.loads(block.strip())
+        except Exception:
+            continue
+        _extract_news_entries(payload, parsed_entries)
+
+    unique_news = {}
+    for item in parsed_entries:
+        news_url = item.get("url")
+        if news_url and news_url not in unique_news:
+            unique_news[news_url] = item
+
+    yesterday_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    filtered = []
+    for item in unique_news.values():
+        parsed_dt = _parse_news_datetime(item.get("published_at", ""))
+        if parsed_dt and parsed_dt >= yesterday_start:
+            filtered.append(
+                {
+                    "title": item["title"],
+                    "url": item["url"],
+                    "published_at": parsed_dt.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+
+    filtered.sort(key=lambda x: x["published_at"], reverse=True)
+    return filtered
+
+
 def calculate_var_results(result_D, K_values=None, t=0.95):
     result_D = np.asarray(result_D, dtype=float)
     result_D = result_D[np.isfinite(result_D)]
@@ -248,7 +353,7 @@ def build_var_table(var_payload):
     )
 
 
-def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
+def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None, y_formatter=None):
     ax.set_title(title, fontsize=12, fontweight="normal", color="#262730", pad=10)
     ax.set_xlabel(xlabel, color="#262730")
     ax.set_ylabel(ylabel, color="#262730")
@@ -260,19 +365,25 @@ def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
     ax.spines["bottom"].set_color("#d9d9d9")
     if formatter is not None:
         ax.xaxis.set_major_formatter(formatter)
+    if y_formatter is not None:
+        ax.yaxis.set_major_formatter(y_formatter)
     ax.tick_params(axis="x", labelrotation=25, colors="#262730")
     ax.tick_params(axis="y", colors="#262730")
 
 
-def _apply_gold_y_padding(ax, series):
+def _apply_gold_y_padding(ax, series, intraday=False):
     min_value = float(series.min())
     max_value = float(series.max())
     if min_value == max_value:
         padding = abs(max_value) * 0.1 if max_value else 1.0
         ax.set_ylim(min_value - padding, max_value + padding)
         return
-    lower_bound = min_value * 0.9 if min_value >= 0 else min_value * 1.1
-    upper_bound = max_value * 1.1 if max_value >= 0 else max_value * 0.9
+    spread = max_value - min_value
+    dynamic_padding = spread * (0.12 if intraday else 0.10)
+    min_floor_padding = max(abs(max_value), abs(min_value)) * 0.002
+    padding = max(dynamic_padding, min_floor_padding)
+    lower_bound = min_value - padding
+    upper_bound = max_value + padding
     ax.set_ylim(lower_bound, upper_bound)
 
 
@@ -280,9 +391,17 @@ def _apply_gold_y_padding(ax, series):
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
     ax.plot(series.index, series.values, color=color, linewidth=2.0)
-    _apply_gold_y_padding(ax, series)
+    _apply_gold_y_padding(ax, series, intraday=intraday)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
-    _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
+    thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+    _style_gold_axis(
+        ax,
+        title,
+        "Date / Time",
+        "Price per gram, thousand",
+        formatter=formatter,
+        y_formatter=thousands_formatter,
+    )
     fig.tight_layout()
     return fig
 
@@ -295,8 +414,7 @@ def figure_to_png_bytes(fig):
 
 
 def get_gold_var_payload(K_values=None, t=0.95):
-    daily_gold_raw, _ = fetch_gold_chart_data()
-    gold_close_series = convert_ounce_price_to_gram(_normalize_close_series(daily_gold_raw))
+    gold_close_series, _ = get_gold_close_series()
     result_D = gold_close_series.pct_change().dropna().to_numpy()
     var_payload = calculate_var_results(result_D, K_values=K_values, t=t)
     var_payload["result_D"] = result_D.tolist()
@@ -304,9 +422,7 @@ def get_gold_var_payload(K_values=None, t=0.95):
 
 
 def render_gold_charts():
-    daily_raw, intraday_raw = fetch_gold_chart_data()
-    daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
-    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+    daily_close, intraday_close = get_gold_close_series()
 
     if daily_close.empty and intraday_close.empty:
         st.info("Не удалось загрузить данные по золоту из yfinance для построения графиков.")
@@ -317,7 +433,7 @@ def render_gold_charts():
     with chart_columns[0]:
         st.markdown("#### Gold Daily Close (6M) - per gram")
         if daily_close.empty:
-            st.info("Нет дневных данных по золоту за последние 6 месяцев.")
+            st.info("Дневные данные по золоту за последние 6 месяцев временно недоступны.")
         else:
             fig = build_gold_chart_figure(
                 daily_close,
@@ -345,8 +461,7 @@ def render_gold_charts():
 
 
 def get_intraday_chart_attachment():
-    _, intraday_raw = fetch_gold_chart_data()
-    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+    _, intraday_close = get_gold_close_series()
     if intraday_close.empty:
         return None
     fig = build_gold_chart_figure(
@@ -359,6 +474,162 @@ def get_intraday_chart_attachment():
     png_bytes = figure_to_png_bytes(fig)
     plt.close(fig)
     return ("gold_intraday_1m.png", png_bytes, "image", "png")
+
+
+def build_vm_pdf_report(vm_report):
+    daily_close, intraday_close = get_gold_close_series()
+    pdf_buffer = BytesIO()
+
+    with PdfPages(pdf_buffer) as pdf:
+        fig_cover = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
+        fig_cover.suptitle("VM Dashboard", fontsize=20, fontweight="bold", y=0.98, color="#1f3a5f")
+        fig_cover.text(
+            0.03,
+            0.92,
+            f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']}) | "
+            f"Дата клиринга: {vm_report['TRADEDATE']} | Кол-во: {vm_report['QUANTITY']}",
+            fontsize=10.5,
+            color="#262730",
+        )
+        news_items = vm_report.get("XAUUSD_NEWS", [])
+        if news_items:
+            preview_lines = []
+            for item in news_items[:2]:
+                title = item.get("title", "")[:85]
+                preview_lines.append(f"• {item.get('published_at', '')} | {title}")
+            fig_cover.text(
+                0.03,
+                0.875,
+                "XAUUSD новости (TradingView, со вчерашнего дня):\n" + "\n".join(preview_lines),
+                fontsize=8.6,
+                color="#3c4758",
+            )
+        vm_rows = [
+            ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
+            ("VM", f"{vm_report['VM']:.2f}"),
+            ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
+            ("Маржа позиции", f"{vm_report['POSITION_VM']:.2f}"),
+            ("Сумма ограничения", f"{vm_report['LIMIT_SUM']:.2f}"),
+            ("USD/RUB", f"{vm_report['USD_RUB']} ({vm_report['USD_RUB_DATE']})"),
+        ]
+        ax_table = fig_cover.add_axes([0.03, 0.53, 0.44, 0.33])
+        ax_table.axis("off")
+        table = ax_table.table(
+            cellText=[[key, value] for key, value in vm_rows],
+            colLabels=["Показатель", "Значение"],
+            cellLoc="left",
+            colLoc="left",
+            loc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.6)
+        for (row, col), cell in table.get_celld().items():
+            if row == 0:
+                cell.set_facecolor("#e8f0fb")
+                cell.set_text_props(weight="bold", color="#1f3a5f")
+            else:
+                cell.set_facecolor("#f8fbff" if row % 2 == 0 else "#ffffff")
+        var_results = vm_report.get("VAR_RESULTS", {})
+        ax_var_table = fig_cover.add_axes([0.53, 0.53, 0.44, 0.33])
+        ax_var_table.axis("off")
+        ax_var_table.text(
+            0.0,
+            1.05,
+            "Value at Risk (VaR)",
+            fontsize=13,
+            fontweight="bold",
+            color="#1f3a5f",
+            transform=ax_var_table.transAxes,
+        )
+        if var_results:
+            ax_var_table.text(
+                0.0,
+                0.92,
+                f"Доверительный уровень: {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.2f} | "
+                f"T={vm_report.get('VAR_T', 0):.4f} | Q={vm_report.get('VAR_Q', 0):.6f}",
+                fontsize=10,
+                color="#262730",
+                transform=ax_var_table.transAxes,
+            )
+            var_df = build_var_table({"VAR_results": var_results})
+            var_table = ax_var_table.table(
+                cellText=[[int(row["Дни"]), f"{float(row['VaR, %']):.4f}"] for _, row in var_df.iterrows()],
+                colLabels=["Горизонт, дни", "VaR, %"],
+                cellLoc="center",
+                colLoc="center",
+                loc="lower center",
+                bbox=[0, 0.15, 1.0, 0.65],
+            )
+            var_table.auto_set_font_size(False)
+            var_table.set_fontsize(10)
+            var_table.scale(1, 1.25)
+            for (row, col), cell in var_table.get_celld().items():
+                if row == 0:
+                    cell.set_facecolor("#e8f0fb")
+                    cell.set_text_props(weight="bold", color="#1f3a5f")
+                else:
+                    cell.set_facecolor("#f8fbff" if row % 2 == 0 else "#ffffff")
+        elif vm_report.get("VAR_ERROR"):
+            ax_var_table.text(
+                0.0,
+                0.72,
+                f"VaR недоступен: {vm_report['VAR_ERROR']}",
+                fontsize=10,
+                color="#9b2c2c",
+                transform=ax_var_table.transAxes,
+            )
+        else:
+            ax_var_table.text(
+                0.0,
+                0.72,
+                "Недостаточно дневной истории золота для расчёта VaR.",
+                fontsize=10,
+                color="#9b2c2c",
+                transform=ax_var_table.transAxes,
+            )
+
+        if not daily_close.empty:
+            ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
+            ax_daily.plot(daily_close.index, daily_close.values, color="#1f77b4", linewidth=1.8)
+            _apply_gold_y_padding(ax_daily, daily_close, intraday=False)
+            thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+            _style_gold_axis(
+                ax_daily,
+                "Gold Daily Close (6M) - per gram",
+                "Date / Time",
+                "Price per gram, thousand",
+                formatter=mdates.DateFormatter("%d.%m.%Y"),
+                y_formatter=thousands_formatter,
+            )
+        else:
+            ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
+            ax_daily.axis("off")
+            ax_daily.text(0.5, 0.5, "Дневные данные временно недоступны.", ha="center", va="center", color="#9b2c2c")
+
+        if not intraday_close.empty:
+            ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
+            ax_intraday.plot(intraday_close.index, intraday_close.values, color="#1f77b4", linewidth=1.8)
+            _apply_gold_y_padding(ax_intraday, intraday_close, intraday=True)
+            thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+            _style_gold_axis(
+                ax_intraday,
+                "Gold Intraday (1M) - per gram",
+                "Date / Time",
+                "Price per gram, thousand",
+                formatter=mdates.DateFormatter("%H:%M"),
+                y_formatter=thousands_formatter,
+            )
+        else:
+            ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
+            ax_intraday.axis("off")
+            ax_intraday.text(0.5, 0.5, "Внутридневные данные временно недоступны.", ha="center", va="center", color="#9b2c2c")
+
+        pdf.savefig(fig_cover, bbox_inches="tight")
+        plt.close(fig_cover)
+
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
 
 
 def build_http_session():
@@ -2021,6 +2292,11 @@ if st.session_state["active_view"] == "vm":
                     )
                 except Exception as exc:
                     vm_report["VAR_ERROR"] = str(exc)
+                try:
+                    vm_report["XAUUSD_NEWS"] = fetch_xauusd_tradingview_news()
+                except Exception as exc:
+                    vm_report["XAUUSD_NEWS"] = []
+                    vm_report["XAUUSD_NEWS_ERROR"] = str(exc)
                 st.session_state["vm_last_report"] = vm_report
             except Exception as exc:
                 st.error(str(exc))
@@ -2057,16 +2333,24 @@ if st.session_state["active_view"] == "vm":
         elif vm_report.get("VAR_ERROR"):
             st.info(f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}")
         else:
-            st.info("Недостаточно данных result_D для расчета VaR.")
+            st.info("Недостаточно дневной истории золота для расчёта VaR.")
 
         vm_df = pd.DataFrame([vm_report])
         vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
+        vm_pdf = build_vm_pdf_report(vm_report)
         st.download_button(
             label="💾 Скачать VM (Excel)",
             data=vm_xlsx,
             file_name="vm_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="vm_report_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать VM (PDF)",
+            data=vm_pdf,
+            file_name="vm_report.pdf",
+            mime="application/pdf",
+            key="vm_report_pdf_dl",
         )
         st.download_button(
             label="💾 Скачать VM (CSV)",
@@ -2076,13 +2360,31 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
+        st.markdown("#### XAUUSD новости (TradingView)")
+        news_items = vm_report.get("XAUUSD_NEWS", [])
+        if news_items:
+            st.caption("Период: со вчерашнего дня до последней доступной новости.")
+            for item in news_items:
+                st.markdown(
+                    f"- **{item.get('published_at', '')}** — [{item.get('title', 'Без заголовка')}]({item.get('url', '')})"
+                )
+        elif vm_report.get("XAUUSD_NEWS_ERROR"):
+            st.info(f"Новости XAUUSD временно недоступны: {vm_report['XAUUSD_NEWS_ERROR']}")
+        else:
+            st.info("За период со вчерашнего дня новости XAUUSD не найдены.")
+
         var_table_for_mail = build_var_table({"VAR_results": vm_report.get("VAR_RESULTS", {})})
         if not var_table_for_mail.empty:
             var_table_text = var_table_for_mail.to_string(index=False)
         elif vm_report.get("VAR_ERROR"):
             var_table_text = f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}"
         else:
-            var_table_text = "Недостаточно данных result_D для расчета VaR."
+            var_table_text = "Недостаточно дневной истории золота для расчёта VaR."
+        mail_news_lines = [
+            f"- {n.get('published_at', '')}: {n.get('title', '')}"
+            for n in vm_report.get("XAUUSD_NEWS", [])[:10]
+        ]
+        mail_news_text = "\n".join(mail_news_lines) if mail_news_lines else "Нет доступных новостей за период."
 
         vm_mail_body = (
             "Коллеги, добрый день!\n\n"
@@ -2097,12 +2399,15 @@ if st.session_state["active_view"] == "vm":
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
             "Value at Risk (VaR):\n"
             f"{var_table_text}\n\n"
-            "Во вложении: Excel-отчёт и график Gold Intraday (1M) - per gram.\n"
+            "XAUUSD новости (TradingView, со вчерашнего дня):\n"
+            f"{mail_news_text}\n\n"
+            "Во вложении: Excel- и PDF-отчёты, а также график Gold Intraday (1M) - per gram.\n"
         )
 
         st.session_state["vm_report_default_body"] = vm_mail_body
 
         intraday_chart_attachment = None
+        vm_pdf_attachment = ("vm_report.pdf", vm_pdf, "application", "pdf")
         try:
             render_gold_charts()
             intraday_chart_attachment = get_intraday_chart_attachment()
@@ -2114,7 +2419,7 @@ if st.session_state["active_view"] == "vm":
             "vm_report",
             "vm_report.xlsx",
             vm_xlsx,
-            extra_attachments=[intraday_chart_attachment] if intraday_chart_attachment else None,
+            extra_attachments=[att for att in [vm_pdf_attachment, intraday_chart_attachment] if att],
         )
 
     st.stop()
