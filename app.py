@@ -11,6 +11,7 @@ from io import BytesIO, StringIO
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
@@ -352,7 +353,7 @@ def build_var_table(var_payload):
     )
 
 
-def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
+def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None, y_formatter=None):
     ax.set_title(title, fontsize=12, fontweight="normal", color="#262730", pad=10)
     ax.set_xlabel(xlabel, color="#262730")
     ax.set_ylabel(ylabel, color="#262730")
@@ -364,6 +365,8 @@ def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None):
     ax.spines["bottom"].set_color("#d9d9d9")
     if formatter is not None:
         ax.xaxis.set_major_formatter(formatter)
+    if y_formatter is not None:
+        ax.yaxis.set_major_formatter(y_formatter)
     ax.tick_params(axis="x", labelrotation=25, colors="#262730")
     ax.tick_params(axis="y", colors="#262730")
 
@@ -375,12 +378,12 @@ def _apply_gold_y_padding(ax, series, intraday=False):
         padding = abs(max_value) * 0.1 if max_value else 1.0
         ax.set_ylim(min_value - padding, max_value + padding)
         return
-    if intraday:
-        lower_bound = min_value * 0.9
-        upper_bound = max_value * 1.1
-    else:
-        lower_bound = min_value * 0.9 if min_value >= 0 else min_value * 1.1
-        upper_bound = max_value * 1.1 if max_value >= 0 else max_value * 0.9
+    spread = max_value - min_value
+    dynamic_padding = spread * (0.12 if intraday else 0.10)
+    min_floor_padding = max(abs(max_value), abs(min_value)) * 0.002
+    padding = max(dynamic_padding, min_floor_padding)
+    lower_bound = min_value - padding
+    upper_bound = max_value + padding
     ax.set_ylim(lower_bound, upper_bound)
 
 
@@ -390,7 +393,15 @@ def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     ax.plot(series.index, series.values, color=color, linewidth=2.0)
     _apply_gold_y_padding(ax, series, intraday=intraday)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
-    _style_gold_axis(ax, title, "Date / Time", "Price per gram", formatter=formatter)
+    thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+    _style_gold_axis(
+        ax,
+        title,
+        "Date / Time",
+        "Price per gram, thousand",
+        formatter=formatter,
+        y_formatter=thousands_formatter,
+    )
     fig.tight_layout()
     return fig
 
@@ -582,12 +593,14 @@ def build_vm_pdf_report(vm_report):
             ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
             ax_daily.plot(daily_close.index, daily_close.values, color="#1f77b4", linewidth=1.8)
             _apply_gold_y_padding(ax_daily, daily_close, intraday=False)
+            thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
             _style_gold_axis(
                 ax_daily,
                 "Gold Daily Close (6M) - per gram",
                 "Date / Time",
-                "Price per gram",
+                "Price per gram, thousand",
                 formatter=mdates.DateFormatter("%d.%m.%Y"),
+                y_formatter=thousands_formatter,
             )
         else:
             ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
@@ -598,12 +611,14 @@ def build_vm_pdf_report(vm_report):
             ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
             ax_intraday.plot(intraday_close.index, intraday_close.values, color="#1f77b4", linewidth=1.8)
             _apply_gold_y_padding(ax_intraday, intraday_close, intraday=True)
+            thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
             _style_gold_axis(
                 ax_intraday,
                 "Gold Intraday (1M) - per gram",
                 "Date / Time",
-                "Price per gram",
+                "Price per gram, thousand",
                 formatter=mdates.DateFormatter("%H:%M"),
+                y_formatter=thousands_formatter,
             )
         else:
             ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
