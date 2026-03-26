@@ -1,6 +1,7 @@
 import csv
 import os
 import math
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -212,6 +213,101 @@ def get_gold_close_series():
     return daily_close, intraday_close
 
 
+def _extract_news_entries(payload, bucket):
+    if isinstance(payload, dict):
+        has_title = isinstance(payload.get("title"), str)
+        has_url = isinstance(payload.get("url"), str)
+        published = payload.get("publishedAt") or payload.get("datePublished") or payload.get("published")
+        if has_title and has_url and isinstance(published, str):
+            bucket.append(
+                {
+                    "title": payload.get("title", "").strip(),
+                    "url": payload.get("url", "").strip(),
+                    "published_at": str(published).strip(),
+                    "source": str(payload.get("publisher", "")) or "TradingView",
+                }
+            )
+        for value in payload.values():
+            _extract_news_entries(value, bucket)
+    elif isinstance(payload, list):
+        for item in payload:
+            _extract_news_entries(item, bucket)
+
+
+def _parse_news_datetime(value: str):
+    if not value:
+        return None
+    value = value.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is not None:
+            return dt.astimezone(tz=None).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_xauusd_tradingview_news():
+    url = "https://www.tradingview.com/symbols/XAUUSD/news/?exchange=OANDA"
+    response = HTTP_SESSION.get(
+        url,
+        timeout=20,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    response.raise_for_status()
+    html = response.text
+    scripts = re.findall(
+        r'<script[^>]*type="application/ld\\+json"[^>]*>(.*?)</script>',
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not scripts:
+        scripts = re.findall(
+            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+    if not scripts:
+        raise RuntimeError("Не удалось найти блоки новостей TradingView в HTML-ответе.")
+
+    parsed_entries = []
+    for block in scripts:
+        try:
+            payload = json.loads(block.strip())
+        except Exception:
+            continue
+        _extract_news_entries(payload, parsed_entries)
+
+    unique_news = {}
+    for item in parsed_entries:
+        news_url = item.get("url")
+        if news_url and news_url not in unique_news:
+            unique_news[news_url] = item
+
+    yesterday_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    filtered = []
+    for item in unique_news.values():
+        parsed_dt = _parse_news_datetime(item.get("published_at", ""))
+        if parsed_dt and parsed_dt >= yesterday_start:
+            filtered.append(
+                {
+                    "title": item["title"],
+                    "url": item["url"],
+                    "published_at": parsed_dt.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+
+    filtered.sort(key=lambda x: x["published_at"], reverse=True)
+    return filtered
+
+
 def calculate_var_results(result_D, K_values=None, t=0.95):
     result_D = np.asarray(result_D, dtype=float)
     result_D = result_D[np.isfinite(result_D)]
@@ -384,6 +480,19 @@ def build_vm_pdf_report(vm_report):
             fontsize=10.5,
             color="#262730",
         )
+        news_items = vm_report.get("XAUUSD_NEWS", [])
+        if news_items:
+            preview_lines = []
+            for item in news_items[:2]:
+                title = item.get("title", "")[:85]
+                preview_lines.append(f"• {item.get('published_at', '')} | {title}")
+            fig_cover.text(
+                0.03,
+                0.875,
+                "XAUUSD новости (TradingView, со вчерашнего дня):\n" + "\n".join(preview_lines),
+                fontsize=8.6,
+                color="#3c4758",
+            )
         vm_rows = [
             ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
             ("VM", f"{vm_report['VM']:.2f}"),
@@ -2168,6 +2277,11 @@ if st.session_state["active_view"] == "vm":
                     )
                 except Exception as exc:
                     vm_report["VAR_ERROR"] = str(exc)
+                try:
+                    vm_report["XAUUSD_NEWS"] = fetch_xauusd_tradingview_news()
+                except Exception as exc:
+                    vm_report["XAUUSD_NEWS"] = []
+                    vm_report["XAUUSD_NEWS_ERROR"] = str(exc)
                 st.session_state["vm_last_report"] = vm_report
             except Exception as exc:
                 st.error(str(exc))
@@ -2231,6 +2345,19 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
+        st.markdown("#### XAUUSD новости (TradingView)")
+        news_items = vm_report.get("XAUUSD_NEWS", [])
+        if news_items:
+            st.caption("Период: со вчерашнего дня до последней доступной новости.")
+            for item in news_items:
+                st.markdown(
+                    f"- **{item.get('published_at', '')}** — [{item.get('title', 'Без заголовка')}]({item.get('url', '')})"
+                )
+        elif vm_report.get("XAUUSD_NEWS_ERROR"):
+            st.info(f"Новости XAUUSD временно недоступны: {vm_report['XAUUSD_NEWS_ERROR']}")
+        else:
+            st.info("За период со вчерашнего дня новости XAUUSD не найдены.")
+
         var_table_for_mail = build_var_table({"VAR_results": vm_report.get("VAR_RESULTS", {})})
         if not var_table_for_mail.empty:
             var_table_text = var_table_for_mail.to_string(index=False)
@@ -2238,6 +2365,11 @@ if st.session_state["active_view"] == "vm":
             var_table_text = f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}"
         else:
             var_table_text = "Недостаточно дневной истории золота для расчёта VaR."
+        mail_news_lines = [
+            f"- {n.get('published_at', '')}: {n.get('title', '')}"
+            for n in vm_report.get("XAUUSD_NEWS", [])[:10]
+        ]
+        mail_news_text = "\n".join(mail_news_lines) if mail_news_lines else "Нет доступных новостей за период."
 
         vm_mail_body = (
             "Коллеги, добрый день!\n\n"
@@ -2252,6 +2384,8 @@ if st.session_state["active_view"] == "vm":
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
             "Value at Risk (VaR):\n"
             f"{var_table_text}\n\n"
+            "XAUUSD новости (TradingView, со вчерашнего дня):\n"
+            f"{mail_news_text}\n\n"
             "Во вложении: Excel- и PDF-отчёты, а также график Gold Intraday (1M) - per gram.\n"
         )
 
