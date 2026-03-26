@@ -551,7 +551,7 @@ def build_vm_pdf_report(vm_report):
             )
         vm_rows = [
             ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
-            ("Дата цены", vm_report.get("TRADEDATE", "н/д")),
+            ("Дата цены", vm_report.get("PRICE_DATE", "н/д")),
             ("Время цены", vm_report.get("QUOTE_TIME") or "н/д"),
             ("VM", f"{vm_report['VM']:.2f}"),
             ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
@@ -2298,6 +2298,7 @@ if st.session_state["active_view"] == "vm":
                 position_vm = vm_data["VM"] * quantity
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
+                price_date = datetime.utcnow().strftime("%Y-%m-%d")
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
                 limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
                 vm_report = {
@@ -2308,6 +2309,7 @@ if st.session_state["active_view"] == "vm":
                     "TODAY_PRICE": vm_data["TODAY_PRICE"],
                     "LAST_PRICE": vm_data.get("LAST_PRICE"),
                     "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
+                    "PRICE_DATE": price_date,
                     "MULTIPLIER": vm_data["MULTIPLIER"],
                     "VM": vm_data["VM"],
                     "VM_CLEARING": vm_data["VM_CLEARING"],
@@ -2355,6 +2357,7 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Дата клиринга:** {vm_report['TRADEDATE']}")
         st.markdown(f"**Расчетная цена последнего клиринга:** {vm_report['LAST_SETTLE_PRICE']}")
         st.markdown(f"**Последняя цена:** {vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Дата последней цены:** {vm_report.get('PRICE_DATE', 'н/д')}")
         st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
         st.markdown(f"**Вариационная маржа (по последней цене):** {vm_report['VM']:.2f}")
