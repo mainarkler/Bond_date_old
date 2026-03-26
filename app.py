@@ -250,7 +250,46 @@ def _parse_news_datetime(value: str):
             return dt.astimezone(tz=None).replace(tzinfo=None)
         return dt
     except ValueError:
-        return None
+        pass
+    for fmt in ("%a, %d %b %Y %H:%M:%S GMT", "%b %d, %Y, %H:%M %Z"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _strip_html_tags(value: str) -> str:
+    return re.sub(r"<[^>]+>", "", value or "").strip()
+
+
+def _extract_news_from_cards(html: str):
+    items = []
+    card_pattern = re.compile(
+        r'<a[^>]+href="(?P<href>/news/[^"]+)"[^>]*>.*?'
+        r'<relative-time[^>]+event-time="(?P<event_time>[^"]+)"[^>]*>.*?</relative-time>.*?'
+        r'<span class="provider-[^"]*"><span[^>]*>(?P<provider>.*?)</span>.*?</span>.*?'
+        r'<div[^>]+data-qa-id="news-headline-title"[^>]*>(?P<title>.*?)</div>.*?'
+        r"</a>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for match in card_pattern.finditer(html):
+        href = match.group("href") or ""
+        title = _strip_html_tags(match.group("title"))
+        provider = _strip_html_tags(match.group("provider"))
+        event_time = (match.group("event_time") or "").strip()
+        if not title or not event_time:
+            continue
+        items.append(
+            {
+                "title": title,
+                "url": f"https://www.tradingview.com{href}" if href.startswith("/") else href,
+                "published_at": event_time,
+                "source": provider or "TradingView",
+            }
+        )
+    return items
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -290,6 +329,7 @@ def fetch_xauusd_tradingview_news():
         except Exception:
             continue
         _extract_news_entries(payload, parsed_entries)
+    parsed_entries.extend(_extract_news_from_cards(html))
 
     unique_news = {}
     for item in parsed_entries:
