@@ -24,6 +24,7 @@ from urllib3.util.retry import Retry
 
 from services.moex_turnover import MoexTurnoverClient
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
+from services.keyword_news_block import build_keyword_news_block_sync
 
 # ---------------------------
 # Streamlit page setup
@@ -58,6 +59,7 @@ if FORCED_ACTIVE_VIEW in {
     "market_statistics",
     "turnover_export",
     "moex_news",
+    "company_analysis",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -107,6 +109,11 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
+    st.markdown("### AI Анализ компании")
+    st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
+    if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
+        st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
         st.markdown("### Расчет VM")
@@ -1773,6 +1780,32 @@ def fetch_isins(isins, show_progress=True):
 # ---------------------------
 # Calendar view
 # ---------------------------
+if st.session_state["active_view"] == "company_analysis":
+    st.header("Новости по keyword (Google) + LLM summary")
+    st.caption("Только свежие новости за 30 дней: поиск в интернете и короткая агрегация через LLM.")
+
+    keyword = st.text_input("Keyword для поиска", value=st.session_state.get("company_analysis_query", "AAPL"), key="keyword_news_input_v2")
+    st.session_state["company_analysis_query"] = keyword
+
+    if st.button("Найти новости", key="keyword_news_run_v2", use_container_width=True):
+        search_keyword = keyword.strip()
+        if not search_keyword:
+            st.warning("Введите keyword для поиска.")
+        else:
+            with st.spinner("Ищем новости в Google и собираем summary..."):
+                try:
+                    payload = build_keyword_news_block_sync(search_keyword, limit=30)
+                except Exception as exc:
+                    st.error(f"Ошибка выполнения блока новостей: {exc}")
+                else:
+                    pool = payload.get("news_pool", [])
+                    st.subheader("News pool")
+                    st.caption(f"keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(pool))}")
+                    st.json(pool)
+                    st.subheader("LLM summary")
+                    st.write(payload.get("summary", ""))
+    st.stop()
+
 if st.session_state["active_view"] == "calendar":
     st.subheader("📅 Календарь выплат")
     st.markdown(
