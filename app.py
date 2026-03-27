@@ -425,19 +425,23 @@ def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None, y_formatter=None
     ax.tick_params(axis="y", colors="#262730")
 
 
-def _apply_gold_y_padding(ax, series, intraday=False):
+def get_gold_y_bounds(series, intraday=False):
     min_value = float(series.min())
     max_value = float(series.max())
     if min_value == max_value:
         padding = abs(max_value) * 0.1 if max_value else 1.0
-        ax.set_ylim(min_value - padding, max_value + padding)
-        return
+        return min_value - padding, max_value + padding
     spread = max_value - min_value
     dynamic_padding = spread * (0.12 if intraday else 0.10)
     min_floor_padding = max(abs(max_value), abs(min_value)) * 0.002
     padding = max(dynamic_padding, min_floor_padding)
     lower_bound = min_value - padding
     upper_bound = max_value + padding
+    return lower_bound, upper_bound
+
+
+def _apply_gold_y_padding(ax, series, intraday=False):
+    lower_bound, upper_bound = get_gold_y_bounds(series, intraday=intraday)
     ax.set_ylim(lower_bound, upper_bound)
 
 
