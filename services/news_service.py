@@ -8,6 +8,7 @@ from html import unescape
 import json
 import re
 from typing import Any, Protocol, Sequence
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -439,6 +440,7 @@ def build_event(
     source: str,
     event_id: int | str | None = None,
     body: str | None = None,
+    link: str | None = None,
 ) -> Event:
     """Build a normalized event from provider payload, including optional news body."""
     normalized_title = unescape(title.strip())
@@ -472,8 +474,36 @@ def build_event(
         "emitter_id": related_emitter_ids[0] if related_emitter_ids else None,
         "related_emitter_ids": sorted(set(related_emitter_ids)),
         "published_at": str(published_at or "").strip(),
+        "link": _normalize_event_link(link),
     }
 
+
+
+
+
+@lru_cache(maxsize=4096)
+def _resolve_google_news_link(url: str) -> str:
+    candidate = (url or "").strip()
+    if not candidate:
+        return ""
+    session = _build_session()
+    try:
+        response = session.get(candidate, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+        response.raise_for_status()
+        return str(response.url or candidate).strip()
+    except Exception:
+        return candidate
+
+
+def _normalize_event_link(link: str | None) -> str | None:
+    candidate = str(link or "").strip()
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    if parsed.netloc.endswith("news.google.com") and "/rss/articles/" in parsed.path:
+        resolved = _resolve_google_news_link(candidate)
+        return resolved or candidate
+    return candidate
 
 
 def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
@@ -562,12 +592,14 @@ class RSSNewsProvider:
             guid = (item.findtext("guid") or "").strip()
             if not title:
                 continue
+            link = (item.findtext("link") or "").strip()
             events.append(
                 build_event(
                     title=title,
                     published_at=published_at,
                     source=self.source_name,
                     event_id=guid if guid.isdigit() else None,
+                    link=link,
                 )
             )
         return sorted(events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
