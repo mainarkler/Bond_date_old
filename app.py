@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
 
+import altair as alt
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
@@ -31,7 +32,7 @@ from urllib3.util.retry import Retry
 from services.moex_turnover import MoexTurnoverClient
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
-from services.signal_service import get_investment_signal_sync
+from services.keyword_news_block import build_keyword_news_block_sync
 
 # ---------------------------
 # Streamlit page setup
@@ -485,6 +486,27 @@ def _apply_gold_y_padding(ax, series, intraday=False):
 
 
 
+def build_gold_chart_display(series, title, intraday=False):
+    df = series.reset_index()
+    x_col = df.columns[0]
+    y_col = df.columns[1]
+    lower_bound, upper_bound = get_gold_y_bounds(series)
+    axis_format = "%H:%M" if intraday else "%d.%m.%Y"
+    chart = (
+        alt.Chart(df)
+        .mark_line(color="#1f77b4")
+        .encode(
+            x=alt.X(x_col, title="Date / Time", axis=alt.Axis(format=axis_format, labelAngle=-25)),
+            y=alt.Y(y_col, title="Price per gram", scale=alt.Scale(domain=[lower_bound, upper_bound])),
+            tooltip=[alt.Tooltip(x_col, title="Date / Time"), alt.Tooltip(y_col, title="Price per gram", format=",.4f")],
+        )
+        .properties(title=title, height=320)
+        .interactive()
+    )
+    return chart
+
+
+
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
     fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
     ax.plot(series.index, series.values, color=color, linewidth=2.0)
@@ -532,29 +554,23 @@ def render_gold_charts():
         if daily_close.empty:
             st.info("Дневные данные по золоту за последние 6 месяцев временно недоступны.")
         else:
-            fig = build_gold_chart_figure(
+            chart = build_gold_chart_display(
                 daily_close,
                 "Gold Daily Close (6M) - per gram",
-                color="#1f77b4",
-                fill_color="#1f77b4",
             )
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+            st.altair_chart(chart, use_container_width=True)
 
     with chart_columns[1]:
         st.markdown("#### Gold Intraday (1M) - per gram")
         if intraday_close.empty:
             st.info("Нет внутридневных данных по золоту за текущий день.")
         else:
-            fig = build_gold_chart_figure(
+            chart = build_gold_chart_display(
                 intraday_close,
                 "Gold Intraday (1M) - per gram",
-                color="#1f77b4",
-                fill_color="#1f77b4",
                 intraday=True,
             )
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+            st.altair_chart(chart, use_container_width=True)
 
 
 def get_intraday_chart_attachment():
@@ -2152,42 +2168,29 @@ def fetch_isins(isins, show_progress=True):
 # Calendar view
 # ---------------------------
 if st.session_state["active_view"] == "company_analysis":
-    st.header("AI Анализ компании")
-    st.caption("Введите тикер или название компании, чтобы получить блок анализа и отдельный сигнал.")
+    st.header("Новости по keyword (Google) + LLM summary")
+    st.caption("Только свежие новости за 30 дней: поиск в интернете и короткая агрегация через LLM.")
 
-    query_value = st.text_input("Тикер/компания", value=st.session_state.get("company_analysis_query", "AAPL"))
-    st.session_state["company_analysis_query"] = query_value
+    keyword = st.text_input("Keyword для поиска", value=st.session_state.get("company_analysis_query", "AAPL"), key="keyword_news_input_v2")
+    st.session_state["company_analysis_query"] = keyword
 
-    if st.button("Запустить анализ", key="company_analysis_run", use_container_width=True):
-        user_query = query_value.strip()
-        if not user_query:
-            st.warning("Введите тикер или название компании.")
+    if st.button("Найти новости", key="keyword_news_run_v2", use_container_width=True):
+        search_keyword = keyword.strip()
+        if not search_keyword:
+            st.warning("Введите keyword для поиска.")
         else:
-            with st.spinner("Собираем новости и считаем сигнал..."):
+            with st.spinner("Ищем новости в Google и собираем summary..."):
                 try:
-                    analysis_payload = get_company_news_analysis_sync(user_query)
-                    signal_payload = get_investment_signal_sync(user_query)
+                    payload = build_keyword_news_block_sync(search_keyword, limit=30)
                 except Exception as exc:
-                    st.error(f"Ошибка анализа компании: {exc}")
+                    st.error(f"Ошибка выполнения блока новостей: {exc}")
                 else:
-                    st.subheader("Плитка: Анализ компании")
-                    tile_col1, tile_col2, tile_col3 = st.columns(3)
-                    tile_col1.metric("Сигнал", signal_payload.get("signal", "HOLD"))
-                    tile_col2.metric("Score", f"{float(signal_payload.get('score', 0.0)):.4f}")
-                    tile_col3.metric("Confidence", f"{float(signal_payload.get('confidence', 0.0)):.2f}")
-
-                    st.markdown("#### Инвест-анализ")
-                    st.json(analysis_payload.get("analysis", {}))
-
-                    st.markdown("#### Факторная модель")
-                    st.json(
-                        {
-                            "factors": signal_payload.get("factors", {}),
-                            "market_context": signal_payload.get("market_context", {}),
-                            "top_events": signal_payload.get("top_events", [])[:5],
-                            "explanation": signal_payload.get("explanation", ""),
-                        }
-                    )
+                    pool = payload.get("news_pool", [])
+                    st.subheader("News pool")
+                    st.caption(f"keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(pool))}")
+                    st.json(pool)
+                    st.subheader("LLM summary")
+                    st.write(payload.get("summary", ""))
     st.stop()
 
 if st.session_state["active_view"] == "calendar":
@@ -2968,6 +2971,9 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
             detail_left, detail_right = st.columns(2)
             detail_left.caption(f"Эмитент: {emitter}")
             detail_right.caption(f"ISIN: {isin}")
+            source_link = str(item.get("link") or "").strip()
+            if source_link:
+                st.link_button("Открыть источник", source_link)
 
 
 # ---------------------------
