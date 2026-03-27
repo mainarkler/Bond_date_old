@@ -1,11 +1,12 @@
 import csv
+import asyncio
 import os
 import math
 import json
 import re
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
 
@@ -23,6 +24,8 @@ import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
 from email_compose import render_email_compose_section
+from news.fetcher import NewsFetcher
+from news.models import NewsQuery
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -301,6 +304,41 @@ def _extract_news_from_cards(html: str):
     return items
 
 
+def _fetch_xauusd_news_like_ai_analysis():
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(days=1)
+    query = NewsQuery(
+        query="XAUUSD OR Gold spot OR Gold price",
+        start_date=start_utc,
+        end_date=now_utc,
+        language="en",
+        limit=40,
+    )
+    try:
+        fetched_news = asyncio.run(NewsFetcher().fetch_news(query))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            fetched_news = loop.run_until_complete(NewsFetcher().fetch_news(query))
+        finally:
+            loop.close()
+    prepared = []
+    for item in fetched_news:
+        published = item.published_at
+        if published.tzinfo is not None:
+            published = published.astimezone(timezone.utc).replace(tzinfo=None)
+        if published >= datetime.utcnow() - timedelta(days=1):
+            prepared.append(
+                {
+                    "title": item.title.strip(),
+                    "url": item.url.strip(),
+                    "published_at": published.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+    prepared.sort(key=lambda x: x["published_at"], reverse=True)
+    return prepared
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_xauusd_tradingview_news():
     url = "https://www.tradingview.com/symbols/XAUUSD/news/?exchange=OANDA"
@@ -328,9 +366,6 @@ def fetch_xauusd_tradingview_news():
             flags=re.DOTALL | re.IGNORECASE,
         )
 
-    if not scripts:
-        raise RuntimeError("Не удалось найти блоки новостей TradingView в HTML-ответе.")
-
     parsed_entries = []
     for block in scripts:
         try:
@@ -339,6 +374,9 @@ def fetch_xauusd_tradingview_news():
             continue
         _extract_news_entries(payload, parsed_entries)
     parsed_entries.extend(_extract_news_from_cards(html))
+
+    if not parsed_entries:
+        return _fetch_xauusd_news_like_ai_analysis()
 
     unique_news = {}
     for item in parsed_entries:
@@ -360,6 +398,8 @@ def fetch_xauusd_tradingview_news():
             )
 
     filtered.sort(key=lambda x: x["published_at"], reverse=True)
+    if not filtered:
+        return _fetch_xauusd_news_like_ai_analysis()
     return filtered
 
 
