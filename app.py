@@ -2100,31 +2100,28 @@ def fetch_isins(isins, show_progress=True):
 # Calendar view
 # ---------------------------
 if st.session_state["active_view"] == "company_analysis":
-    st.header("Новости по keyword + LLM summary")
-    st.caption("Блок содержит только свежие новости (до 30 дней) и короткое агрегированное summary.")
+    st.header("Новости по keyword (Google) + LLM summary")
+    st.caption("Только свежие новости за 30 дней: поиск в интернете и короткая агрегация через LLM.")
 
-    query_value = st.text_input("Keyword", value=st.session_state.get("company_analysis_query", "AAPL"))
-    st.session_state["company_analysis_query"] = query_value
+    keyword = st.text_input("Keyword для поиска", value=st.session_state.get("company_analysis_query", "AAPL"), key="keyword_news_input_v2")
+    st.session_state["company_analysis_query"] = keyword
 
-    if st.button("Собрать новости", key="company_analysis_run", use_container_width=True):
-        user_query = query_value.strip()
-        if not user_query:
-            st.warning("Введите keyword.")
+    if st.button("Найти новости", key="keyword_news_run_v2", use_container_width=True):
+        search_keyword = keyword.strip()
+        if not search_keyword:
+            st.warning("Введите keyword для поиска.")
         else:
-            with st.spinner("Собираем пул свежих новостей и строим summary..."):
+            with st.spinner("Ищем новости в Google и собираем summary..."):
                 try:
-                    payload = build_keyword_news_block_sync(user_query, limit=30)
+                    payload = build_keyword_news_block_sync(search_keyword, limit=30)
                 except Exception as exc:
-                    st.error(f"Ошибка блока новостей: {exc}")
+                    st.error(f"Ошибка выполнения блока новостей: {exc}")
                 else:
-                    news_pool = payload.get("news_pool", [])
-                    st.subheader("Пул новостей")
-                    st.caption(
-                        f"Keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {len(news_pool)}"
-                    )
-                    st.json(news_pool)
-
-                    st.subheader("Короткое summary (LLM)")
+                    pool = payload.get("news_pool", [])
+                    st.subheader("News pool")
+                    st.caption(f"keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(pool))}")
+                    st.json(pool)
+                    st.subheader("LLM summary")
                     st.write(payload.get("summary", ""))
     st.stop()
 
