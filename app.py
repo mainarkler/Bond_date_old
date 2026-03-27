@@ -1781,8 +1781,8 @@ def fetch_isins(isins, show_progress=True):
 # Calendar view
 # ---------------------------
 if st.session_state["active_view"] == "company_analysis":
-    st.header("Новости по keyword (Google) + LLM summary")
-    st.caption("Плитка выполняет только поиск свежих интернет-новостей (30 дней) и их краткую агрегацию.")
+    st.header("Новости по keyword + финансовое LLM summary")
+    st.caption("Приоритет: русскоязычные источники (РБК, Интерфакс, Ведомости, Коммерсант, ТАСС) за последние 30 дней.")
 
     with st.form("company_analysis_news_form"):
         keyword_value = st.text_input(
@@ -1813,6 +1813,7 @@ if st.session_state["active_view"] == "company_analysis":
                     st.caption(
                         f"Keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(news_pool))}"
                     )
+                    st.caption("Приоритетные источники: " + ", ".join(payload.get("priority_sources", [])))
                     st.json(news_pool)
 
                     if errors:
