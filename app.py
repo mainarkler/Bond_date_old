@@ -2168,28 +2168,45 @@ def fetch_isins(isins, show_progress=True):
 # Calendar view
 # ---------------------------
 if st.session_state["active_view"] == "company_analysis":
-    st.header("Новости по keyword (Google) + LLM summary")
-    st.caption("Только свежие новости за 30 дней: поиск в интернете и короткая агрегация через LLM.")
+    st.header("Новости по keyword + финансовое LLM summary")
+    st.caption("Приоритет: русскоязычные источники (РБК, Интерфакс, Ведомости, Коммерсант, ТАСС) за последние 30 дней.")
 
-    keyword = st.text_input("Keyword для поиска", value=st.session_state.get("company_analysis_query", "AAPL"), key="keyword_news_input_v2")
-    st.session_state["company_analysis_query"] = keyword
+    with st.form("company_analysis_news_form"):
+        keyword_value = st.text_input(
+            "Keyword для поиска новостей",
+            value=st.session_state.get("company_analysis_query", "AAPL"),
+            key="company_analysis_keyword_input",
+        )
+        limit_value = st.slider("Размер пула новостей", min_value=5, max_value=100, value=30, step=5)
+        run_clicked = st.form_submit_button("Найти новости и собрать summary", use_container_width=True)
 
-    if st.button("Найти новости", key="keyword_news_run_v2", use_container_width=True):
-        search_keyword = keyword.strip()
-        if not search_keyword:
-            st.warning("Введите keyword для поиска.")
+    st.session_state["company_analysis_query"] = keyword_value
+
+    if run_clicked:
+        user_query = keyword_value.strip()
+        if not user_query:
+            st.warning("Введите keyword.")
         else:
-            with st.spinner("Ищем новости в Google и собираем summary..."):
+            with st.spinner("Поиск новостей в интернете и LLM-агрегация..."):
                 try:
-                    payload = build_keyword_news_block_sync(search_keyword, limit=30)
+                    payload = build_keyword_news_block_sync(user_query, limit=int(limit_value))
                 except Exception as exc:
-                    st.error(f"Ошибка выполнения блока новостей: {exc}")
+                    st.error(f"Ошибка выполнения блока: {exc}")
                 else:
-                    pool = payload.get("news_pool", [])
-                    st.subheader("News pool")
-                    st.caption(f"keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(pool))}")
-                    st.json(pool)
-                    st.subheader("LLM summary")
+                    news_pool = payload.get("news_pool", [])
+                    errors = payload.get("errors", [])
+
+                    st.subheader("Пул новостей")
+                    st.caption(
+                        f"Keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(news_pool))}"
+                    )
+                    st.caption("Приоритетные источники: " + ", ".join(payload.get("priority_sources", [])))
+                    st.json(news_pool)
+
+                    if errors:
+                        st.warning("Ошибки источников: " + " | ".join(str(e) for e in errors))
+
+                    st.subheader("Короткое summary (LLM)")
                     st.write(payload.get("summary", ""))
     st.stop()
 
