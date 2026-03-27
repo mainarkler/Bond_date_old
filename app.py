@@ -1,6 +1,7 @@
 import csv
 import os
 import math
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -24,7 +25,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.moex_turnover import MoexTurnoverClient
+from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
+from services.keyword_news_block import build_keyword_news_block_sync
 
 # ---------------------------
 # Streamlit page setup
@@ -59,6 +62,7 @@ if FORCED_ACTIVE_VIEW in {
     "market_statistics",
     "turnover_export",
     "moex_news",
+    "company_analysis",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -108,6 +112,11 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
+    st.markdown("### AI Анализ компании")
+    st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
+    if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
+        st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
         st.markdown("### Расчет VM")
@@ -1170,7 +1179,7 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     hist_params = {
         "iss.meta": "off",
         "iss.only": "history",
-        "history.columns": "TRADEDATE,SETTLEPRICEDAY",
+        "history.columns": "TRADEDATE,SETTLEPRICE",
         "sort_order": "desc",
         "limit": 1,
     }
@@ -1794,6 +1803,32 @@ def fetch_isins(isins, show_progress=True):
 # ---------------------------
 # Calendar view
 # ---------------------------
+if st.session_state["active_view"] == "company_analysis":
+    st.header("Новости по keyword (Google) + LLM summary")
+    st.caption("Только свежие новости за 30 дней: поиск в интернете и короткая агрегация через LLM.")
+
+    keyword = st.text_input("Keyword для поиска", value=st.session_state.get("company_analysis_query", "AAPL"), key="keyword_news_input_v2")
+    st.session_state["company_analysis_query"] = keyword
+
+    if st.button("Найти новости", key="keyword_news_run_v2", use_container_width=True):
+        search_keyword = keyword.strip()
+        if not search_keyword:
+            st.warning("Введите keyword для поиска.")
+        else:
+            with st.spinner("Ищем новости в Google и собираем summary..."):
+                try:
+                    payload = build_keyword_news_block_sync(search_keyword, limit=30)
+                except Exception as exc:
+                    st.error(f"Ошибка выполнения блока новостей: {exc}")
+                else:
+                    pool = payload.get("news_pool", [])
+                    st.subheader("News pool")
+                    st.caption(f"keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(pool))}")
+                    st.json(pool)
+                    st.subheader("LLM summary")
+                    st.write(payload.get("summary", ""))
+    st.stop()
+
 if st.session_state["active_view"] == "calendar":
     st.subheader("📅 Календарь выплат")
     st.markdown(
@@ -1954,6 +1989,7 @@ if st.session_state["active_view"] == "vm":
                 position_vm = vm_data["VM"] * quantity
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
+                price_date = datetime.utcnow().strftime("%Y-%m-%d")
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
                 limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
                 vm_report = {
@@ -1964,6 +2000,7 @@ if st.session_state["active_view"] == "vm":
                     "TODAY_PRICE": vm_data["TODAY_PRICE"],
                     "LAST_PRICE": vm_data.get("LAST_PRICE"),
                     "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
+                    "PRICE_DATE": price_date,
                     "MULTIPLIER": vm_data["MULTIPLIER"],
                     "VM": vm_data["VM"],
                     "VM_CLEARING": vm_data["VM_CLEARING"],
@@ -2006,12 +2043,13 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Дата клиринга:** {vm_report['TRADEDATE']}")
         st.markdown(f"**Расчетная цена последнего клиринга:** {vm_report['LAST_SETTLE_PRICE']}")
         st.markdown(f"**Последняя цена:** {vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Дата последней цены:** {vm_report.get('PRICE_DATE', 'н/д')}")
         st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
         st.markdown(f"**Вариационная маржа (по последней цене):** {vm_report['VM']:.2f}")
         st.markdown(f"**VM клиринговая (SETTLEPRICEDAY - PREVSETTLEPRICE):** {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}")
-        st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
-        st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
+        st.markdown(f"**Маржа позиции (VM × Кол-во):** {format_int_with_sep(vm_report['POSITION_VM'])}")
+        st.markdown(f"**Сумма ограничения:** {format_int_with_sep(vm_report['LIMIT_SUM'])}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
 
         st.markdown("#### Value at Risk (VaR)")
@@ -2035,12 +2073,20 @@ if st.session_state["active_view"] == "vm":
 
         vm_df = pd.DataFrame([vm_report])
         vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
+        vm_pdf = build_vm_pdf_report(vm_report)
         st.download_button(
             label="💾 Скачать VM (Excel)",
             data=vm_xlsx,
             file_name="vm_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="vm_report_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать VM (PDF)",
+            data=vm_pdf,
+            file_name="vm_report.pdf",
+            mime="application/pdf",
+            key="vm_report_pdf_dl",
         )
         st.download_button(
             label="💾 Скачать VM (CSV)",
@@ -2066,8 +2112,8 @@ if st.session_state["active_view"] == "vm":
             f"Кол-во: {vm_report['QUANTITY']}\n"
             f"VM (по последней цене): {vm_report['VM']:.2f}\n"
             f"VM клиринговая: {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}\n"
-            f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
-            f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
+            f"Маржа позиции: {format_int_with_sep(vm_report['POSITION_VM'])}\n"
+            f"Сумма ограничения: {format_int_with_sep(vm_report['LIMIT_SUM'])}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
             "Value at Risk (VaR):\n"
             f"{var_table_text}\n\n"
