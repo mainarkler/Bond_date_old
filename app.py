@@ -197,21 +197,43 @@ def safe_format_int_with_sep(value):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_gold_chart_data():
-    daily = yf.download(
-        "GC=F",
-        period="6mo",
-        interval="1d",
-        progress=False,
-        auto_adjust=False,
-    )
-    intraday = yf.download(
-        "GC=F",
-        period="1d",
-        interval="1m",
-        progress=False,
-        auto_adjust=False,
-        prepost=False,
-    )
+    def _download(symbol, period, interval, prepost=False):
+        try:
+            return yf.download(
+                symbol,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                prepost=prepost,
+            )
+        except Exception:
+            return pd.DataFrame()
+
+    daily_candidates = [
+        ("GC=F", "6mo", "1d"),
+        ("XAUUSD=X", "6mo", "1d"),
+        ("GC=F", "1y", "1d"),
+        ("XAUUSD=X", "1y", "1d"),
+    ]
+    intraday_candidates = [
+        ("GC=F", "1d", "1m"),
+        ("XAUUSD=X", "5d", "5m"),
+        ("GC=F", "5d", "5m"),
+    ]
+
+    daily = pd.DataFrame()
+    for symbol, period, interval in daily_candidates:
+        daily = _download(symbol, period, interval)
+        if daily is not None and not daily.empty:
+            break
+
+    intraday = pd.DataFrame()
+    for symbol, period, interval in intraday_candidates:
+        intraday = _download(symbol, period, interval, prepost=False)
+        if intraday is not None and not intraday.empty:
+            break
+
     return daily, intraday
 
 
@@ -336,6 +358,18 @@ def _fetch_xauusd_news_like_ai_analysis():
                 }
             )
     prepared.sort(key=lambda x: x["published_at"], reverse=True)
+    if not prepared:
+        for item in fetched_news[:15]:
+            published = item.published_at
+            if published.tzinfo is not None:
+                published = published.astimezone(timezone.utc).replace(tzinfo=None)
+            prepared.append(
+                {
+                    "title": item.title.strip(),
+                    "url": item.url.strip(),
+                    "published_at": published.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
     return prepared
 
 
