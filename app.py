@@ -2239,6 +2239,7 @@ if st.session_state["active_view"] == "company_analysis":
                     st.caption(
                         f"Keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(news_pool))}"
                     )
+                    st.caption("Расширенные ключи: " + ", ".join(payload.get("expanded_keywords", [])))
                     st.caption("Приоритетные источники: " + ", ".join(payload.get("priority_sources", [])))
                     st.json(news_pool)
 
@@ -2253,9 +2254,10 @@ if st.session_state["active_view"] == "company_analysis":
                             st.caption("Ранжирование вариантов: " + ", ".join(
                                 f"#{row.get('variant')} (score={row.get('score')})" for row in payload.get("summary_ranking", [])
                             ))
-                    for idx, summary_text in enumerate(payload.get("summaries", []), start=1):
-                        st.markdown(f"**Вариант {idx}**")
-                        st.write(summary_text)
+                    with st.expander("Показать остальные варианты summary"):
+                        for idx, summary_text in enumerate(payload.get("summaries", []), start=1):
+                            st.markdown(f"**Вариант {idx}**")
+                            st.write(summary_text)
     st.stop()
 
 if st.session_state["active_view"] == "calendar":

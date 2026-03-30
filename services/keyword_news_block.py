@@ -16,6 +16,12 @@ from news_agent_config import settings
 logger = logging.getLogger(__name__)
 
 RU_PRIORITY_SITES = ["rbc.ru", "interfax.ru", "vedomosti.ru", "kommersant.ru", "tass.ru"]
+KEYWORD_ALIASES = {
+    "сбер": ["сбер", "сбербанк", "сербанк", "sber", "sberbank"],
+    "sber": ["sber", "sberbank", "сбер", "сбербанк", "сербанк"],
+    "яндекс": ["яндекс", "yandex"],
+    "yandex": ["yandex", "яндекс"],
+}
 RSS_SOURCES = {
     "RBC": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "Interfax": "https://www.interfax.ru/rss.asp",
@@ -32,11 +38,13 @@ class RussianFinanceNewsAgent:
     summary_variants: int = 3
 
     async def run(self) -> dict[str, Any]:
+        expanded_keywords = self._expand_keywords()
         pool, errors = await self._collect_news_pool()
         summaries = await self._summarize_variants(pool, variants=self.summary_variants)
         best_variant, best_summary, ranking = await self._select_best_summary(summaries)
         return {
             "keyword": self.keyword,
+            "expanded_keywords": expanded_keywords,
             "window_days": self.depth_days,
             "news_pool": pool,
             "news_count": len(pool),
@@ -75,7 +83,8 @@ class RussianFinanceNewsAgent:
 
     async def _fetch_google_rss_ru(self) -> tuple[list[dict[str, Any]], str | None]:
         query_sites = " OR ".join(f"site:{site}" for site in RU_PRIORITY_SITES)
-        query = f"({self.keyword}) ({query_sites}) when:{max(self.depth_days, 1)}d"
+        expanded_query = " OR ".join(self._expand_keywords())
+        query = f"({expanded_query}) ({query_sites}) when:{max(self.depth_days, 1)}d"
         params = {"q": query, "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
         endpoint = "https://news.google.com/rss/search"
         headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"}
@@ -229,11 +238,26 @@ class RussianFinanceNewsAgent:
         return best_variant, summaries[best_variant - 1], ranking_sorted
 
     def _matches_keyword(self, item: dict[str, Any]) -> bool:
-        key = self.keyword.casefold().strip()
-        if not key:
+        keys = self._expand_keywords()
+        if not keys:
             return False
         haystack = f"{item.get('title','')} {item.get('description','')} {item.get('source','')}".casefold()
-        return key in haystack
+        return any(key in haystack for key in keys)
+
+    def _expand_keywords(self) -> list[str]:
+        base = self.keyword.casefold().strip()
+        if not base:
+            return []
+        expanded = [base]
+        expanded.extend(KEYWORD_ALIASES.get(base, []))
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in expanded:
+            clean = item.casefold().strip()
+            if clean and clean not in seen:
+                seen.add(clean)
+                result.append(clean)
+        return result
 
     @staticmethod
     def _extract_tag(block: str, tag: str) -> str:
