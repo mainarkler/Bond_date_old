@@ -2211,7 +2211,8 @@ if st.session_state["active_view"] == "company_analysis":
             value=st.session_state.get("company_analysis_query", "AAPL"),
             key="company_analysis_keyword_input",
         )
-        limit_value = st.slider("Размер пула новостей", min_value=5, max_value=100, value=30, step=5)
+        depth_days = st.number_input("Глубина поиска, дней", min_value=7, max_value=365, value=30, step=1)
+        summary_variants = st.selectbox("Количество вариантов summary", options=[3, 4, 5], index=0)
         run_clicked = st.form_submit_button("Найти новости и собрать summary", use_container_width=True)
 
     st.session_state["company_analysis_query"] = keyword_value
@@ -2223,7 +2224,11 @@ if st.session_state["active_view"] == "company_analysis":
         else:
             with st.spinner("Поиск новостей в интернете и LLM-агрегация..."):
                 try:
-                    payload = build_keyword_news_block_sync(user_query, limit=int(limit_value))
+                    payload = build_keyword_news_block_sync(
+                        user_query,
+                        depth_days=int(depth_days),
+                        summary_variants=int(summary_variants),
+                    )
                 except Exception as exc:
                     st.error(f"Ошибка выполнения блока: {exc}")
                 else:
@@ -2241,7 +2246,9 @@ if st.session_state["active_view"] == "company_analysis":
                         st.warning("Ошибки источников: " + " | ".join(str(e) for e in errors))
 
                     st.subheader("Короткое summary (LLM)")
-                    st.write(payload.get("summary", ""))
+                    for idx, summary_text in enumerate(payload.get("summaries", []), start=1):
+                        st.markdown(f"**Вариант {idx}**")
+                        st.write(summary_text)
     st.stop()
 
 if st.session_state["active_view"] == "calendar":

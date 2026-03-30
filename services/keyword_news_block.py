@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote_plus
 
 import httpx
 
@@ -29,23 +28,24 @@ RSS_SOURCES = {
 @dataclass(slots=True)
 class RussianFinanceNewsAgent:
     keyword: str
-    limit: int = 30
+    depth_days: int = 30
+    summary_variants: int = 3
 
     async def run(self) -> dict[str, Any]:
         pool, errors = await self._collect_news_pool()
-        summary = await self._summarize(pool)
+        summaries = await self._summarize_variants(pool, variants=self.summary_variants)
         return {
             "keyword": self.keyword,
-            "window_days": 30,
+            "window_days": self.depth_days,
             "news_pool": pool,
             "news_count": len(pool),
-            "summary": summary,
+            "summaries": summaries,
             "errors": errors,
             "priority_sources": RU_PRIORITY_SITES,
         }
 
     async def _collect_news_pool(self) -> tuple[list[dict[str, Any]], list[str]]:
-        threshold = datetime.now(timezone.utc) - timedelta(days=30)
+        threshold = datetime.now(timezone.utc) - timedelta(days=max(self.depth_days, 1))
         all_items: list[dict[str, Any]] = []
         errors: list[str] = []
 
@@ -64,12 +64,14 @@ class RussianFinanceNewsAgent:
         deduped = self._dedupe(sorted_items)
 
         # приоритет русских финансовых источников
-        deduped.sort(key=lambda i: (0 if any(site in i.get("url", "") for site in RU_PRIORITY_SITES) else 1, i.get("published_at", "")), reverse=False)
-        return deduped[: self.limit], errors
+        deduped.sort(
+            key=lambda i: (0 if any(site in i.get("url", "") for site in RU_PRIORITY_SITES) else 1, -self._to_ts(i.get("published_at", ""))),
+        )
+        return deduped, errors
 
     async def _fetch_google_rss_ru(self) -> tuple[list[dict[str, Any]], str | None]:
         query_sites = " OR ".join(f"site:{site}" for site in RU_PRIORITY_SITES)
-        query = f"({self.keyword}) ({query_sites}) when:30d"
+        query = f"({self.keyword}) ({query_sites}) when:{max(self.depth_days, 1)}d"
         params = {"q": query, "hl": "ru", "gl": "RU", "ceid": "RU:ru"}
         endpoint = "https://news.google.com/rss/search"
         headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"}
@@ -119,48 +121,54 @@ class RussianFinanceNewsAgent:
                 )
         return parsed
 
-    async def _summarize(self, pool: list[dict[str, Any]]) -> str:
+    async def _summarize_variants(self, pool: list[dict[str, Any]], variants: int = 3) -> list[str]:
+        variants = 3 if variants not in {3, 4, 5} else variants
         if not pool:
-            return "По выбранному keyword не найдено релевантных свежих новостей за 30 дней."
+            return ["По выбранному keyword не найдено релевантных свежих новостей за выбранный период."]
 
-        fallback = self._financial_fallback_summary(pool)
         if not settings.openai_api_key:
-            return fallback
+            return self._fallback_variants(pool, variants)
 
-        prompt_payload = {
-            "keyword": self.keyword,
-            "news_pool": pool[:30],
-            "task": "Кратко агрегируй новости с акцентом на финансовые показатели компании, устойчивость бизнеса, регуляторные и операционные риски."
-        }
-        payload = {
-            "model": settings.openai_model,
-            "temperature": 0.1,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты финансовый аналитик. Дай summary 5-7 предложений на русском языке. "
-                        "Фокус: выручка, прибыль, долговая нагрузка, маржинальность, кэшфлоу, устойчивость, регуляторные риски."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
-            ],
-        }
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
-        url = f"{settings.openai_base_url.rstrip('/')}/chat/completions"
+        summaries: list[str] = []
+        for idx in range(variants):
+            prompt_payload = {
+                "keyword": self.keyword,
+                "news_pool": pool,
+                "variant": idx + 1,
+                "task": "Кратко агрегируй новости с акцентом на финансовые показатели, устойчивость, регуляторные и операционные риски."
+            }
+            payload = {
+                "model": settings.openai_model,
+                "temperature": 0.15 + (idx * 0.05),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты финансовый аналитик. Дай отдельный вариант summary 5-7 предложений на русском языке. "
+                            "Фокус: выручка, прибыль, долговая нагрузка, маржинальность, кэшфлоу, устойчивость, регуляторные риски."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
+                ],
+            }
+            headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
+            url = f"{settings.openai_base_url.rstrip('/')}/chat/completions"
 
-        try:
-            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
-                response = await client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
-            return str(data["choices"][0]["message"]["content"]).strip()
-        except Exception as exc:
-            logger.warning("financial_summary_fallback", extra={"error": str(exc)})
-            return fallback
+            try:
+                async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+                    response = await client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                summaries.append(str(data["choices"][0]["message"]["content"]).strip())
+            except Exception as exc:
+                logger.warning("financial_summary_variant_fallback", extra={"error": str(exc), "variant": idx + 1})
+                summaries.extend(self._fallback_variants(pool, variants - len(summaries)))
+                break
 
-    def _financial_fallback_summary(self, pool: list[dict[str, Any]]) -> str:
-        titles = [item.get("title", "") for item in pool[:6]]
+        return summaries or self._fallback_variants(pool, variants)
+
+    def _fallback_variants(self, pool: list[dict[str, Any]], variants: int) -> list[str]:
+        titles = [item.get("title", "") for item in pool[:8]]
         risk_tokens = ["штраф", "санкц", "иск", "расслед", "сокращ", "убыт", "долг"]
         growth_tokens = ["выруч", "прибыл", "рост", "марж", "дивид", "денежн", "инвест"]
         risk_hits = sum(any(token in title.lower() for token in risk_tokens) for title in titles)
@@ -172,12 +180,26 @@ class RussianFinanceNewsAgent:
         elif risk_hits > growth_hits:
             stance = "осторожный"
 
-        return (
-            f"По keyword '{self.keyword}' отобрано {len(pool)} свежих новостей из приоритетных русскоязычных источников. "
-            f"Тональность новостного фона: {stance}. "
+        base = (
+            f"По keyword '{self.keyword}' отобрано {len(pool)} свежих новостей. "
+            f"Тональность фона: {stance}. "
             f"Ключевые темы: {'; '.join(titles[:4])}. "
-            f"Рекомендуется дополнительно проверить влияние новостей на выручку, маржинальность, долговую нагрузку и денежные потоки компании."
+            f"Проверьте влияние на выручку, маржинальность, долговую нагрузку и денежные потоки."
         )
+
+        results: list[str] = []
+        for i in range(max(1, variants)):
+            if i == 0:
+                results.append(base)
+            elif i == 1:
+                results.append(base + " Акцент: регуляторные риски и устойчивость бизнес-модели.")
+            elif i == 2:
+                results.append(base + " Акцент: качество прибыли и стабильность операционного cash flow.")
+            elif i == 3:
+                results.append(base + " Акцент: потенциальное влияние новостей на мультипликаторы оценки.")
+            else:
+                results.append(base + " Акцент: краткосрочные и среднесрочные драйверы стоимости.")
+        return results
 
     def _matches_keyword(self, item: dict[str, Any]) -> bool:
         key = self.keyword.casefold().strip()
@@ -226,6 +248,13 @@ class RussianFinanceNewsAgent:
             return False
 
     @staticmethod
+    def _to_ts(value: str) -> float:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
+    @staticmethod
     def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen: set[str] = set()
         out: list[dict[str, Any]] = []
@@ -238,9 +267,9 @@ class RussianFinanceNewsAgent:
         return out
 
 
-def build_keyword_news_block_sync(keyword: str, limit: int = 30) -> dict[str, Any]:
+def build_keyword_news_block_sync(keyword: str, depth_days: int = 30, summary_variants: int = 3) -> dict[str, Any]:
     async def _run() -> dict[str, Any]:
-        agent = RussianFinanceNewsAgent(keyword=keyword, limit=limit)
+        agent = RussianFinanceNewsAgent(keyword=keyword, depth_days=depth_days, summary_variants=summary_variants)
         return await agent.run()
 
     return asyncio.run(_run())
