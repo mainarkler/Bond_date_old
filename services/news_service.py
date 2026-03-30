@@ -8,6 +8,7 @@ from html import unescape
 import json
 import re
 from typing import Any, Protocol, Sequence
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -439,6 +440,8 @@ def build_event(
     source: str,
     event_id: int | str | None = None,
     body: str | None = None,
+    link: str | None = None,
+    resolve_related_profiles: bool = True,
 ) -> Event:
     """Build a normalized event from provider payload, including optional news body."""
     normalized_title = unescape(title.strip())
@@ -446,16 +449,27 @@ def build_event(
     event_datetime = _parse_datetime(published_at)
     related_isins = _extract_isins(f"{normalized_title}\n{normalized_body}")
     isin = related_isins[0] if related_isins else None
-    related_profiles = [_resolve_security_profile_by_isin(candidate_isin) for candidate_isin in related_isins]
-    emitter = next(
-        (str(profile.get("emitent_title") or "").strip() for profile in related_profiles if profile.get("emitent_title")),
-        None,
+    related_profiles: list[dict[str, str | None]] = []
+    if resolve_related_profiles:
+        related_profiles = [_resolve_security_profile_by_isin(candidate_isin) for candidate_isin in related_isins]
+
+    emitter = (
+        next(
+            (str(profile.get("emitent_title") or "").strip() for profile in related_profiles if profile.get("emitent_title")),
+            None,
+        )
+        if related_profiles
+        else None
     ) or _extract_emitter(normalized_title, isin)
-    related_emitter_ids = [
-        str(profile.get("emitter_id")).strip()
-        for profile in related_profiles
-        if profile.get("emitter_id")
-    ]
+    related_emitter_ids = (
+        [
+            str(profile.get("emitter_id")).strip()
+            for profile in related_profiles
+            if profile.get("emitter_id")
+        ]
+        if related_profiles
+        else []
+    )
 
     return {
         "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
@@ -472,11 +486,63 @@ def build_event(
         "emitter_id": related_emitter_ids[0] if related_emitter_ids else None,
         "related_emitter_ids": sorted(set(related_emitter_ids)),
         "published_at": str(published_at or "").strip(),
+        "link": _normalize_event_link(link),
     }
 
 
 
-def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
+
+
+@lru_cache(maxsize=4096)
+def _resolve_google_news_link(url: str) -> str:
+    candidate = (url or "").strip()
+    if not candidate:
+        return ""
+    session = _build_session()
+    try:
+        response = session.get(candidate, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+        response.raise_for_status()
+        return str(response.url or candidate).strip()
+    except Exception:
+        return candidate
+
+
+def _normalize_event_link(link: str | None) -> str | None:
+    candidate = str(link or "").strip()
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    if parsed.netloc.endswith("news.google.com") and "/rss/articles/" in parsed.path:
+        resolved = _resolve_google_news_link(candidate)
+        return resolved or candidate
+    return candidate
+
+
+def _hydrate_news_bodies(events: list[Event], session: requests.Session | None = None) -> list[Event]:
+    if not events:
+        return events
+
+    session = session or _build_session()
+    body_cache: dict[int, str] = {}
+    for event in events:
+        event_id = event.get("id")
+        if not isinstance(event_id, int) or event_id <= 0:
+            continue
+        if event_id not in body_cache:
+            try:
+                body_cache[event_id] = _request_news_body(event_id, session=session)
+            except Exception:
+                body_cache[event_id] = ""
+        event["body"] = body_cache[event_id]
+    return events
+
+
+def _build_moex_event(
+    item: dict[str, Any],
+    body: str = "",
+    *,
+    resolve_related_profiles: bool = True,
+) -> Event:
     published_at = str(
         item.get("published_at")
         or item.get("PUBLISHED_AT")
@@ -500,6 +566,7 @@ def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
         source=SOURCE_NAME,
         event_id=item.get("id") or item.get("ID"),
         body=resolved_body,
+        resolve_related_profiles=resolve_related_profiles,
     )
 
 
@@ -507,6 +574,9 @@ def _build_moex_event(item: dict[str, Any], body: str = "") -> Event:
 def parse_news(
     response_json: dict[str, Any],
     session: requests.Session | None = None,
+    *,
+    include_body: bool = True,
+    resolve_related_profiles: bool = True,
 ) -> list[Event]:
     """Convert MOEX sitenews payload into normalized event dictionaries."""
     sitenews_payload = response_json.get("sitenews") or {}
@@ -521,9 +591,15 @@ def parse_news(
     for item in raw_items:
         event_id = item.get("id") or item.get("ID")
         body = ""
-        if isinstance(event_id, int) or str(event_id or "").isdigit():
+        if include_body and (isinstance(event_id, int) or str(event_id or "").isdigit()):
             body = _request_news_body(int(event_id), session=session)
-        events.append(_build_moex_event(item, body=body))
+        events.append(
+            _build_moex_event(
+                item,
+                body=body,
+                resolve_related_profiles=resolve_related_profiles,
+            )
+        )
     return events
 
 
@@ -537,6 +613,23 @@ class MoexNewsProvider:
             raise ValueError("limit must be a positive integer")
         session = _build_session()
         return parse_news(_request_news(limit=limit, session=session), session=session)
+
+
+def _fetch_moex_events(
+    limit: int,
+    *,
+    include_body: bool = True,
+    resolve_related_profiles: bool = True,
+) -> list[Event]:
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    session = _build_session()
+    return parse_news(
+        _request_news(limit=limit, session=session),
+        session=session,
+        include_body=include_body,
+        resolve_related_profiles=resolve_related_profiles,
+    )
 
 
 class RSSNewsProvider:
@@ -562,12 +655,14 @@ class RSSNewsProvider:
             guid = (item.findtext("guid") or "").strip()
             if not title:
                 continue
+            link = (item.findtext("link") or "").strip()
             events.append(
                 build_event(
                     title=title,
                     published_at=published_at,
                     source=self.source_name,
                     event_id=guid if guid.isdigit() else None,
+                    link=link,
                 )
             )
         return sorted(events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
@@ -588,7 +683,7 @@ def collect_news_events(
 
 def get_news(limit: int = DEFAULT_LIMIT) -> list[Event]:
     """Fetch the latest MOEX site news and convert them to events."""
-    return MoexNewsProvider().fetch_events(limit=limit)
+    return _fetch_moex_events(limit=limit, include_body=True, resolve_related_profiles=True)
 
 
 
@@ -622,6 +717,7 @@ def _event_matches_related(
     emitter_id: str | None,
     since: datetime,
     isin: str,
+    same_emitter_isins: set[str] | None = None,
 ) -> bool:
     event_datetime = event.get("datetime")
     if event_datetime is None or event_datetime < since:
@@ -630,6 +726,8 @@ def _event_matches_related(
     related_isins = [str(value).upper() for value in event.get("related_isins") or []]
     if isin.upper() in related_isins:
         return False
+    if same_emitter_isins and set(related_isins).intersection(same_emitter_isins):
+        return True
 
     event_emitter_ids = {str(value).strip() for value in event.get("related_emitter_ids") or [] if str(value).strip()}
     if emitter_id and emitter_id in event_emitter_ids:
@@ -655,7 +753,12 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
 
     security_profile = _resolve_security_profile_by_isin(normalized_isin)
     emitter_id = security_profile.get("emitter_id")
-    events = get_news(limit=MAX_NEWS_LIMIT)
+    lightweight_limit = min(MAX_NEWS_LIMIT, max(DEFAULT_LIMIT, days * 40))
+    events = _fetch_moex_events(
+        limit=lightweight_limit,
+        include_body=False,
+        resolve_related_profiles=False,
+    )
     target_news = [
         event
         for event in events
@@ -667,12 +770,33 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     emitter_keywords = _tokenize_emitter(str(emitter) if emitter else None)
 
     since = datetime.utcnow() - timedelta(days=days)
+    recent_events = [event for event in events if event.get("datetime") and event["datetime"] >= since]
+    candidate_related_isins = {
+        str(related_isin).upper()
+        for event in recent_events
+        for related_isin in (event.get("related_isins") or [])
+        if str(related_isin).strip() and str(related_isin).upper() != normalized_isin
+    }
+    same_emitter_isins = {
+        candidate_isin
+        for candidate_isin in candidate_related_isins
+        if _resolve_emitter_id_by_isin(candidate_isin) == emitter_id
+    } if emitter_id else set()
+
     related_news = [
         event
         for event in events
-        if _event_matches_related(event, emitter_keywords, emitter_id, since, normalized_isin)
+        if _event_matches_related(
+            event,
+            emitter_keywords,
+            emitter_id,
+            since,
+            normalized_isin,
+            same_emitter_isins=same_emitter_isins,
+        )
     ]
     related_news = sorted(related_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
+    _hydrate_news_bodies(target_news + related_news)
 
     other_isins = sorted(
         {
