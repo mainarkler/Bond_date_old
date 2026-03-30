@@ -24,6 +24,7 @@ from urllib3.util.retry import Retry
 
 from services.moex_turnover import MoexTurnoverClient
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
+from services.keyword_news_block import build_keyword_news_block_sync
 
 # ---------------------------
 # Streamlit page setup
@@ -58,6 +59,7 @@ if FORCED_ACTIVE_VIEW in {
     "market_statistics",
     "turnover_export",
     "moex_news",
+    "company_analysis",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -107,6 +109,11 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
+    st.markdown("### AI Анализ компании")
+    st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
+    if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
+        st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
         st.markdown("### Расчет VM")
@@ -1773,6 +1780,65 @@ def fetch_isins(isins, show_progress=True):
 # ---------------------------
 # Calendar view
 # ---------------------------
+if st.session_state["active_view"] == "company_analysis":
+    st.header("Новости по keyword + финансовое LLM summary")
+    st.caption("Приоритет: русскоязычные источники (РБК, Интерфакс, Ведомости, Коммерсант, ТАСС) за последние 30 дней.")
+
+    with st.form("company_analysis_news_form"):
+        keyword_value = st.text_input(
+            "Keyword для поиска новостей",
+            value=st.session_state.get("company_analysis_query", "AAPL"),
+            key="company_analysis_keyword_input",
+        )
+        depth_days = st.number_input("Глубина поиска, дней", min_value=7, max_value=365, value=30, step=1)
+        summary_variants = st.selectbox("Количество вариантов summary", options=[3, 4, 5], index=0)
+        run_clicked = st.form_submit_button("Найти новости и собрать summary", use_container_width=True)
+
+    st.session_state["company_analysis_query"] = keyword_value
+
+    if run_clicked:
+        user_query = keyword_value.strip()
+        if not user_query:
+            st.warning("Введите keyword.")
+        else:
+            with st.spinner("Поиск новостей в интернете и LLM-агрегация..."):
+                try:
+                    payload = build_keyword_news_block_sync(
+                        user_query,
+                        depth_days=int(depth_days),
+                        summary_variants=int(summary_variants),
+                    )
+                except Exception as exc:
+                    st.error(f"Ошибка выполнения блока: {exc}")
+                else:
+                    news_pool = payload.get("news_pool", [])
+                    errors = payload.get("errors", [])
+
+                    st.subheader("Пул новостей")
+                    st.caption(
+                        f"Keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(news_pool))}"
+                    )
+                    st.caption("Расширенные ключи: " + ", ".join(payload.get("expanded_keywords", [])))
+                    st.caption("Приоритетные источники: " + ", ".join(payload.get("priority_sources", [])))
+                    st.json(news_pool)
+
+                    if errors:
+                        st.warning("Ошибки источников: " + " | ".join(str(e) for e in errors))
+
+                    st.subheader("Короткое summary (LLM)")
+                    if payload.get("best_summary"):
+                        st.markdown(f"**Лучший вариант (для обучения модели): Вариант {payload.get('best_variant', 1)}**")
+                        st.write(payload.get("best_summary", ""))
+                        if payload.get("summary_ranking"):
+                            st.caption("Ранжирование вариантов: " + ", ".join(
+                                f"#{row.get('variant')} (score={row.get('score')})" for row in payload.get("summary_ranking", [])
+                            ))
+                    with st.expander("Показать остальные варианты summary"):
+                        for idx, summary_text in enumerate(payload.get("summaries", []), start=1):
+                            st.markdown(f"**Вариант {idx}**")
+                            st.write(summary_text)
+    st.stop()
+
 if st.session_state["active_view"] == "calendar":
     st.subheader("📅 Календарь выплат")
     st.markdown(
