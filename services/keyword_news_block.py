@@ -34,12 +34,16 @@ class RussianFinanceNewsAgent:
     async def run(self) -> dict[str, Any]:
         pool, errors = await self._collect_news_pool()
         summaries = await self._summarize_variants(pool, variants=self.summary_variants)
+        best_variant, best_summary, ranking = await self._select_best_summary(summaries)
         return {
             "keyword": self.keyword,
             "window_days": self.depth_days,
             "news_pool": pool,
             "news_count": len(pool),
             "summaries": summaries,
+            "best_variant": best_variant,
+            "best_summary": best_summary,
+            "summary_ranking": ranking,
             "errors": errors,
             "priority_sources": RU_PRIORITY_SITES,
         }
@@ -200,6 +204,29 @@ class RussianFinanceNewsAgent:
             else:
                 results.append(base + " Акцент: краткосрочные и среднесрочные драйверы стоимости.")
         return results
+
+
+    async def _select_best_summary(self, summaries: list[str]) -> tuple[int, str, list[dict[str, Any]]]:
+        if not summaries:
+            return 0, "", []
+
+        finance_terms = ["выруч", "прибыл", "маржин", "долг", "кэш", "денеж", "капитал", "риск"]
+        ranking: list[dict[str, Any]] = []
+        for idx, summary in enumerate(summaries, start=1):
+            lower = summary.casefold()
+            term_hits = sum(1 for term in finance_terms if term in lower)
+            length_score = min(len(summary) / 500.0, 1.0)
+            structure_score = 1.0 if ":" in summary or ";" in summary else 0.7
+            total_score = round(term_hits * 0.6 + length_score * 0.25 + structure_score * 0.15, 4)
+            ranking.append({
+                "variant": idx,
+                "score": total_score,
+                "term_hits": term_hits,
+            })
+
+        ranking_sorted = sorted(ranking, key=lambda r: r["score"], reverse=True)
+        best_variant = int(ranking_sorted[0]["variant"])
+        return best_variant, summaries[best_variant - 1], ranking_sorted
 
     def _matches_keyword(self, item: dict[str, Any]) -> bool:
         key = self.keyword.casefold().strip()

@@ -2246,6 +2246,13 @@ if st.session_state["active_view"] == "company_analysis":
                         st.warning("Ошибки источников: " + " | ".join(str(e) for e in errors))
 
                     st.subheader("Короткое summary (LLM)")
+                    if payload.get("best_summary"):
+                        st.markdown(f"**Лучший вариант (для обучения модели): Вариант {payload.get('best_variant', 1)}**")
+                        st.write(payload.get("best_summary", ""))
+                        if payload.get("summary_ranking"):
+                            st.caption("Ранжирование вариантов: " + ", ".join(
+                                f"#{row.get('variant')} (score={row.get('score')})" for row in payload.get("summary_ranking", [])
+                            ))
                     for idx, summary_text in enumerate(payload.get("summaries", []), start=1):
                         st.markdown(f"**Вариант {idx}**")
                         st.write(summary_text)
