@@ -10,9 +10,9 @@ import pandas as pd
 BASE_SHARE_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/shares/securities"
 BASE_BOND_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/bonds/securities"
 
-MAX_PAGINATION_PAGES = 2000
-MAX_SECURITIES_PER_RUN = 1000
-MAX_Q_POINTS_PER_SECURITY = 1000
+MAX_PAGINATION_PAGES = 200000
+MAX_SECURITIES_PER_RUN = 1000000000
+MAX_Q_POINTS_PER_SECURITY = 1000000000
 
 
 class PaginationLimitError(RuntimeError):
