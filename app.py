@@ -2694,7 +2694,7 @@ if st.session_state["active_view"] == "sell_stres":
                     st.error("Объём продажи должен быть положительным.")
                 else:
                     xml_request = SellStressRequest(
-                        isin=xml_selected_asset.isin,
+                        isin=xml_selected_asset.isin if xml_selected_asset.isin else xml_selected_asset.symbol,
                         secid=xml_selected_asset.secid,
                         volume=int(xml_volume),
                         c_value=float(xml_c_value),

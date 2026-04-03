@@ -43,11 +43,10 @@ A new XML-driven UI layer is embedded directly in the main Streamlit app inside 
 ### What is included
 
 - XML schema for the form: `sell_stress_ui/schemas/sell_stress_form.xml`
-- Example index-membership dataset: `sell_stress_ui/data/index_membership.csv`
 - UI/business/data separation:
   - UI integration in existing app: `app.py` (`🧩 Sell_stres` / `Share`)
   - XML parsing: `sell_stress_ui/form_config.py`
-  - Filters/data loading: `sell_stress_ui/data.py`
+  - Filters/data loading from MOEX index analytics API: `sell_stress_ui/data.py`
   - Integration with `sell_stress`: `sell_stress_ui/service.py`
 
 ### Run
