@@ -38,14 +38,14 @@ All analysis/signal/fundamental pipelines now propagate:
 
 ## Sell Stress XML UI
 
-A new XML-driven UI layer is available for `sell_stress` in `app_sell_stress_xml.py`.
+A new XML-driven UI layer is embedded directly in the main Streamlit app inside `🧩 Sell_stres` → `Share`.
 
 ### What is included
 
 - XML schema for the form: `sell_stress_ui/schemas/sell_stress_form.xml`
 - Example index-membership dataset: `sell_stress_ui/data/index_membership.csv`
 - UI/business/data separation:
-  - UI: `app_sell_stress_xml.py`
+  - UI integration in existing app: `app.py` (`🧩 Sell_stres` / `Share`)
   - XML parsing: `sell_stress_ui/form_config.py`
   - Filters/data loading: `sell_stress_ui/data.py`
   - Integration with `sell_stress`: `sell_stress_ui/service.py`
@@ -53,13 +53,13 @@ A new XML-driven UI layer is available for `sell_stress` in `app_sell_stress_xml
 ### Run
 
 ```bash
-streamlit run app_sell_stress_xml.py
+streamlit run app.py
 ```
 
 ### Test/check
 
 ```bash
-python -m compileall app_sell_stress_xml.py sell_stress_ui
+python -m compileall app.py sell_stress_ui
 ```
 
 ### Notes
