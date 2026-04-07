@@ -23,6 +23,8 @@ from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
+from sell_stress_ui.data import fetch_index_membership_by_isin
+from sell_stress_ui.reporting import build_share_batch_html_report
 from email_compose import render_email_compose_section
 from news.fetcher import NewsFetcher
 from news.models import NewsQuery
@@ -2608,6 +2610,7 @@ if st.session_state["active_view"] == "sell_stres":
 
     with share_tab:
         st.markdown("### Share")
+        st.markdown("#### Пакетный режим")
         use_q_from_list = st.checkbox(
             "Вводить Q для каждого ISIN/Ticker (формат: ISIN/Ticker | Q)", value=False, key="share_q_per_isin"
         )
@@ -2729,10 +2732,25 @@ if st.session_state["active_view"] == "sell_stres":
                         [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
                         ignore_index=True,
                     )[["ISIN", "Q", "DeltaP"]]
+                    ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    combined_delta_df = combined_delta_df.merge(
+                        ranking_df[["ISIN", "Ticker", "Indices", "RankScore"]] if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Ticker", "Indices", "RankScore"]),
+                        on="ISIN",
+                        how="left",
+                    )
+                    combined_delta_df["Ticker"] = combined_delta_df["Ticker"].fillna("")
+                    combined_delta_df["Indices"] = combined_delta_df["Indices"].fillna("")
+                    combined_delta_df["RankScore"] = combined_delta_df["RankScore"].fillna(0).astype(int)
                     download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
                         combined_delta_df, sheet_name="delta_p"
                     )
+                    html_report = build_share_batch_html_report(
+                        combined_delta_df=combined_delta_df[["ISIN", "Q", "DeltaP"]],
+                        meta_df=pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"]) if meta_rows else pd.DataFrame(),
+                        ranking_df=ranking_df,
+                    )
+                    download_payload["html_report"] = html_report
                     st.download_button(
                         label="💾 Скачать общий ΔP Excel",
                         data=ss.dataframe_to_excel_bytes(combined_delta_df, sheet_name="delta_p"),
@@ -2742,6 +2760,13 @@ if st.session_state["active_view"] == "sell_stres":
 
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
+                    ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    if not ranking_df.empty:
+                        meta_df = meta_df.merge(ranking_df, on="ISIN", how="left")
+                        meta_df["Ticker"] = meta_df["Ticker"].fillna("")
+                        meta_df["Indices"] = meta_df["Indices"].fillna("")
+                        meta_df["RankScore"] = meta_df["RankScore"].fillna(0).astype(int)
+                        meta_df = meta_df.sort_values(["RankScore", "ISIN"], ascending=[False, True]).reset_index(drop=True)
                     download_payload["meta_csv"] = meta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["meta_xlsx"] = ss.dataframe_to_excel_bytes(meta_df, sheet_name="meta")
                     if show_tables:
@@ -2797,6 +2822,14 @@ if st.session_state["active_view"] == "sell_stres":
                     file_name="sell_stres_share_meta_all.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
+                )
+            if "html_report" in share_downloads:
+                st.download_button(
+                    label="💾 Скачать веб-отчёт HTML (Share batch)",
+                    data=share_downloads["html_report"],
+                    file_name="sell_stres_share_batch_report.html",
+                    mime="text/html",
+                    key="share_html_report_dl",
                 )
             render_email_compose_section("Sell_stres Share отчёт", "share_report", "sell_stres_share_deltaP_all.xlsx", share_downloads.get("delta_xlsx") if share_downloads else None)
 
