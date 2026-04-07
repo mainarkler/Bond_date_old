@@ -19,7 +19,7 @@
     <field id="asset_selector" type="select" label="Asset" required="true" searchable="true" source="filtered_assets" />
     <field id="volume" type="number" label="Volume to sell (RUB)" required="true" min="1" step="1000000" default="1000000000" />
     <field id="c_value" type="number" label="Impact coefficient C" required="true" min="0" max="1" step="0.05" default="1" />
-    <field id="date_from" type="date" label="History start date" required="true" default="2024-01-01" />
+    <field id="date_from" type="date" label="History start date" required="true" default="2025-01-01" />
     <field id="q_mode" type="select" label="Q vector mode" required="true" default="log">
       <option value="log">log</option>
       <option value="linear">linear</option>
