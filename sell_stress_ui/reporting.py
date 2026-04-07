@@ -1,75 +1,156 @@
 from __future__ import annotations
 
 from datetime import datetime
-from io import BytesIO
-import xml.etree.ElementTree as ET
+import json
 
-import matplotlib.pyplot as plt
 import pandas as pd
 
 
-def build_share_batch_xml_report(
+def build_share_batch_html_report(
     combined_delta_df: pd.DataFrame,
     meta_df: pd.DataFrame,
     ranking_df: pd.DataFrame,
 ) -> bytes:
-    root = ET.Element("sellStressBatchReport", generatedAt=datetime.utcnow().isoformat(timespec="seconds"))
-    summary = ET.SubElement(root, "summary")
-    ET.SubElement(summary, "isinsTotal").text = str(combined_delta_df["ISIN"].nunique())
-    ET.SubElement(summary, "rowsTotal").text = str(len(combined_delta_df))
+    """Build interactive HTML report with index filter/grouping for batch share output."""
+    ranking = ranking_df.copy() if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Indices", "RankScore"])
+    meta = meta_df.copy() if not meta_df.empty else pd.DataFrame(columns=["ISIN", "T", "Sigma", "MDTV"])
+    curves = combined_delta_df.copy()
 
-    ranking_map = ranking_df.set_index("ISIN").to_dict("index") if not ranking_df.empty else {}
-    meta_map = meta_df.set_index("ISIN").to_dict("index") if not meta_df.empty else {}
+    isins_payload = meta.merge(ranking, on="ISIN", how="outer")
+    isins_payload["Indices"] = isins_payload.get("Indices", "").fillna("")
+    isins_payload["RankScore"] = pd.to_numeric(isins_payload.get("RankScore", 0), errors="coerce").fillna(0).astype(int)
+    isins_payload = isins_payload.sort_values(["RankScore", "ISIN"], ascending=[False, True]).fillna("")
 
-    for isin, df_isin in combined_delta_df.groupby("ISIN"):
-        rank_item = ranking_map.get(isin, {})
-        node = ET.SubElement(
-            root,
-            "security",
-            isin=str(isin),
-            indices=str(rank_item.get("Indices", "")),
-            rankScore=str(rank_item.get("RankScore", 0)),
+    index_set = set()
+    for indices in isins_payload["Indices"].astype(str):
+        index_set.update(i.strip() for i in indices.split(";") if i.strip())
+    index_options = ["ALL"] + sorted(index_set)
+
+    group_rows = []
+    for index_name in sorted(index_set):
+        mask = isins_payload["Indices"].str.contains(index_name, na=False)
+        group_rows.append(
+            {
+                "Index": index_name,
+                "IsinCount": int(mask.sum()),
+                "AvgRankScore": float(isins_payload.loc[mask, "RankScore"].mean()) if mask.any() else 0,
+            }
         )
 
-        meta_node = ET.SubElement(node, "meta")
-        for key, value in meta_map.get(isin, {}).items():
-            ET.SubElement(meta_node, key).text = "" if pd.isna(value) else str(value)
+    payload = {
+        "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "index_options": index_options,
+        "isins": isins_payload.to_dict(orient="records"),
+        "curves": curves.to_dict(orient="records"),
+        "groups": group_rows,
+    }
 
-        points = ET.SubElement(node, "curve")
-        for row in df_isin.sort_values("Q").itertuples(index=False):
-            ET.SubElement(
-                points,
-                "point",
-                q=str(int(row.Q)),
-                deltaP=str(float(row.DeltaP)),
-            )
+    payload_json = json.dumps(payload, ensure_ascii=False)
 
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    html = f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Sell_stres Share Batch Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
+    th, td {{ border: 1px solid #ddd; padding: 6px; font-size: 13px; }}
+    th {{ background: #f4f6f8; text-align: left; }}
+    .row {{ display: flex; gap: 24px; align-items: center; margin: 8px 0; }}
+    .muted {{ color: #666; }}
+    .hidden {{ display: none; }}
+  </style>
+</head>
+<body>
+  <h2>Sell_stres Share Batch Report</h2>
+  <p class="muted">Generated at: <span id="generatedAt"></span></p>
 
+  <div class="row">
+    <label for="indexFilter"><strong>Фильтр по индексу:</strong></label>
+    <select id="indexFilter"></select>
 
-def build_share_batch_png_chart(combined_delta_df: pd.DataFrame, ranking_df: pd.DataFrame) -> bytes:
-    fig, ax = plt.subplots(figsize=(12, 7))
-    rank_map = ranking_df.set_index("ISIN").to_dict("index") if not ranking_df.empty else {}
+    <label for="isinFilter"><strong>ISIN:</strong></label>
+    <input id="isinFilter" placeholder="RU..." />
+  </div>
 
-    for isin, df_isin in combined_delta_df.groupby("ISIN"):
-        rank_item = rank_map.get(isin, {})
-        label = f"{isin} [{rank_item.get('Indices', '-')} ]"
-        ax.plot(df_isin["Q"], df_isin["DeltaP"], linewidth=1.5, alpha=0.9, label=label)
+  <h3>Группировка по индексам</h3>
+  <table id="groupTable">
+    <thead><tr><th>Index</th><th>ISIN count</th><th>Avg rank score</th></tr></thead>
+    <tbody></tbody>
+  </table>
 
-    ax.set_title("Sell_stres Share: ΔP by Q")
-    ax.set_xlabel("Q (volume sold)")
-    ax.set_ylabel("ΔP")
-    ax.grid(True, alpha=0.3)
+  <h3>Сводка ISIN</h3>
+  <table id="isinTable">
+    <thead><tr><th>ISIN</th><th>Indices</th><th>RankScore</th><th>T</th><th>Sigma</th><th>MDTV</th></tr></thead>
+    <tbody></tbody>
+  </table>
 
-    handles, labels = ax.get_legend_handles_labels()
-    if len(labels) > 12:
-        handles, labels = handles[:12], labels[:12]
-    if labels:
-        ax.legend(handles, labels, fontsize=8, loc="best")
+  <h3>Точки кривой (Q / ΔP)</h3>
+  <table id="curveTable">
+    <thead><tr><th>ISIN</th><th>Q</th><th>ΔP</th></tr></thead>
+    <tbody></tbody>
+  </table>
 
-    output = BytesIO()
-    fig.tight_layout()
-    fig.savefig(output, format="png", dpi=160)
-    plt.close(fig)
-    output.seek(0)
-    return output.getvalue()
+<script>
+const DATA = {payload_json};
+
+document.getElementById('generatedAt').textContent = DATA.generated_at;
+const indexFilterEl = document.getElementById('indexFilter');
+const isinFilterEl = document.getElementById('isinFilter');
+
+DATA.index_options.forEach(opt => {{
+  const option = document.createElement('option');
+  option.value = opt;
+  option.textContent = opt;
+  indexFilterEl.appendChild(option);
+}});
+
+function render() {{
+  const selectedIndex = indexFilterEl.value || 'ALL';
+  const isinText = (isinFilterEl.value || '').trim().toUpperCase();
+
+  const filteredIsins = DATA.isins.filter(row => {{
+    const byIndex = selectedIndex === 'ALL' || (row.Indices || '').includes(selectedIndex);
+    const byIsin = !isinText || (row.ISIN || '').toUpperCase().includes(isinText);
+    return byIndex && byIsin;
+  }});
+  const allowedIsins = new Set(filteredIsins.map(r => r.ISIN));
+
+  const filteredCurves = DATA.curves.filter(row => allowedIsins.has(row.ISIN));
+
+  const groupBody = document.querySelector('#groupTable tbody');
+  groupBody.innerHTML = '';
+  DATA.groups
+    .filter(g => selectedIndex === 'ALL' || g.Index === selectedIndex)
+    .forEach(g => {{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${{g.Index}}</td><td>${{g.IsinCount}}</td><td>${{Number(g.AvgRankScore).toFixed(2)}}</td>`;
+      groupBody.appendChild(tr);
+    }});
+
+  const isinBody = document.querySelector('#isinTable tbody');
+  isinBody.innerHTML = '';
+  filteredIsins.forEach(row => {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{row.ISIN || ''}}</td><td>${{row.Indices || ''}}</td><td>${{row.RankScore || 0}}</td><td>${{row.T || ''}}</td><td>${{row.Sigma || ''}}</td><td>${{row.MDTV || ''}}</td>`;
+    isinBody.appendChild(tr);
+  }});
+
+  const curveBody = document.querySelector('#curveTable tbody');
+  curveBody.innerHTML = '';
+  filteredCurves.forEach(row => {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{row.ISIN}}</td><td>${{row.Q}}</td><td>${{row.DeltaP}}</td>`;
+    curveBody.appendChild(tr);
+  }});
+}}
+
+indexFilterEl.addEventListener('change', render);
+isinFilterEl.addEventListener('input', render);
+render();
+</script>
+</body>
+</html>"""
+
+    return html.encode("utf-8")
