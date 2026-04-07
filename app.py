@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
+from pathlib import Path
 
 import altair as alt
 import matplotlib.dates as mdates
@@ -23,6 +24,14 @@ from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
+from sell_stress_ui.data import (
+    fetch_index_membership_by_isin,
+    filter_assets as filter_sell_stress_assets,
+    load_asset_universe,
+)
+from sell_stress_ui.form_config import load_form_config as load_sell_stress_form_config
+from sell_stress_ui.reporting import build_share_batch_png_chart, build_share_batch_xml_report
+from sell_stress_ui.service import SellStressRequest, calculate_price_impact
 from email_compose import render_email_compose_section
 from news.fetcher import NewsFetcher
 from news.models import NewsQuery
@@ -95,6 +104,17 @@ def init_sell_stres_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+@st.cache_data(show_spinner=False)
+def get_sell_stress_xml_form_config():
+    xml_path = Path(__file__).resolve().parent / "sell_stress_ui" / "schemas" / "sell_stress_form.xml"
+    return load_sell_stress_form_config(xml_path)
+
+
+@st.cache_data(show_spinner=False)
+def get_sell_stress_asset_universe():
+    return load_asset_universe()
 
 
 if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
@@ -2608,6 +2628,113 @@ if st.session_state["active_view"] == "sell_stres":
 
     with share_tab:
         st.markdown("### Share")
+        st.markdown("#### XML-конфигурируемый расчёт (Share)")
+
+        xml_cfg = get_sell_stress_xml_form_config()
+        asset_universe = get_sell_stress_asset_universe()
+
+        xml_col1, xml_col2 = st.columns(2)
+        with xml_col1:
+            xml_index_filter = st.selectbox(
+                xml_cfg.fields["index_filter"].label,
+                options=["ALL", "IMOEX", "RTS"],
+                index=0,
+                key="share_xml_index_filter",
+            )
+        with xml_col2:
+            xml_stock_filter = st.text_input(
+                xml_cfg.fields["asset_filter"].label,
+                placeholder="SBER / Gazprom / RU000...",
+                key="share_xml_stock_filter",
+            )
+
+        xml_filtered_assets = filter_sell_stress_assets(
+            asset_universe,
+            index_filter=xml_index_filter,
+            stock_filter=xml_stock_filter,
+        )
+        if xml_filtered_assets.empty:
+            st.warning("По выбранным фильтрам не найдено акций.")
+        else:
+            xml_asset_options = {
+                f"{row.symbol} — {row.name} ({row.isin})": row
+                for row in xml_filtered_assets.itertuples(index=False)
+            }
+            xml_selected_label = st.selectbox(
+                xml_cfg.fields["asset_selector"].label,
+                options=list(xml_asset_options.keys()),
+                key="share_xml_asset_selector",
+            )
+            xml_selected_asset = xml_asset_options[xml_selected_label]
+
+            xml_volume = st.number_input(
+                xml_cfg.fields["volume"].label,
+                min_value=1,
+                value=1_000_000_000,
+                step=1_000_000,
+                key="share_xml_volume",
+            )
+            xml_c_value = st.number_input(
+                xml_cfg.fields["c_value"].label,
+                min_value=0.0,
+                max_value=1.0,
+                value=1.0,
+                step=0.05,
+                key="share_xml_c_value",
+            )
+            xml_date_from = st.date_input(
+                xml_cfg.fields["date_from"].label,
+                value=datetime(2024, 1, 1).date(),
+                key="share_xml_date_from",
+            )
+            xml_q_mode = st.selectbox(
+                xml_cfg.fields["q_mode"].label,
+                options=["log", "linear"],
+                index=0,
+                key="share_xml_q_mode",
+            )
+
+            if st.button("Calculate sell stress", key="share_xml_calculate", type="primary"):
+                if xml_volume <= 0:
+                    st.error("Объём продажи должен быть положительным.")
+                else:
+                    xml_request = SellStressRequest(
+                        isin=xml_selected_asset.isin if xml_selected_asset.isin else xml_selected_asset.symbol,
+                        secid=xml_selected_asset.secid,
+                        volume=int(xml_volume),
+                        c_value=float(xml_c_value),
+                        date_from=xml_date_from.strftime("%Y-%m-%d"),
+                        q_mode=xml_q_mode,
+                    )
+
+                    with st.spinner("Рассчитываем Sell_stres по XML-форме..."):
+                        xml_result_df, xml_meta = calculate_price_impact(xml_request)
+
+                    st.markdown("##### Результаты (XML)")
+                    st.json(xml_meta)
+                    st.dataframe(xml_result_df, use_container_width=True, hide_index=True)
+                    xml_chart = (
+                        alt.Chart(xml_result_df)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X("Q:Q", title="Объём продажи"),
+                            y=alt.Y("PriceAfterSell:Q", title="Цена после продажи (база = 100)"),
+                            tooltip=["Q", "DeltaP", "DrawdownPct", "PriceAfterSell"],
+                        )
+                        .properties(height=320)
+                        .interactive()
+                    )
+                    st.altair_chart(xml_chart, use_container_width=True)
+                    st.download_button(
+                        label="💾 Скачать CSV (XML)",
+                        data=xml_result_df.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"sell_stres_share_xml_{xml_selected_asset.symbol}.csv",
+                        mime="text/csv",
+                        key="share_xml_export_csv",
+                    )
+
+        st.divider()
+        st.markdown("#### Пакетный режим (старый интерфейс)")
         use_q_from_list = st.checkbox(
             "Вводить Q для каждого ISIN/Ticker (формат: ISIN/Ticker | Q)", value=False, key="share_q_per_isin"
         )
@@ -2729,9 +2856,27 @@ if st.session_state["active_view"] == "sell_stres":
                         [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
                         ignore_index=True,
                     )[["ISIN", "Q", "DeltaP"]]
+                    ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    combined_delta_df = combined_delta_df.merge(
+                        ranking_df[["ISIN", "Indices", "RankScore"]] if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Indices", "RankScore"]),
+                        on="ISIN",
+                        how="left",
+                    )
+                    combined_delta_df["Indices"] = combined_delta_df["Indices"].fillna("")
+                    combined_delta_df["RankScore"] = combined_delta_df["RankScore"].fillna(0).astype(int)
                     download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
                         combined_delta_df, sheet_name="delta_p"
+                    )
+                    xml_report = build_share_batch_xml_report(
+                        combined_delta_df=combined_delta_df[["ISIN", "Q", "DeltaP"]],
+                        meta_df=pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"]) if meta_rows else pd.DataFrame(),
+                        ranking_df=ranking_df,
+                    )
+                    download_payload["xml_report"] = xml_report
+                    download_payload["graph_png"] = build_share_batch_png_chart(
+                        combined_delta_df=combined_delta_df[["ISIN", "Q", "DeltaP"]],
+                        ranking_df=ranking_df,
                     )
                     st.download_button(
                         label="💾 Скачать общий ΔP Excel",
@@ -2742,6 +2887,12 @@ if st.session_state["active_view"] == "sell_stres":
 
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
+                    ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    if not ranking_df.empty:
+                        meta_df = meta_df.merge(ranking_df, on="ISIN", how="left")
+                        meta_df["Indices"] = meta_df["Indices"].fillna("")
+                        meta_df["RankScore"] = meta_df["RankScore"].fillna(0).astype(int)
+                        meta_df = meta_df.sort_values(["RankScore", "ISIN"], ascending=[False, True]).reset_index(drop=True)
                     download_payload["meta_csv"] = meta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["meta_xlsx"] = ss.dataframe_to_excel_bytes(meta_df, sheet_name="meta")
                     if show_tables:
@@ -2797,6 +2948,22 @@ if st.session_state["active_view"] == "sell_stres":
                     file_name="sell_stres_share_meta_all.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
+                )
+            if "xml_report" in share_downloads:
+                st.download_button(
+                    label="💾 Скачать XML-отчёт (Share batch)",
+                    data=share_downloads["xml_report"],
+                    file_name="sell_stres_share_batch_report.xml",
+                    mime="application/xml",
+                    key="share_xml_report_dl",
+                )
+            if "graph_png" in share_downloads:
+                st.download_button(
+                    label="💾 Скачать график PNG (Share batch)",
+                    data=share_downloads["graph_png"],
+                    file_name="sell_stres_share_batch_chart.png",
+                    mime="image/png",
+                    key="share_png_report_dl",
                 )
             render_email_compose_section("Sell_stres Share отчёт", "share_report", "sell_stres_share_deltaP_all.xlsx", share_downloads.get("delta_xlsx") if share_downloads else None)
 

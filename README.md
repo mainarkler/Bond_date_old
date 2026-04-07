@@ -35,3 +35,36 @@ All analysis/signal/fundamental pipelines now propagate:
   "news_count": 42
 }
 ```
+
+## Sell Stress XML UI
+
+A new XML-driven UI layer is embedded directly in the main Streamlit app inside `🧩 Sell_stres` → `Share`.
+
+### What is included
+
+- XML schema for the form: `sell_stress_ui/schemas/sell_stress_form.xml`
+- UI/business/data separation:
+  - UI integration in existing app: `app.py` (`🧩 Sell_stres` / `Share`)
+  - XML parsing: `sell_stress_ui/form_config.py`
+  - Filters/data loading from MOEX index analytics API: `sell_stress_ui/data.py`
+  - Integration with `sell_stress`: `sell_stress_ui/service.py`
+
+### Run
+
+```bash
+streamlit run app.py
+```
+
+### Test/check
+
+```bash
+python -m compileall app.py sell_stress_ui
+```
+
+### Notes
+
+- Asset list can be filtered by index (`IMOEX`, `RTS`) and stock text filter.
+- Repeated calculations are cached in `sell_stress_ui/service.py` with `lru_cache`.
+- Results can be exported as CSV from the UI.
+- In Share batch mode, an additional XML report and PNG graph export are available.
+- Batch report ranks ISINs by index inclusion (`IMOEX`, `IMOEXBMI`, `MSXSM`) using MOEX index analytics endpoint and ticker -> ISIN resolution via `.../markets/shares/securities/{ticker}`.
