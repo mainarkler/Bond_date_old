@@ -2746,10 +2746,11 @@ if st.session_state["active_view"] == "sell_stres":
                     )[["ISIN", "Q", "DeltaP"]]
                     ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
                     combined_delta_df = combined_delta_df.merge(
-                        ranking_df[["ISIN", "Indices", "RankScore"]] if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Indices", "RankScore"]),
+                        ranking_df[["ISIN", "Ticker", "Indices", "RankScore"]] if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Ticker", "Indices", "RankScore"]),
                         on="ISIN",
                         how="left",
                     )
+                    combined_delta_df["Ticker"] = combined_delta_df["Ticker"].fillna("")
                     combined_delta_df["Indices"] = combined_delta_df["Indices"].fillna("")
                     combined_delta_df["RankScore"] = combined_delta_df["RankScore"].fillna(0).astype(int)
                     download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
@@ -2774,6 +2775,7 @@ if st.session_state["active_view"] == "sell_stres":
                     ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
                     if not ranking_df.empty:
                         meta_df = meta_df.merge(ranking_df, on="ISIN", how="left")
+                        meta_df["Ticker"] = meta_df["Ticker"].fillna("")
                         meta_df["Indices"] = meta_df["Indices"].fillna("")
                         meta_df["RankScore"] = meta_df["RankScore"].fillna(0).astype(int)
                         meta_df = meta_df.sort_values(["RankScore", "ISIN"], ascending=[False, True]).reset_index(drop=True)

@@ -66,4 +66,5 @@ python -m compileall app.py sell_stress_ui
 - Results can be exported as CSV from the UI.
 - In Share batch mode, an additional interactive HTML report export is available (2 sheets/tabs).
 - Sheet 1 contains the chart with vertical axis `DeltaP` and horizontal axis `Q`.
+- HTML report includes filters by index, ticker, and ISIN.
 - Batch report ranks ISINs by index inclusion (`IMOEX`, `IMOEXBMI`, `MSXSM`) using MOEX index analytics endpoint and ticker -> ISIN resolution via `.../markets/shares/securities/{ticker}`.

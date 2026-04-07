@@ -163,6 +163,7 @@ def fetch_index_membership_by_isin(
 
     universe = universe[universe["isin"].astype(str).str.len() > 0].copy()
     universe["ISIN"] = universe["isin"].astype(str).str.upper()
+    universe["Ticker"] = universe["symbol"].astype(str).str.upper()
     universe["Indices"] = universe["indices"].astype(str)
 
     weights = {"IMOEX": 100, "IMOEXBMI": 10, "MSXSM": 1}
@@ -172,7 +173,7 @@ def fetch_index_membership_by_isin(
         return sum(weights.get(i, 0) for i in items)
 
     universe["RankScore"] = universe["Indices"].apply(_score)
-    return universe[["ISIN", "Indices", "RankScore"]].drop_duplicates(subset=["ISIN"])
+    return universe[["ISIN", "Ticker", "Indices", "RankScore"]].drop_duplicates(subset=["ISIN"])
 
 
 def filter_assets(df: pd.DataFrame, index_filter: str, stock_filter: str) -> pd.DataFrame:
