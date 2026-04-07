@@ -67,7 +67,8 @@ def build_share_batch_html_report(
         index_set.update(i.strip() for i in indices.split(";") if i.strip())
     index_options = ["ALL"] + sorted(index_set)
 
-    ticker_options = ["ALL"] + sorted([t for t in isins_payload["Ticker"].astype(str).unique() if t])
+    curve_tickers = sorted([t for t in curves.get("Ticker", pd.Series(dtype=str)).astype(str).unique() if t])
+    ticker_options = ["ALL"] + curve_tickers
 
     group_rows = []
     for index_name in sorted(index_set):
@@ -109,8 +110,8 @@ th { background: #f4f6f8; text-align: left; }
 <label>Тикер:</label><select id="tickerFilter"></select>
 <label>ISIN:</label><input id="isinFilter" placeholder="RU..." />
 </div>
-<div class="tabs"><button id="tabChartBtn" class="tab-btn active" type="button">Лист 1: График</button><button id="tabDataBtn" class="tab-btn" type="button">Лист 2: Данные</button></div>
-<section id="tabChart" class="tab active"><h3>ΔP(Q): вертикаль = DeltaP, горизонталь = Q</h3><div id="plot" style="height:560px;"></div></section>
+<div class="tabs"><button id="tabChartBtn" class="tab-btn active" type="button">График</button><button id="tabDataBtn" class="tab-btn" type="button">Данные</button></div>
+<section id="tabChart" class="tab active"><div id="plot" style="height:560px;"></div></section>
 <section id="tabData" class="tab">
 <h3>Метаданные (T / Sigma / MDTV)</h3><div id="metaBlock" class="meta-grid"></div>
 <h3>Группировка по индексам</h3><table id="groupTable"><thead><tr><th>Index</th><th>ISIN count</th></tr></thead><tbody></tbody></table>
@@ -148,18 +149,20 @@ function render(){
  });
  const allowed = new Set(filteredIsins.map(r=>r.ISIN));
  const curves = DATA.curves.filter(r=>allowed.has(r.ISIN));
+ const allowedAfterCurve = new Set(curves.map(r=>r.ISIN));
+ const filteredIsinsFinal = filteredIsins.filter(r => allowedAfterCurve.has(r.ISIN));
 
  const tracesMap = new Map();
  curves.forEach(r=>{
    const key = r.Ticker || r.ISIN;
    if(!tracesMap.has(key)) tracesMap.set(key, {x:[], y:[], name:key, mode:'lines+markers', type:'scatter'});
-   tracesMap.get(key).x.push(Number(r.Q));
-   tracesMap.get(key).y.push(Number(r.DeltaP));
+   tracesMap.get(key).x.push(Number(r.Q) / 1000000.0);
+   tracesMap.get(key).y.push(Number(r.DeltaP) * 100.0);
  });
- Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'Q'}, yaxis:{title:'DeltaP'}, margin:{t:20}}, {responsive:true});
+ Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализацию позиции в рынок (Млн. руб)'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
 
  const metaBlock = document.getElementById('metaBlock'); metaBlock.innerHTML='';
- filteredIsins.forEach(r=>{
+ filteredIsinsFinal.forEach(r=>{
    const card=document.createElement('div'); card.className='meta-card';
    card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${r.Sigma || '-'}<br>MDTV: ${r.MDTV || '-'}`;
    metaBlock.appendChild(card);
@@ -171,7 +174,7 @@ function render(){
  });
 
  const isinBody=document.querySelector('#isinTable tbody'); isinBody.innerHTML='';
- filteredIsins.forEach(r=>{
+ filteredIsinsFinal.forEach(r=>{
    const tr=document.createElement('tr'); tr.innerHTML=`<td>${r.Ticker||''}</td><td>${r.ISIN||''}</td><td>${r.Indices||''}</td><td>${r.RankScore||0}</td>`; isinBody.appendChild(tr);
  });
 
