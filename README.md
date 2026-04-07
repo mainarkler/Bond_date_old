@@ -35,3 +35,34 @@ All analysis/signal/fundamental pipelines now propagate:
   "news_count": 42
 }
 ```
+
+## Sell Stress Share batch web-report
+
+The Share batch mode in `🧩 Sell_stres` can export an interactive web report (`.html`) with filtering/grouping.
+
+### What is included
+
+- UI/business/data separation:
+  - UI integration in existing app: `app.py` (`🧩 Sell_stres` / `Share`)
+  - Filters/data loading from MOEX index analytics API: `sell_stress_ui/data.py`
+  - HTML report export builder: `sell_stress_ui/reporting.py`
+
+### Run
+
+```bash
+streamlit run app.py
+```
+
+### Test/check
+
+```bash
+python -m compileall app.py sell_stress_ui
+```
+
+### Notes
+
+- Asset list can be filtered by index (`IMOEX`, `RTS`) and stock text filter.
+- Repeated calculations are cached in `sell_stress_ui/service.py` with `lru_cache`.
+- Results can be exported as CSV from the UI.
+- In Share batch mode, an additional interactive HTML report export is available.
+- Batch report ranks ISINs by index inclusion (`IMOEX`, `IMOEXBMI`, `MSXSM`) using MOEX index analytics endpoint and ticker -> ISIN resolution via `.../markets/shares/securities/{ticker}`.
