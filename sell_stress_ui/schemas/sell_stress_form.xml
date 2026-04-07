@@ -34,5 +34,6 @@
     <area id="result_table" type="table" />
     <area id="impact_chart" type="chart" chartType="line" x="Q" y="PriceAfterSell" />
     <area id="export" type="download" formats="csv,png" />
+    <area id="batch_xml_report" type="xml" description="Batch report with ISIN index ranking and curve points" />
   </outputs>
 </sellStressForm>

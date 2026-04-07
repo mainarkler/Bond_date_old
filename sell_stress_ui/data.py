@@ -10,6 +10,7 @@ import requests
 INDEX_CODE_MAP = {
     "IMOEX": "IMOEX",
     "RTS": "RTSI",
+    "MSXSM": "MSXSM",
 }
 
 
@@ -82,10 +83,10 @@ def _analytics_snapshot(index_code: str, as_of_date: str) -> pd.DataFrame:
 
 @lru_cache(maxsize=4096)
 def _lookup_security_meta(symbol: str) -> tuple[str, str]:
-    """Resolve ISIN and short name by ticker from MOEX securities search."""
+    """Resolve ISIN and short name via shares endpoint for ticker."""
     js = _request_get(
-        "https://iss.moex.com/iss/securities.json",
-        params={"q": symbol, "iss.meta": "off"},
+        f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{symbol}.json",
+        params={"iss.meta": "off"},
         timeout=30,
     ).json()
     sec_df = _to_df(js.get("securities", {}))
@@ -105,7 +106,7 @@ def _lookup_security_meta(symbol: str) -> tuple[str, str]:
     if secid_col is None:
         return "", symbol
 
-    exact = sec_df[sec_df[secid_col].astype(str).str.upper() == symbol.upper()]
+    exact = sec_df[sec_df[secid_col].astype(str).str.upper() == symbol.upper()] if secid_col else sec_df
     row = exact.iloc[0] if not exact.empty else sec_df.iloc[0]
     isin = str(row[isin_col]).strip().upper() if isin_col and pd.notna(row[isin_col]) else ""
     name = str(row[name_col]).strip() if name_col and pd.notna(row[name_col]) else symbol
@@ -133,6 +134,29 @@ def load_asset_universe(index_codes: Iterable[str] = ("IMOEX", "RTS")) -> pd.Dat
     out["isin"] = out["isin"].fillna("")
     out["name"] = out["name"].fillna(out["symbol"])
     return out[["symbol", "isin", "name", "secid", "indices"]].sort_values("symbol").reset_index(drop=True)
+
+
+@lru_cache(maxsize=32)
+def fetch_index_membership_by_isin(
+    index_codes: tuple[str, ...] = ("IMOEX", "IMOEXBMI", "MSXSM"),
+) -> pd.DataFrame:
+    """Return mapping ISIN -> index memberships for ranking/export."""
+    universe = load_asset_universe(tuple(index_codes))
+    if universe.empty:
+        return pd.DataFrame(columns=["ISIN", "Indices", "RankScore"])
+
+    universe = universe[universe["isin"].astype(str).str.len() > 0].copy()
+    universe["ISIN"] = universe["isin"].astype(str).str.upper()
+    universe["Indices"] = universe["indices"].astype(str)
+
+    weights = {"IMOEX": 100, "IMOEXBMI": 10, "MSXSM": 1}
+
+    def _score(indices: str) -> int:
+        items = [i.strip().upper() for i in indices.split(";") if i.strip()]
+        return sum(weights.get(i, 0) for i in items)
+
+    universe["RankScore"] = universe["Indices"].apply(_score)
+    return universe[["ISIN", "Indices", "RankScore"]].drop_duplicates(subset=["ISIN"])
 
 
 def filter_assets(df: pd.DataFrame, index_filter: str, stock_filter: str) -> pd.DataFrame:
