@@ -64,5 +64,6 @@ python -m compileall app.py sell_stress_ui
 - Asset list can be filtered by index (`IMOEX`, `RTS`) and stock text filter.
 - Repeated calculations are cached in `sell_stress_ui/service.py` with `lru_cache`.
 - Results can be exported as CSV from the UI.
-- In Share batch mode, an additional interactive HTML report export is available.
+- In Share batch mode, an additional interactive HTML report export is available (2 sheets/tabs).
+- Sheet 1 contains the chart with vertical axis `DeltaP` and horizontal axis `Q`.
 - Batch report ranks ISINs by index inclusion (`IMOEX`, `IMOEXBMI`, `MSXSM`) using MOEX index analytics endpoint and ticker -> ISIN resolution via `.../markets/shares/securities/{ticker}`.

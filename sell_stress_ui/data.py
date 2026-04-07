@@ -10,7 +10,8 @@ import requests
 INDEX_CODE_MAP = {
     "IMOEX": "IMOEX",
     "RTS": "RTSI",
-    "MSXSM": "MSXSM",
+    "MSXSM": "MCXSM",
+    "IMOEXBMI": "IMOEXBMI",
 }
 
 
@@ -81,6 +82,21 @@ def _analytics_snapshot(index_code: str, as_of_date: str) -> pd.DataFrame:
     return pd.concat(chunks, ignore_index=True).drop_duplicates(subset=["symbol"], keep="last")
 
 
+def _analytics_snapshot_with_fallback(index_code: str, as_of_date: str, lookback_days: int = 14) -> pd.DataFrame:
+    """Try requested date first, then look back to find nearest available composition."""
+    base_dt = pd.to_datetime(as_of_date, errors="coerce")
+    if pd.isna(base_dt):
+        base_dt = pd.to_datetime(datetime.utcnow().date())
+
+    for shift in range(0, lookback_days + 1):
+        dt_str = (base_dt - pd.Timedelta(days=shift)).strftime("%Y-%m-%d")
+        snapshot = _analytics_snapshot(index_code=index_code, as_of_date=dt_str)
+        if not snapshot.empty:
+            return snapshot
+
+    return pd.DataFrame(columns=["symbol", "weight", "index_code"])
+
+
 @lru_cache(maxsize=4096)
 def _lookup_security_meta(symbol: str) -> tuple[str, str]:
     """Resolve ISIN and short name via shares endpoint for ticker."""
@@ -116,7 +132,7 @@ def _lookup_security_meta(symbol: str) -> tuple[str, str]:
 def load_asset_universe(index_codes: Iterable[str] = ("IMOEX", "RTS")) -> pd.DataFrame:
     """Build share universe from live MOEX index composition (no local placeholder)."""
     as_of_date = datetime.utcnow().strftime("%Y-%m-%d")
-    frames = [_analytics_snapshot(index_code=code, as_of_date=as_of_date) for code in index_codes]
+    frames = [_analytics_snapshot_with_fallback(index_code=code, as_of_date=as_of_date) for code in index_codes]
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
         return pd.DataFrame(columns=["symbol", "isin", "name", "secid", "indices"])

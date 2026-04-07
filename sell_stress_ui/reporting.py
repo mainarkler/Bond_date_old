@@ -11,7 +11,7 @@ def build_share_batch_html_report(
     meta_df: pd.DataFrame,
     ranking_df: pd.DataFrame,
 ) -> bytes:
-    """Build interactive HTML report with index filter/grouping for batch share output."""
+    """Build interactive HTML report with chart-first layout and index grouping."""
     ranking = ranking_df.copy() if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Indices", "RankScore"])
     meta = meta_df.copy() if not meta_df.empty else pd.DataFrame(columns=["ISIN", "T", "Sigma", "MDTV"])
     curves = combined_delta_df.copy()
@@ -57,9 +57,14 @@ def build_share_batch_html_report(
     table {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
     th, td {{ border: 1px solid #ddd; padding: 6px; font-size: 13px; }}
     th {{ background: #f4f6f8; text-align: left; }}
-    .row {{ display: flex; gap: 24px; align-items: center; margin: 8px 0; }}
+    .row {{ display: flex; gap: 24px; align-items: center; margin: 8px 0; flex-wrap: wrap; }}
     .muted {{ color: #666; }}
-    .hidden {{ display: none; }}
+    .tabs {{ display: flex; gap: 8px; margin: 12px 0; }}
+    .tab-btn {{ border: 1px solid #ccc; background: #f8f8f8; padding: 8px 12px; cursor: pointer; border-radius: 6px; }}
+    .tab-btn.active {{ background: #dfefff; border-color: #8db3ff; }}
+    .tab {{ display: none; }}
+    .tab.active {{ display: block; }}
+    #chartSvg {{ width: 100%; height: 520px; border: 1px solid #ddd; background: white; }}
   </style>
 </head>
 <body>
@@ -74,27 +79,38 @@ def build_share_batch_html_report(
     <input id="isinFilter" placeholder="RU..." />
   </div>
 
-  <h3>Группировка по индексам</h3>
-  <table id="groupTable">
-    <thead><tr><th>Index</th><th>ISIN count</th><th>Avg rank score</th></tr></thead>
-    <tbody></tbody>
-  </table>
+  <div class="tabs">
+    <button id="tabChartBtn" class="tab-btn active" type="button">Лист 1: График</button>
+    <button id="tabDataBtn" class="tab-btn" type="button">Лист 2: Данные</button>
+  </div>
 
-  <h3>Сводка ISIN</h3>
-  <table id="isinTable">
-    <thead><tr><th>ISIN</th><th>Indices</th><th>RankScore</th><th>T</th><th>Sigma</th><th>MDTV</th></tr></thead>
-    <tbody></tbody>
-  </table>
+  <section id="tabChart" class="tab active">
+    <h3>ΔP(Q): вертикаль = DeltaP, горизонталь = Q</h3>
+    <svg id="chartSvg" viewBox="0 0 1100 520" preserveAspectRatio="none"></svg>
+  </section>
 
-  <h3>Точки кривой (Q / ΔP)</h3>
-  <table id="curveTable">
-    <thead><tr><th>ISIN</th><th>Q</th><th>ΔP</th></tr></thead>
-    <tbody></tbody>
-  </table>
+  <section id="tabData" class="tab">
+    <h3>Группировка по индексам</h3>
+    <table id="groupTable">
+      <thead><tr><th>Index</th><th>ISIN count</th><th>Avg rank score</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Сводка ISIN</h3>
+    <table id="isinTable">
+      <thead><tr><th>ISIN</th><th>Indices</th><th>RankScore</th><th>T</th><th>Sigma</th><th>MDTV</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Точки кривой (Q / ΔP)</h3>
+    <table id="curveTable">
+      <thead><tr><th>ISIN</th><th>Q</th><th>ΔP</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
 
 <script>
 const DATA = {payload_json};
-
 document.getElementById('generatedAt').textContent = DATA.generated_at;
 const indexFilterEl = document.getElementById('indexFilter');
 const isinFilterEl = document.getElementById('isinFilter');
@@ -106,6 +122,101 @@ DATA.index_options.forEach(opt => {{
   indexFilterEl.appendChild(option);
 }});
 
+const colors = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#17becf','#8c564b','#e377c2','#7f7f7f','#bcbd22'];
+
+function groupByIsin(rows) {{
+  const map = new Map();
+  rows.forEach(r => {{
+    if (!map.has(r.ISIN)) map.set(r.ISIN, []);
+    map.get(r.ISIN).push(r);
+  }});
+  for (const [k,v] of map.entries()) {{
+    v.sort((a,b) => Number(a.Q)-Number(b.Q));
+  }}
+  return map;
+}}
+
+function drawChart(rows) {{
+  const svg = document.getElementById('chartSvg');
+  svg.innerHTML = '';
+  if (!rows.length) {{
+    svg.innerHTML = '<text x="40" y="40" fill="#999">Нет данных для графика</text>';
+    return;
+  }}
+
+  const w = 1100, h = 520;
+  const ml = 80, mr = 20, mt = 25, mb = 55;
+  const pw = w - ml - mr, ph = h - mt - mb;
+
+  const xs = rows.map(r => Number(r.Q));
+  const ys = rows.map(r => Number(r.DeltaP));
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const xPad = (xMax - xMin) * 0.03 || 1;
+  const yPad = (yMax - yMin) * 0.08 || 1e-6;
+
+  const x0 = xMin - xPad, x1 = xMax + xPad;
+  const y0 = yMin - yPad, y1 = yMax + yPad;
+
+  const sx = x => ml + ((x - x0) / (x1 - x0)) * pw;
+  const sy = y => mt + (1 - (y - y0) / (y1 - y0)) * ph;
+
+  const axis = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  axis.setAttribute('stroke', '#444');
+  axis.innerHTML = `
+    <line x1="${ml}" y1="${mt + ph}" x2="${ml + pw}" y2="${mt + ph}" />
+    <line x1="${ml}" y1="${mt}" x2="${ml}" y2="${mt + ph}" />
+  `;
+  svg.appendChild(axis);
+
+  const labelX = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  labelX.setAttribute('x', String(ml + pw/2));
+  labelX.setAttribute('y', String(h - 14));
+  labelX.setAttribute('text-anchor', 'middle');
+  labelX.textContent = 'Q';
+  svg.appendChild(labelX);
+
+  const labelY = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  labelY.setAttribute('x', '20');
+  labelY.setAttribute('y', String(mt + ph/2));
+  labelY.setAttribute('transform', `rotate(-90 20 ${mt + ph/2})`);
+  labelY.setAttribute('text-anchor', 'middle');
+  labelY.textContent = 'DeltaP';
+  svg.appendChild(labelY);
+
+  const byIsin = groupByIsin(rows);
+  let i = 0;
+  for (const [isin, points] of byIsin.entries()) {{
+    const color = colors[i % colors.length];
+    const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    poly.setAttribute('fill', 'none');
+    poly.setAttribute('stroke', color);
+    poly.setAttribute('stroke-width', '2');
+    poly.setAttribute('points', points.map(p => `${sx(Number(p.Q))},${sy(Number(p.DeltaP))}`).join(' '));
+    svg.appendChild(poly);
+
+    const last = points[points.length-1];
+    const tag = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    tag.setAttribute('x', String(sx(Number(last.Q)) + 6));
+    tag.setAttribute('y', String(sy(Number(last.DeltaP))));
+    tag.setAttribute('fill', color);
+    tag.setAttribute('font-size', '11');
+    tag.textContent = isin;
+    svg.appendChild(tag);
+    i += 1;
+  }}
+}}
+
+function activateTab(name) {{
+  document.getElementById('tabChart').classList.toggle('active', name === 'chart');
+  document.getElementById('tabData').classList.toggle('active', name === 'data');
+  document.getElementById('tabChartBtn').classList.toggle('active', name === 'chart');
+  document.getElementById('tabDataBtn').classList.toggle('active', name === 'data');
+}}
+
+document.getElementById('tabChartBtn').addEventListener('click', () => activateTab('chart'));
+document.getElementById('tabDataBtn').addEventListener('click', () => activateTab('data'));
+
 function render() {{
   const selectedIndex = indexFilterEl.value || 'ALL';
   const isinText = (isinFilterEl.value || '').trim().toUpperCase();
@@ -116,8 +227,9 @@ function render() {{
     return byIndex && byIsin;
   }});
   const allowedIsins = new Set(filteredIsins.map(r => r.ISIN));
-
   const filteredCurves = DATA.curves.filter(row => allowedIsins.has(row.ISIN));
+
+  drawChart(filteredCurves);
 
   const groupBody = document.querySelector('#groupTable tbody');
   groupBody.innerHTML = '';
