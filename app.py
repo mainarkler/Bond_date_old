@@ -2745,8 +2745,12 @@ if st.session_state["active_view"] == "sell_stres":
                         ignore_index=True,
                     )[["ISIN", "Q", "DeltaP"]]
                     ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    ranking_df = ranking_df.reindex(
+                        columns=["ISIN", "Ticker", "Indices", "RankScore"],
+                        fill_value="",
+                    )
                     combined_delta_df = combined_delta_df.merge(
-                        ranking_df[["ISIN", "Ticker", "Indices", "RankScore"]] if not ranking_df.empty else pd.DataFrame(columns=["ISIN", "Ticker", "Indices", "RankScore"]),
+                        ranking_df,
                         on="ISIN",
                         how="left",
                     )
@@ -2773,6 +2777,10 @@ if st.session_state["active_view"] == "sell_stres":
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
                     ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    ranking_df = ranking_df.reindex(
+                        columns=["ISIN", "Ticker", "Indices", "RankScore"],
+                        fill_value="",
+                    )
                     if not ranking_df.empty:
                         meta_df = meta_df.merge(ranking_df, on="ISIN", how="left")
                         meta_df["Ticker"] = meta_df["Ticker"].fillna("")

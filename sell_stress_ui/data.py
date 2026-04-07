@@ -159,7 +159,7 @@ def fetch_index_membership_by_isin(
     """Return mapping ISIN -> index memberships for ranking/export."""
     universe = load_asset_universe(tuple(index_codes))
     if universe.empty:
-        return pd.DataFrame(columns=["ISIN", "Indices", "RankScore"])
+        return pd.DataFrame(columns=["ISIN", "Ticker", "Indices", "RankScore"])
 
     universe = universe[universe["isin"].astype(str).str.len() > 0].copy()
     universe["ISIN"] = universe["isin"].astype(str).str.upper()
