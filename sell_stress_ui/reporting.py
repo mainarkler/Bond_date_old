@@ -114,7 +114,7 @@ th { background: #f4f6f8; text-align: left; }
 </style></head><body>
 <h2>Sell_stres Share Batch Report</h2><p>Generated at: <span id="generatedAt"></span></p>
 <div class="row">
-<label>Индекс:</label><select id="indexFilter"></select>
+<label><b>Индексы (множественный выбор):</b></label><div id="indexChecklist"></div>
 <label>Тикер:</label><select id="tickerFilter"></select>
 <label>ISIN:</label><input id="isinFilter" placeholder="RU..." />
 </div>
@@ -129,10 +129,23 @@ th { background: #f4f6f8; text-align: left; }
 <script>
 const DATA = __PAYLOAD__;
 document.getElementById('generatedAt').textContent = DATA.generated_at;
-const indexFilterEl = document.getElementById('indexFilter');
+const indexChecklistEl = document.getElementById('indexChecklist');
 const tickerFilterEl = document.getElementById('tickerFilter');
 const isinFilterEl = document.getElementById('isinFilter');
-DATA.index_options.forEach(o=>{const op=document.createElement('option');op.value=o;op.textContent=o;indexFilterEl.appendChild(op);});
+DATA.index_options
+  .filter(o => o !== 'ALL')
+  .forEach(o=>{
+    const label=document.createElement('label');
+    label.style.marginRight='10px';
+    const cb=document.createElement('input');
+    cb.type='checkbox';
+    cb.value=o;
+    cb.className='index-cb';
+    cb.checked=true;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + o));
+    indexChecklistEl.appendChild(label);
+  });
 DATA.ticker_options.forEach(o=>{const op=document.createElement('option');op.value=o;op.textContent=o;tickerFilterEl.appendChild(op);});
 
 function activateTab(name){
@@ -145,12 +158,13 @@ document.getElementById('tabChartBtn').addEventListener('click', ()=>activateTab
 document.getElementById('tabDataBtn').addEventListener('click', ()=>activateTab('data'));
 
 function render(){
- const idx = indexFilterEl.value || 'ALL';
+ const selectedIndices = Array.from(document.querySelectorAll('.index-cb:checked')).map(el => el.value);
  const ticker = tickerFilterEl.value || 'ALL';
  const isinText = (isinFilterEl.value||'').trim().toUpperCase();
+ const useAllIndices = selectedIndices.length === 0 || selectedIndices.length === document.querySelectorAll('.index-cb').length;
 
  const filteredIsins = DATA.isins.filter(r => {
-   const byIndex = idx==='ALL' || (r.Indices||'')===idx;
+   const byIndex = useAllIndices || selectedIndices.includes(r.Indices||'');
    const byTicker = ticker==='ALL' || (r.Ticker||'')===ticker;
    const byIsin = !isinText || (r.ISIN||'').toUpperCase().includes(isinText);
    return byIndex && byTicker && byIsin;
@@ -177,7 +191,7 @@ function render(){
  });
 
  const groupBody=document.querySelector('#groupTable tbody'); groupBody.innerHTML='';
- DATA.groups.filter(g=>idx==='ALL'||g.Index===idx).forEach(g=>{
+ DATA.groups.filter(g=>useAllIndices||selectedIndices.includes(g.Index)).forEach(g=>{
    const tr=document.createElement('tr'); tr.innerHTML=`<td>${g.Index}</td><td>${g.IsinCount}</td>`; groupBody.appendChild(tr);
  });
 
@@ -190,7 +204,7 @@ function render(){
  DATA.index_catalog.forEach(c=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${c.name}</td><td>${c.code}</td>`; catBody.appendChild(tr); });
 }
 
-indexFilterEl.addEventListener('change', render);
+document.querySelectorAll('.index-cb').forEach(el=>el.addEventListener('change', render));
 tickerFilterEl.addEventListener('change', render);
 isinFilterEl.addEventListener('input', render);
 render();

@@ -2689,7 +2689,11 @@ if st.session_state["active_view"] == "sell_stres":
                         if str(isin).strip()
                     }
                 )
-                entries = [{"ISIN": isin, "Q_MAX": int(q_max)} for isin in all_isins]
+                prep_progress = st.progress(0.0)
+                entries = []
+                for idx, isin in enumerate(all_isins, start=1):
+                    entries.append({"ISIN": isin, "Q_MAX": int(q_max)})
+                    prep_progress.progress(idx / len(all_isins) if all_isins else 1.0)
                 st.info(f"Подготовлено бумаг для полного расчёта: {len(entries)}")
             else:
                 if use_q_from_list:
