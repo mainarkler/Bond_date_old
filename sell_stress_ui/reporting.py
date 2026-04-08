@@ -62,26 +62,20 @@ def build_share_batch_html_report(
     isins_payload["RankScore"] = pd.to_numeric(isins_payload.get("RankScore", 0), errors="coerce").fillna(0).astype(int)
     isins_payload = isins_payload.sort_values(["RankScore", "Ticker", "ISIN"], ascending=[False, True, True]).fillna("")
 
-    unique_indices_values = sorted(
-        {
-            str(indices).strip()
-            for indices in isins_payload["Indices"].astype(str).tolist()
-            if str(indices).strip()
-        }
-    )
-    index_options = ["ALL"] + unique_indices_values
+    split_index_values = set()
+    for indices in isins_payload["Indices"].astype(str).tolist():
+        split_index_values.update(i.strip() for i in str(indices).split(";") if i.strip())
+    index_options = ["ALL"] + sorted(split_index_values)
 
     curve_tickers = sorted([t for t in curves.get("Ticker", pd.Series(dtype=str)).astype(str).unique() if t])
     ticker_options = ["ALL"] + curve_tickers
 
-    group_rows = (
-        isins_payload.groupby("Indices", dropna=True)
-        .size()
-        .reset_index(name="IsinCount")
-        .rename(columns={"Indices": "Index"})
-    )
-    group_rows["Index"] = group_rows["Index"].astype(str)
-    group_rows = group_rows[group_rows["Index"].str.len() > 0].sort_values("Index")
+    group_rows = []
+    for index_name in sorted(split_index_values):
+        mask = isins_payload["Indices"].astype(str).str.split(";").apply(
+            lambda parts: index_name in {p.strip() for p in parts if p.strip()}
+        )
+        group_rows.append({"Index": index_name, "IsinCount": int(mask.sum())})
 
     payload = {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
@@ -89,7 +83,7 @@ def build_share_batch_html_report(
         "ticker_options": ticker_options,
         "isins": isins_payload.to_dict(orient="records"),
         "curves": curves.to_dict(orient="records"),
-        "groups": group_rows.to_dict(orient="records"),
+        "groups": group_rows,
         "index_catalog": INDEX_CATALOG,
     }
 
@@ -164,7 +158,8 @@ function render(){
  const useAllIndices = selectedIndices.length === 0 || selectedIndices.length === document.querySelectorAll('.index-cb').length;
 
  const filteredIsins = DATA.isins.filter(r => {
-   const byIndex = useAllIndices || selectedIndices.includes(r.Indices||'');
+   const rowIndices = String(r.Indices||'').split(';').map(v => v.trim()).filter(Boolean);
+   const byIndex = useAllIndices || selectedIndices.some(idxValue => rowIndices.includes(idxValue));
    const byTicker = ticker==='ALL' || (r.Ticker||'')===ticker;
    const byIsin = !isinText || (r.ISIN||'').toUpperCase().includes(isinText);
    return byIndex && byTicker && byIsin;
