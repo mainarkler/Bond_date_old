@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
+from pathlib import Path
 
 import altair as alt
 import matplotlib.dates as mdates
@@ -97,6 +98,17 @@ def init_sell_stres_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+@st.cache_data(show_spinner=False)
+def get_sell_stress_xml_form_config():
+    xml_path = Path(__file__).resolve().parent / "sell_stress_ui" / "schemas" / "sell_stress_form.xml"
+    return load_sell_stress_form_config(xml_path)
+
+
+@st.cache_data(show_spinner=False)
+def get_sell_stress_asset_universe():
+    return load_asset_universe()
 
 
 if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
