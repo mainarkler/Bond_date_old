@@ -24,7 +24,7 @@ from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
-from sell_stress_ui.data import fetch_index_membership_by_isin
+from sell_stress_ui.data import ALL_STOCK_INDEX_CODES, fetch_index_membership_by_isin
 from sell_stress_ui.reporting import build_share_batch_html_report
 from email_compose import render_email_compose_section
 from news.fetcher import NewsFetcher
@@ -2744,7 +2744,7 @@ if st.session_state["active_view"] == "sell_stres":
                         [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
                         ignore_index=True,
                     )[["ISIN", "Q", "DeltaP"]]
-                    ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    ranking_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
                     ranking_df = ranking_df.reindex(
                         columns=["ISIN", "Ticker", "Indices", "RankScore"],
                         fill_value="",
@@ -2776,7 +2776,7 @@ if st.session_state["active_view"] == "sell_stres":
 
                 if meta_rows:
                     meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
-                    ranking_df = fetch_index_membership_by_isin(("IMOEX", "IMOEXBMI", "MSXSM"))
+                    ranking_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
                     ranking_df = ranking_df.reindex(
                         columns=["ISIN", "Ticker", "Indices", "RankScore"],
                         fill_value="",

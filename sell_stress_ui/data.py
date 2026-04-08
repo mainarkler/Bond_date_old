@@ -9,10 +9,51 @@ import requests
 
 INDEX_CODE_MAP = {
     "IMOEX": "IMOEX",
+    "IMOEX2": "IMOEX2",
     "RTS": "RTSI",
+    "RTSI": "RTSI",
+    "IMOEXCNY": "IMOEXCNY",
+    "IMOEXW": "IMOEXW",
+    "MOEXBC": "MOEXBC",
+    "MRBC": "MRBC",
     "MSXSM": "MCXSM",
     "IMOEXBMI": "IMOEXBMI",
+    "MOEXBMI": "MOEXBMI",
+    "RUBMI": "RUBMI",
+    "MCXSM": "MCXSM",
+    "RTSSM": "RTSSM",
+    "MOEXOG": "MOEXOG",
+    "RTSOG": "RTSOG",
+    "MOEXEU": "MOEXEU",
+    "RTSEU": "RTSEU",
+    "MOEXTL": "MOEXTL",
+    "RTSTL": "RTSTL",
+    "MOEXMM": "MOEXMM",
+    "RTSMM": "RTSMM",
+    "MOEXFN": "MOEXFN",
+    "RTSFN": "RTSFN",
+    "MOEXCN": "MOEXCN",
+    "RTSCR": "RTSCR",
+    "MOEXCH": "MOEXCH",
+    "RTSCH": "RTSCH",
+    "MOEXIT": "MOEXIT",
+    "RTSIT": "RTSIT",
+    "MOEXRE": "MOEXRE",
+    "RTSRE": "RTSRE",
+    "MOEXTN": "MOEXTN",
+    "RTSTN": "RTSTN",
+    "MOEX10": "MOEX10",
+    "MOEXINN": "MOEXINN",
+    "MIPO": "MIPO",
 }
+
+ALL_STOCK_INDEX_CODES: tuple[str, ...] = (
+    "IMOEX", "IMOEX2", "RTSI", "IMOEXCNY", "IMOEXW", "MOEXBC", "MRBC", "MOEXBMI",
+    "RUBMI", "MCXSM", "RTSSM", "MOEXOG", "RTSOG", "MOEXEU", "RTSEU", "MOEXTL",
+    "RTSTL", "MOEXMM", "RTSMM", "MOEXFN", "RTSFN", "MOEXCN", "RTSCR", "MOEXCH",
+    "RTSCH", "MOEXIT", "RTSIT", "MOEXRE", "RTSRE", "MOEXTN", "RTSTN", "MOEX10",
+    "MOEXINN", "MIPO",
+)
 
 
 def _to_df(block: dict) -> pd.DataFrame:
@@ -154,7 +195,7 @@ def load_asset_universe(index_codes: Iterable[str] = ("IMOEX", "RTS")) -> pd.Dat
 
 @lru_cache(maxsize=32)
 def fetch_index_membership_by_isin(
-    index_codes: tuple[str, ...] = ("IMOEX", "IMOEXBMI", "MSXSM"),
+    index_codes: tuple[str, ...] = ALL_STOCK_INDEX_CODES,
 ) -> pd.DataFrame:
     """Return mapping ISIN -> index memberships for ranking/export."""
     universe = load_asset_universe(tuple(index_codes))
@@ -166,11 +207,9 @@ def fetch_index_membership_by_isin(
     universe["Ticker"] = universe["symbol"].astype(str).str.upper()
     universe["Indices"] = universe["indices"].astype(str)
 
-    weights = {"IMOEX": 100, "IMOEXBMI": 10, "MSXSM": 1}
-
     def _score(indices: str) -> int:
         items = [i.strip().upper() for i in indices.split(";") if i.strip()]
-        return sum(weights.get(i, 0) for i in items)
+        return len(items)
 
     universe["RankScore"] = universe["Indices"].apply(_score)
     return universe[["ISIN", "Ticker", "Indices", "RankScore"]].drop_duplicates(subset=["ISIN"])
