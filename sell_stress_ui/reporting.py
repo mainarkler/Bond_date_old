@@ -62,18 +62,26 @@ def build_share_batch_html_report(
     isins_payload["RankScore"] = pd.to_numeric(isins_payload.get("RankScore", 0), errors="coerce").fillna(0).astype(int)
     isins_payload = isins_payload.sort_values(["RankScore", "Ticker", "ISIN"], ascending=[False, True, True]).fillna("")
 
-    index_set = set()
-    for indices in isins_payload["Indices"].astype(str):
-        index_set.update(i.strip() for i in indices.split(";") if i.strip())
-    index_options = ["ALL"] + sorted(index_set)
+    unique_indices_values = sorted(
+        {
+            str(indices).strip()
+            for indices in isins_payload["Indices"].astype(str).tolist()
+            if str(indices).strip()
+        }
+    )
+    index_options = ["ALL"] + unique_indices_values
 
     curve_tickers = sorted([t for t in curves.get("Ticker", pd.Series(dtype=str)).astype(str).unique() if t])
     ticker_options = ["ALL"] + curve_tickers
 
-    group_rows = []
-    for index_name in sorted(index_set):
-        mask = isins_payload["Indices"].str.contains(index_name, na=False)
-        group_rows.append({"Index": index_name, "IsinCount": int(mask.sum())})
+    group_rows = (
+        isins_payload.groupby("Indices", dropna=True)
+        .size()
+        .reset_index(name="IsinCount")
+        .rename(columns={"Indices": "Index"})
+    )
+    group_rows["Index"] = group_rows["Index"].astype(str)
+    group_rows = group_rows[group_rows["Index"].str.len() > 0].sort_values("Index")
 
     payload = {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
@@ -81,7 +89,7 @@ def build_share_batch_html_report(
         "ticker_options": ticker_options,
         "isins": isins_payload.to_dict(orient="records"),
         "curves": curves.to_dict(orient="records"),
-        "groups": group_rows,
+        "groups": group_rows.to_dict(orient="records"),
         "index_catalog": INDEX_CATALOG,
     }
 
@@ -142,7 +150,7 @@ function render(){
  const isinText = (isinFilterEl.value||'').trim().toUpperCase();
 
  const filteredIsins = DATA.isins.filter(r => {
-   const byIndex = idx==='ALL' || (r.Indices||'').includes(idx);
+   const byIndex = idx==='ALL' || (r.Indices||'')===idx;
    const byTicker = ticker==='ALL' || (r.Ticker||'')===ticker;
    const byIsin = !isinText || (r.ISIN||'').toUpperCase().includes(isinText);
    return byIndex && byTicker && byIsin;
