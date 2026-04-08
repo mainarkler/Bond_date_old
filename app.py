@@ -2666,37 +2666,59 @@ if st.session_state["active_view"] == "sell_stres":
         )
         use_log = st.checkbox("Логарифмическое приближение", value=True, key="share_q_log")
         q_mode = "log" if use_log else "linear"
+        action_col1, action_col2 = st.columns(2)
+        with action_col1:
+            share_calculate_clicked = st.button("Рассчитать Sell_stres (Share)", key="share_calculate")
+        with action_col2:
+            share_calculate_all_clicked = st.button(
+                "Выгрузить модель по всем акциям",
+                key="share_calculate_all",
+                use_container_width=True,
+            )
 
-        if st.button("Рассчитать Sell_stres (Share)", key="share_calculate"):
+        if share_calculate_clicked or share_calculate_all_clicked:
             entries = []
             unresolved_identifiers = []
-            if use_q_from_list:
-                raw_lines = [line.strip() for line in isin_q_input.splitlines() if line.strip()]
-                for line in raw_lines:
-                    parts = [p.strip() for p in re.split(r"[|;	,]+", line) if p.strip()]
-                    if not parts:
-                        continue
-                    identifier = parts[0].upper()
-                    q_val = parse_number(parts[1]) if len(parts) > 1 else None
-                    resolved_isin = resolve_share_identifier_to_isin(identifier)
-                    if not resolved_isin:
-                        unresolved_identifiers.append(identifier)
-                        continue
-                    if q_val is None or q_val <= 0:
-                        st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
-                        continue
-                    entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_val)})
+            if share_calculate_all_clicked:
+                ranking_all_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
+                ranking_all_df = ranking_all_df.reindex(columns=["ISIN"], fill_value="")
+                all_isins = sorted(
+                    {
+                        str(isin).strip().upper()
+                        for isin in ranking_all_df["ISIN"].tolist()
+                        if str(isin).strip()
+                    }
+                )
+                entries = [{"ISIN": isin, "Q_MAX": int(q_max)} for isin in all_isins]
+                st.info(f"Подготовлено бумаг для полного расчёта: {len(entries)}")
             else:
-                raw_text = isin_input.strip()
-                if raw_text:
-                    identifiers = re.split(r"[\s,;]+", raw_text)
-                    identifiers = [i.strip().upper() for i in identifiers if i.strip()]
-                    for identifier in identifiers:
+                if use_q_from_list:
+                    raw_lines = [line.strip() for line in isin_q_input.splitlines() if line.strip()]
+                    for line in raw_lines:
+                        parts = [p.strip() for p in re.split(r"[|;	,]+", line) if p.strip()]
+                        if not parts:
+                            continue
+                        identifier = parts[0].upper()
+                        q_val = parse_number(parts[1]) if len(parts) > 1 else None
                         resolved_isin = resolve_share_identifier_to_isin(identifier)
                         if not resolved_isin:
                             unresolved_identifiers.append(identifier)
                             continue
-                        entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_max)})
+                        if q_val is None or q_val <= 0:
+                            st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
+                            continue
+                        entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_val)})
+                else:
+                    raw_text = isin_input.strip()
+                    if raw_text:
+                        identifiers = re.split(r"[\s,;]+", raw_text)
+                        identifiers = [i.strip().upper() for i in identifiers if i.strip()]
+                        for identifier in identifiers:
+                            resolved_isin = resolve_share_identifier_to_isin(identifier)
+                            if not resolved_isin:
+                                unresolved_identifiers.append(identifier)
+                                continue
+                            entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_max)})
 
             if unresolved_identifiers:
                 st.warning(
@@ -2734,7 +2756,7 @@ if st.session_state["active_view"] == "sell_stres":
                             st.error(f"{isin}: {exc}")
                         progress_bar.progress(idx / len(entries))
 
-                show_tables = len(entries) == 1 and not use_q_from_list
+                show_tables = len(entries) == 1 and not use_q_from_list and not share_calculate_all_clicked
                 st.session_state["sell_stres_share_show_tables"] = show_tables
                 st.session_state["sell_stres_share_table_results"] = results if show_tables else {}
 
