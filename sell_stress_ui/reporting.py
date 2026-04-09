@@ -108,9 +108,13 @@ th { background: #f4f6f8; text-align: left; }
 </style></head><body>
 <h2>Sell_stres Share Batch Report</h2><p>Generated at: <span id="generatedAt"></span></p>
 <div class="row">
-<label><b>Индексы (множественный выбор):</b></label>
-<label style="margin-right:10px;"><input type="checkbox" id="indexAll" checked /> All</label>
-<div id="indexChecklist"></div>
+<details style="min-width:420px;">
+  <summary><b>Индексы (выпадающий список с галочками)</b></summary>
+  <div style="margin-top:6px;">
+    <label style="margin-right:10px;"><input type="checkbox" id="indexAll" checked /> All</label>
+    <div id="indexChecklist" style="margin-top:6px;"></div>
+  </div>
+</details>
 <label>Тикер:</label><select id="tickerFilter"></select>
 <label>ISIN:</label><input id="isinFilter" placeholder="RU..." />
 </div>
@@ -190,12 +194,12 @@ function render(){
  const formatMdtv = (v) => {
    const n = Number(v);
    if (!Number.isFinite(n)) return '-';
-   const inThousands = Math.round(n / 1000.0);
-   return inThousands.toLocaleString('ru-RU');
+   const inMillions = Math.round(n / 1000000.0);
+   return inMillions.toLocaleString('ru-RU');
  };
  filteredIsinsFinal.forEach(r=>{
    const card=document.createElement('div'); card.className='meta-card';
-   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (тыс. руб): ${formatMdtv(r.MDTV)}`;
+   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (млн руб): ${formatMdtv(r.MDTV)}`;
    metaBlock.appendChild(card);
  });
 
