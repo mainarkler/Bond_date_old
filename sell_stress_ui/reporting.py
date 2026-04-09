@@ -174,9 +174,9 @@ function render(){
    const key = r.Ticker || r.ISIN;
    if(!tracesMap.has(key)) tracesMap.set(key, {x:[], y:[], name:key, mode:'lines+markers', type:'scatter'});
    tracesMap.get(key).x.push(Number(r.Q) / 1000000.0);
-   tracesMap.get(key).y.push(Number(r.DeltaP) * 100.0);
+   tracesMap.get(key).y.push(Number(r.DeltaP));
  });
- Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализацию позиции в рынок (Млн. руб)'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
+ Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализацию позиции в рынок (Млн руб.)'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
 
  const metaBlock = document.getElementById('metaBlock'); metaBlock.innerHTML='';
  filteredIsinsFinal.forEach(r=>{
