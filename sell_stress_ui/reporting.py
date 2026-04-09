@@ -108,7 +108,9 @@ th { background: #f4f6f8; text-align: left; }
 </style></head><body>
 <h2>Sell_stres Share Batch Report</h2><p>Generated at: <span id="generatedAt"></span></p>
 <div class="row">
-<label><b>Индексы (множественный выбор):</b></label><div id="indexChecklist"></div>
+<label><b>Индексы (множественный выбор):</b></label>
+<label style="margin-right:10px;"><input type="checkbox" id="indexAll" checked /> All</label>
+<div id="indexChecklist"></div>
 <label>Тикер:</label><select id="tickerFilter"></select>
 <label>ISIN:</label><input id="isinFilter" placeholder="RU..." />
 </div>
@@ -124,6 +126,7 @@ th { background: #f4f6f8; text-align: left; }
 const DATA = __PAYLOAD__;
 document.getElementById('generatedAt').textContent = DATA.generated_at;
 const indexChecklistEl = document.getElementById('indexChecklist');
+const indexAllEl = document.getElementById('indexAll');
 const tickerFilterEl = document.getElementById('tickerFilter');
 const isinFilterEl = document.getElementById('isinFilter');
 DATA.index_options
@@ -155,7 +158,8 @@ function render(){
  const selectedIndices = Array.from(document.querySelectorAll('.index-cb:checked')).map(el => el.value);
  const ticker = tickerFilterEl.value || 'ALL';
  const isinText = (isinFilterEl.value||'').trim().toUpperCase();
- const useAllIndices = selectedIndices.length === 0 || selectedIndices.length === document.querySelectorAll('.index-cb').length;
+ const totalIndexCount = document.querySelectorAll('.index-cb').length;
+ const useAllIndices = indexAllEl.checked || selectedIndices.length === 0 || selectedIndices.length === totalIndexCount;
 
  const filteredIsins = DATA.isins.filter(r => {
    const rowIndices = String(r.Indices||'').split(';').map(v => v.trim()).filter(Boolean);
@@ -174,14 +178,24 @@ function render(){
    const key = r.Ticker || r.ISIN;
    if(!tracesMap.has(key)) tracesMap.set(key, {x:[], y:[], name:key, mode:'lines+markers', type:'scatter'});
    tracesMap.get(key).x.push(Number(r.Q) / 1000000.0);
-   tracesMap.get(key).y.push(Number(r.DeltaP));
+   tracesMap.get(key).y.push(Number(r.DeltaP) * 100.0);
  });
- Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализацию позиции в рынок (Млн руб.)'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
+ Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализацию позиции в рынок (Млн. руб)'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
 
  const metaBlock = document.getElementById('metaBlock'); metaBlock.innerHTML='';
+ const formatSigma = (v) => {
+   const n = Number(v);
+   return Number.isFinite(n) ? n.toFixed(3) : '-';
+ };
+ const formatMdtv = (v) => {
+   const n = Number(v);
+   if (!Number.isFinite(n)) return '-';
+   const inThousands = Math.round(n / 1000.0);
+   return inThousands.toLocaleString('ru-RU');
+ };
  filteredIsinsFinal.forEach(r=>{
    const card=document.createElement('div'); card.className='meta-card';
-   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${r.Sigma || '-'}<br>MDTV: ${r.MDTV || '-'}`;
+   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (тыс. руб): ${formatMdtv(r.MDTV)}`;
    metaBlock.appendChild(card);
  });
 
@@ -199,7 +213,16 @@ function render(){
  DATA.index_catalog.forEach(c=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${c.name}</td><td>${c.code}</td>`; catBody.appendChild(tr); });
 }
 
-document.querySelectorAll('.index-cb').forEach(el=>el.addEventListener('change', render));
+document.querySelectorAll('.index-cb').forEach(el=>el.addEventListener('change', () => {
+  const total = document.querySelectorAll('.index-cb').length;
+  const checked = document.querySelectorAll('.index-cb:checked').length;
+  indexAllEl.checked = checked === total;
+  render();
+}));
+indexAllEl.addEventListener('change', () => {
+  document.querySelectorAll('.index-cb').forEach(el => { el.checked = indexAllEl.checked; });
+  render();
+});
 tickerFilterEl.addEventListener('change', render);
 isinFilterEl.addEventListener('input', render);
 render();
