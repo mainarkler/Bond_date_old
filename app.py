@@ -847,6 +847,57 @@ def resolve_market_security_profile(identifier: str, market_kind: str) -> dict:
     if not normalized:
         raise ValueError("Пустой идентификатор")
 
+    direct_rows: list[list[object]] = []
+    direct_columns: list[str] = []
+    try:
+        direct_response = request_get(
+            f"https://iss.moex.com/iss/securities/{normalized}.json",
+            params={"iss.meta": "off", "iss.only": "securities"},
+            timeout=200,
+        )
+        direct_payload = direct_response.json().get("securities", {})
+        direct_rows = direct_payload.get("data", []) or []
+        direct_columns = direct_payload.get("columns", []) or []
+    except Exception:
+        direct_rows = []
+        direct_columns = []
+
+    if direct_rows:
+        df_direct = pd.DataFrame(direct_rows, columns=direct_columns)
+        if "group" in df_direct.columns:
+            if market_kind == "shares":
+                share_mask = (
+                    df_direct["group"].astype(str).str.contains("share|stock|etf", case=False, na=False)
+                )
+                df_direct = df_direct[share_mask]
+            else:
+                df_direct = df_direct[df_direct["group"].astype(str).str.contains("bond", case=False, na=False)]
+        if not df_direct.empty:
+            row = df_direct.iloc[0]
+            secid = str(row.get("secid", "")).strip().upper()
+            if secid:
+                return {
+                    "input": identifier,
+                    "secid": secid,
+                    "isin": str(row.get("isin", "")).strip().upper(),
+                    "shortname": str(row.get("shortname", "")).strip(),
+                    "emitent_title": str(row.get("emitent_title", "")).strip(),
+                }
+
+    if isin_format_valid(normalized):
+        try:
+            secid_from_isin = isin_to_secid(normalized)
+            if secid_from_isin:
+                return {
+                    "input": identifier,
+                    "secid": str(secid_from_isin).strip().upper(),
+                    "isin": normalized,
+                    "shortname": "",
+                    "emitent_title": "",
+                }
+        except Exception:
+            pass
+
     response = request_get(
         "https://iss.moex.com/iss/securities.json",
         params={"q": normalized, "iss.meta": "off"},
@@ -859,7 +910,7 @@ def resolve_market_security_profile(identifier: str, market_kind: str) -> dict:
 
     if "group" in df.columns:
         if market_kind == "shares":
-            df_filtered = df[df["group"].astype(str).str.contains("share", case=False, na=False)]
+            df_filtered = df[df["group"].astype(str).str.contains("share|stock|etf", case=False, na=False)]
         else:
             df_filtered = df[df["group"].astype(str).str.contains("bond", case=False, na=False)]
         if not df_filtered.empty:
@@ -937,30 +988,58 @@ def load_market_history_values(secid: str, market_kind: str, start_date: str, en
 
 
 def load_market_wide_history_values(market_kind: str, start_date: str, end_date: str) -> pd.DataFrame:
-    start = 0
-    all_rows = []
-    columns = []
-    while True:
-        url = f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/securities.json"
-        response = request_get(
-            url,
-            params={
-                "from": start_date,
-                "till": end_date,
-                "start": start,
-                "iss.only": "history",
-                "iss.meta": "off",
-                "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID",
-            },
+    boards: list[str] = []
+    try:
+        boards_response = request_get(
+            f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/boards.json",
+            params={"iss.meta": "off", "iss.only": "boards", "boards.columns": "boardid,is_traded"},
             timeout=200,
         )
-        payload = response.json().get("history", {})
-        rows = payload.get("data", [])
-        columns = payload.get("columns", columns)
-        if not rows:
-            break
-        all_rows.extend(rows)
-        start += len(rows)
+        boards_payload = boards_response.json().get("boards", {})
+        boards_df = pd.DataFrame(boards_payload.get("data", []), columns=boards_payload.get("columns", []))
+        if not boards_df.empty and "boardid" in boards_df.columns:
+            if "is_traded" in boards_df.columns:
+                boards_df["is_traded"] = pd.to_numeric(boards_df["is_traded"], errors="coerce").fillna(0)
+                boards_df = boards_df[boards_df["is_traded"] > 0]
+            boards = [
+                str(board).strip().upper()
+                for board in boards_df["boardid"].tolist()
+                if str(board).strip()
+            ]
+    except Exception:
+        boards = []
+
+    if not boards:
+        boards = ["TQBR"] if market_kind == "shares" else ["TQCB"]
+
+    all_rows: list[list[object]] = []
+    columns: list[str] = []
+    for board in boards:
+        start = 0
+        while True:
+            url = (
+                f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/"
+                f"boards/{board}/securities.json"
+            )
+            response = request_get(
+                url,
+                params={
+                    "from": start_date,
+                    "till": end_date,
+                    "start": start,
+                    "iss.only": "history",
+                    "iss.meta": "off",
+                    "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID,BOARDID",
+                },
+                timeout=200,
+            )
+            payload = response.json().get("history", {})
+            rows = payload.get("data", [])
+            columns = payload.get("columns", columns)
+            if not rows:
+                break
+            all_rows.extend(rows)
+            start += len(rows)
 
     if not all_rows:
         return pd.DataFrame(columns=["TRADEDATE", "VALUE", "NUMTRADES", "VOLUME", "SECID", "SHORTNAME"])
@@ -3312,7 +3391,45 @@ if st.session_state["active_view"] == "moex_turnover":
                     )
                     st.dataframe(board_df, use_container_width=True)
                 else:
+                    board_df = pd.DataFrame(columns=["input", "SECID", "board", "turnover"])
                     st.info("Нет данных по boards за указанный период.")
+
+                report_export_df = report_df.copy()
+                board_export_df = board_df.copy()
+                report_csv = report_export_df.to_csv(index=False).encode("utf-8-sig")
+                board_csv = board_export_df.to_csv(index=False).encode("utf-8-sig")
+
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    report_export_df.to_excel(writer, index=False, sheet_name="turnover_totals")
+                    board_export_df.to_excel(writer, index=False, sheet_name="turnover_by_board")
+                excel_buffer.seek(0)
+
+                st.markdown("### Скачать отчеты")
+                download_col_left, download_col_right = st.columns(2)
+                with download_col_left:
+                    st.download_button(
+                        label="💾 Оборот по инструментам (CSV)",
+                        data=report_csv,
+                        file_name=f"moex_turnover_totals_{start_date_input}_{end_date_input}.csv",
+                        mime="text/csv",
+                        key="moex_turnover_totals_csv",
+                    )
+                    st.download_button(
+                        label="💾 Оборот по boards (CSV)",
+                        data=board_csv,
+                        file_name=f"moex_turnover_boards_{start_date_input}_{end_date_input}.csv",
+                        mime="text/csv",
+                        key="moex_turnover_boards_csv",
+                    )
+                with download_col_right:
+                    st.download_button(
+                        label="💾 Полный отчет (Excel)",
+                        data=excel_buffer.getvalue(),
+                        file_name=f"moex_turnover_{start_date_input}_{end_date_input}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="moex_turnover_excel",
+                    )
 
             if errors:
                 st.warning("Не удалось посчитать часть инструментов:")
@@ -3352,6 +3469,12 @@ if st.session_state["active_view"] == "market_statistics":
         "Считать статистику по всем бумагам выбранного рынка (без списка ISIN/SECID)",
         value=False,
         key="market_statistics_all_papers",
+    )
+    exclude_etf = st.checkbox(
+        "Исключать ETF из расчета",
+        value=False,
+        key="market_statistics_exclude_etf",
+        help="Фильтрует инструменты, где название содержит ETF (например, LQDT ETF).",
     )
 
     emitent_cache_key = f"market_statistics_emitent_map_{market_kind}"
@@ -3479,6 +3602,12 @@ if st.session_state["active_view"] == "market_statistics":
 
             if full_rows:
                 combined_df = pd.concat(full_rows, ignore_index=True)
+                if exclude_etf:
+                    shortname_series = combined_df.get("SHORTNAME", pd.Series("", index=combined_df.index)).astype(str)
+                    combined_df = combined_df[~shortname_series.str.contains(r"\bETF\b", case=False, na=False)]
+                    if combined_df.empty:
+                        st.error("После исключения ETF данные отсутствуют.")
+                        st.stop()
                 combined_df = combined_df.sort_values(["TRADEDATE", "SECID"])
 
                 st.success("Статистика рассчитана")
