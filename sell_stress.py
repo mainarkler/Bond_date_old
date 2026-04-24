@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Callable
@@ -10,13 +11,13 @@ import requests
 
 BASE_SHARE_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/shares/securities"
 BASE_BOND_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/bonds/securities"
+BASE_ISS_URL = "https://iss.moex.com/iss"
 
 MAX_PAGINATION_PAGES = 200
 MAX_SECURITIES_PER_RUN = 1000
 MAX_Q_POINTS_PER_SECURITY = 1000
 FREE_FLOAT_POINT_STEP_PCT = 0.1
 
-_FREEFLOAT_CACHE: dict[str, float] | None = None
 _ISSUESIZE_CACHE: dict[str, float] = {}
 
 
@@ -109,6 +110,112 @@ class MoexHTMLFreeFloatScraper:
         return result
 
 
+class MoexISSClient:
+    """JSON-only ISS helper with retries."""
+
+    def __init__(self, request_get: Callable, timeout: int = 10, retries: int = 3, pause: float = 0.2):
+        self.request_get = request_get
+        self.timeout = timeout
+        self.retries = retries
+        self.pause = pause
+
+    def _get(self, path: str) -> dict:
+        url = f"{BASE_ISS_URL}{path}"
+        for _ in range(self.retries):
+            try:
+                response = self.request_get(url, timeout=self.timeout)
+                return response.json()
+            except Exception:
+                time.sleep(self.pause)
+        return {}
+
+    def get_description(self, secid: str) -> dict:
+        data = self._get(f"/securities/{secid}.json?iss.only=description&iss.meta=off")
+        return self._kv(data, "description")
+
+    def get_statistics(self, secid: str) -> dict:
+        data = self._get(
+            f"/statistics/engines/stock/markets/shares/securities/{secid}.json?iss.meta=off"
+        )
+        return self._table(data, "securities")
+
+    def _table(self, data: dict, block: str) -> dict:
+        if block not in data:
+            return {}
+        cols = data[block].get("columns", [])
+        rows = data[block].get("data", [])
+        if not rows:
+            return {}
+        return dict(zip(cols, rows[0]))
+
+    def _kv(self, data: dict, block: str) -> dict:
+        if block not in data:
+            return {}
+        out = {}
+        for row in data[block].get("data", []):
+            if len(row) >= 3:
+                name, _, value = row[:3]
+                out[name] = value
+        return out
+
+
+class FreeFloatResolverV2:
+    """Multi-source resolver: ISS description -> ISS statistics -> HTML fallback."""
+
+    def __init__(self, client: MoexISSClient, html_scraper: MoexHTMLFreeFloatScraper, ttl: int = 86400):
+        self.client = client
+        self.html_scraper = html_scraper
+        self.ttl = ttl
+        self.cache: dict[str, tuple[float, dict]] = {}
+
+    def get(self, secid: str) -> dict:
+        secid_norm = str(secid).strip().upper()
+        now = time.time()
+        if secid_norm in self.cache:
+            ts, payload = self.cache[secid_norm]
+            if now - ts < self.ttl:
+                return payload
+
+        desc = self.client.get_description(secid_norm)
+        ff = self._parse(desc.get("FREE_FLOAT"))
+        if ff is not None:
+            return self._store(secid_norm, ff, "iss_description")
+
+        stats = self.client.get_statistics(secid_norm)
+        ff = self._parse(stats.get("FREE_FLOAT"))
+        if ff is not None:
+            return self._store(secid_norm, ff, "iss_statistics")
+
+        html_ff = self.html_scraper.fetch_index_page()
+        if secid_norm in html_ff:
+            ff = self._parse(html_ff[secid_norm])
+            if ff is not None:
+                return self._store(secid_norm, ff, "moex_html_index")
+
+        return self._store(secid_norm, None, "unknown")
+
+    def _parse(self, value) -> float | None:
+        try:
+            parsed = float(value)
+            if parsed > 1:
+                parsed /= 100.0
+            if not np.isfinite(parsed) or parsed <= 0:
+                return None
+            return parsed
+        except Exception:
+            return None
+
+    def _store(self, secid: str, value: float | None, source: str) -> dict:
+        payload = {
+            "secid": secid,
+            "free_float": value,
+            "source": source,
+            "updated_at": time.time(),
+        }
+        self.cache[secid] = (time.time(), payload)
+        return payload
+
+
 def build_q_vector(
     mode: str,
     q_max: float,
@@ -160,14 +267,14 @@ def load_issuesize(request_get: Callable, secid: str) -> float:
     return _ISSUESIZE_CACHE[secid_norm]
 
 
-def load_freefloat(scraper: MoexHTMLFreeFloatScraper, secid: str) -> float:
-    global _FREEFLOAT_CACHE
-    if _FREEFLOAT_CACHE is None:
-        _FREEFLOAT_CACHE = scraper.fetch_index_page()
-    value = (_FREEFLOAT_CACHE or {}).get(str(secid).strip().upper())
-    if value is None or not np.isfinite(value) or value <= 0:
-        raise ValueError(f"Не найден free-float для {secid}")
-    return float(value)
+def resolve_freefloat(request_get: Callable, secid: str) -> tuple[float, str]:
+    client = MoexISSClient(request_get=request_get)
+    resolver = FreeFloatResolverV2(client=client, html_scraper=MoexHTMLFreeFloatScraper())
+    payload = resolver.get(secid)
+    value = payload.get("free_float")
+    if value is None:
+        raise ValueError(f"Не найден free-float для {secid} (source={payload.get('source')})")
+    return float(value), str(payload.get("source", "unknown"))
 
 
 def generate_q(mode: str, q_max: int, points: int) -> np.ndarray:
@@ -246,7 +353,7 @@ def calculate_share_delta_p(
     if not np.isfinite(close_price) or close_price <= 0:
         raise ValueError(f"Некорректная цена CLOSE для {secid}: {close_price}")
 
-    freefloat = load_freefloat(ff_scraper, secid)
+    freefloat, ff_source = resolve_freefloat(request_get=request_get, secid=secid)
     issuesize = load_issuesize(request_get, secid)
     shares_in_ff = issuesize * freefloat
     ff_market_cap_rub = shares_in_ff * close_price
@@ -266,6 +373,7 @@ def calculate_share_delta_p(
         "MDTV": float(mdtv),
         "Close": close_price,
         "FreeFloat": freefloat,
+        "FreeFloatSource": ff_source,
         "IssueSize": float(issuesize),
         "FFShares": float(shares_in_ff),
         "FFMcapRUB": float(ff_market_cap_rub),
