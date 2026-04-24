@@ -14,7 +14,7 @@ import sell_stress as ss
 class SellStressRequest:
     isin: str
     secid: str
-    volume: int
+    volume: float
     c_value: float
     date_from: str
     q_mode: str
@@ -30,12 +30,12 @@ def _request_get(url: str, params: dict | None = None, timeout: int = 60):
 def _calculate_cached(
     isin: str,
     secid: str,
-    volume: int,
+    volume: float,
     c_value: float,
     date_from: str,
     q_mode: str,
 ) -> tuple[pd.DataFrame, dict]:
-    q_vector = ss.build_q_vector(mode=q_mode, q_max=volume)
+    q_vector = ss.build_q_vector(mode=q_mode, q_max=float(volume))
     return ss.calculate_share_delta_p(
         request_get=_request_get,
         isin_to_secid=lambda _isin: secid,
@@ -51,7 +51,7 @@ def calculate_price_impact(req: SellStressRequest) -> tuple[pd.DataFrame, dict]:
     delta_df, meta = _calculate_cached(
         isin=req.isin,
         secid=req.secid,
-        volume=int(req.volume),
+        volume=float(req.volume),
         c_value=float(req.c_value),
         date_from=req.date_from,
         q_mode=req.q_mode,

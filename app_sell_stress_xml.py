@@ -52,7 +52,13 @@ def run() -> None:
     selected_label = st.selectbox(cfg.fields["asset_selector"].label, options=list(asset_options.keys()))
     selected = asset_options[selected_label]
 
-    volume = st.number_input(cfg.fields["volume"].label, min_value=1, value=1_000_000_000, step=1_000_000)
+    volume = st.number_input(
+        f'{cfg.fields["volume"].label} (% от free-float капитализации)',
+        min_value=0.1,
+        max_value=100.0,
+        value=10.0,
+        step=0.1,
+    )
     c_value = st.number_input(cfg.fields["c_value"].label, min_value=0.0, max_value=1.0, value=1.0, step=0.05)
     date_from = st.date_input(cfg.fields["date_from"].label, value=date(2024, 1, 1))
     q_mode = st.selectbox(cfg.fields["q_mode"].label, options=["log", "linear"], index=0)
@@ -65,7 +71,7 @@ def run() -> None:
         req = SellStressRequest(
             isin=selected.isin,
             secid=selected.secid,
-            volume=int(volume),
+            volume=float(volume),
             c_value=float(c_value),
             date_from=date_from.strftime("%Y-%m-%d"),
             q_mode=q_mode,
@@ -82,7 +88,7 @@ def run() -> None:
             alt.Chart(result_df)
             .mark_line(point=True)
             .encode(
-                x=alt.X("Q:Q", title="Volume sold"),
+                x=alt.X("Q:Q", title="% от free-float капитализации"),
                 y=alt.Y("PriceAfterSell:Q", title="Price after sell (baseline=100)"),
                 tooltip=["Q", "DeltaP", "DrawdownPct", "PriceAfterSell"],
             )
