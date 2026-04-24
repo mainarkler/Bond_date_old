@@ -6,6 +6,7 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+import requests
 
 BASE_SHARE_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/shares/securities"
 BASE_BOND_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/bonds/securities"
@@ -13,6 +14,10 @@ BASE_BOND_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/
 MAX_PAGINATION_PAGES = 200
 MAX_SECURITIES_PER_RUN = 1000
 MAX_Q_POINTS_PER_SECURITY = 1000
+FREE_FLOAT_POINT_STEP_PCT = 0.1
+
+_FREEFLOAT_CACHE: dict[str, float] | None = None
+_ISSUESIZE_CACHE: dict[str, float] = {}
 
 
 class PaginationLimitError(RuntimeError):
@@ -56,16 +61,71 @@ def guarded_paginated_history_loader(
     return pd.DataFrame(rows_all, columns=columns)
 
 
-def build_q_vector(mode: str, q_max: int, q_step: int = 10_000, q_points: int = 200) -> np.ndarray:
-    q_max = int(q_max)
+class MoexHTMLFreeFloatScraper:
+    """
+    Fallback HTML extractor for Free Float tables (MOEX index pages).
+    Uses headers + session to bypass basic firewall protections.
+    """
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+                "Referer": "https://www.moex.com/",
+            }
+        )
+
+    def fetch_index_page(self, url: str = "https://www.moex.com/a844") -> dict[str, float]:
+        """
+        Extracts Free-Float table from MOEX HTML index page.
+        """
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            html = response.text
+        except Exception:
+            return {}
+
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        result: dict[str, float] = {}
+
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cols = [c.text.strip() for c in row.find_all(["td", "th"])]
+                if len(cols) < 5:
+                    continue
+                secid = cols[1] if len(cols) > 1 else None
+                ff_raw = cols[4] if len(cols) > 4 else None
+                if not secid or not ff_raw or "%" not in ff_raw:
+                    continue
+                try:
+                    result[secid.upper()] = float(ff_raw.replace("%", "").replace(",", ".")) / 100.0
+                except Exception:
+                    continue
+        return result
+
+
+def build_q_vector(
+    mode: str,
+    q_max: float,
+    q_step: float = FREE_FLOAT_POINT_STEP_PCT,
+    q_points: int = 200,
+) -> np.ndarray:
+    q_max = float(q_max)
     if q_max <= 0:
         raise ValueError("Q должен быть положительным")
+    if q_max > 100:
+        raise ValueError("Q не может быть больше 100% free-float")
 
     if mode == "linear":
-        q_vector = np.arange(1, q_max + q_step, q_step, dtype=np.int64)
+        q_vector = np.arange(FREE_FLOAT_POINT_STEP_PCT, q_max + q_step, q_step, dtype=np.float64)
     elif mode == "log":
-        q = np.logspace(0, np.log10(q_max), q_points)
-        q_vector = np.unique(np.round(q).astype(np.int64))
+        q = np.logspace(np.log10(FREE_FLOAT_POINT_STEP_PCT), np.log10(q_max), q_points)
+        q_vector = np.unique(np.round(q, 3))
     else:
         raise ValueError("Режим Q должен быть 'linear' или 'log'")
 
@@ -76,6 +136,38 @@ def build_q_vector(mode: str, q_max: int, q_step: int = 10_000, q_points: int = 
         )
 
     return q_vector
+
+
+def load_issuesize(request_get: Callable, secid: str) -> float:
+    secid_norm = str(secid).strip().upper()
+    if secid_norm in _ISSUESIZE_CACHE:
+        return _ISSUESIZE_CACHE[secid_norm]
+
+    url = f"https://iss.moex.com/iss/securities/{secid_norm}.json"
+    response = request_get(url, params={"iss.meta": "off"}, timeout=200)
+    payload = response.json()
+    securities = payload.get("securities", {})
+    rows = securities.get("data", [])
+    cols = securities.get("columns", [])
+    if not rows or "ISSUESIZE" not in cols:
+        raise ValueError(f"Не удалось получить ISSUESIZE для {secid_norm}")
+
+    issuesize = pd.to_numeric(rows[0][cols.index("ISSUESIZE")], errors="coerce")
+    if not np.isfinite(issuesize) or float(issuesize) <= 0:
+        raise ValueError(f"Некорректный ISSUESIZE для {secid_norm}: {issuesize}")
+
+    _ISSUESIZE_CACHE[secid_norm] = float(issuesize)
+    return _ISSUESIZE_CACHE[secid_norm]
+
+
+def load_freefloat(scraper: MoexHTMLFreeFloatScraper, secid: str) -> float:
+    global _FREEFLOAT_CACHE
+    if _FREEFLOAT_CACHE is None:
+        _FREEFLOAT_CACHE = scraper.fetch_index_page()
+    value = (_FREEFLOAT_CACHE or {}).get(str(secid).strip().upper())
+    if value is None or not np.isfinite(value) or value <= 0:
+        raise ValueError(f"Не найден free-float для {secid}")
+    return float(value)
 
 
 def generate_q(mode: str, q_max: int, points: int) -> np.ndarray:
@@ -118,6 +210,7 @@ def calculate_share_delta_p(
     q_values: np.ndarray,
 ) -> tuple[pd.DataFrame, dict]:
     secid = isin_to_secid(isin)
+    ff_scraper = MoexHTMLFreeFloatScraper()
     df = guarded_paginated_history_loader(BASE_SHARE_HISTORY_URL, request_get, secid)
     df = df[["TRADEDATE", "SECID", "HIGH", "LOW", "CLOSE", "VALUE"]].copy()
     df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"])
@@ -149,9 +242,34 @@ def calculate_share_delta_p(
     if not np.isfinite(mdtv) or mdtv <= 0:
         raise ValueError(f"Некорректный MDTV = {mdtv}")
 
-    delta_p = c_value * sigma * np.sqrt(q_values / mdtv)
-    result = pd.DataFrame({"Q": q_values, "DeltaP": delta_p})
-    meta = {"ISIN": isin, "T": t_len, "Sigma": float(sigma), "MDTV": float(mdtv)}
+    close_price = float(df_day["CLOSE"].iloc[-1])
+    if not np.isfinite(close_price) or close_price <= 0:
+        raise ValueError(f"Некорректная цена CLOSE для {secid}: {close_price}")
+
+    freefloat = load_freefloat(ff_scraper, secid)
+    issuesize = load_issuesize(request_get, secid)
+    shares_in_ff = issuesize * freefloat
+    ff_market_cap_rub = shares_in_ff * close_price
+    if not np.isfinite(ff_market_cap_rub) or ff_market_cap_rub <= 0:
+        raise ValueError(f"Некорректная FF капитализация для {secid}: {ff_market_cap_rub}")
+
+    q_pct_ff = pd.to_numeric(q_values, errors="coerce").astype(float)
+    q_rub = ff_market_cap_rub * (q_pct_ff / 100.0)
+
+    delta_p = c_value * sigma * np.sqrt(q_rub / mdtv)
+    result = pd.DataFrame({"Q": q_pct_ff, "Q_RUB": q_rub, "DeltaP": delta_p})
+    meta = {
+        "ISIN": isin,
+        "SECID": secid,
+        "T": t_len,
+        "Sigma": float(sigma),
+        "MDTV": float(mdtv),
+        "Close": close_price,
+        "FreeFloat": freefloat,
+        "IssueSize": float(issuesize),
+        "FFShares": float(shares_in_ff),
+        "FFMcapRUB": float(ff_market_cap_rub),
+    }
     return result, meta
 
 
