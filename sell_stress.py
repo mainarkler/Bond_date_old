@@ -355,6 +355,7 @@ def calculate_share_delta_p(
     preloaded_freefloat: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     secid = isin_to_secid(isin)
+    ff_scraper = MoexHTMLFreeFloatScraper()
     df = guarded_paginated_history_loader(BASE_SHARE_HISTORY_URL, request_get, secid)
     df = df[["TRADEDATE", "SECID", "HIGH", "LOW", "CLOSE", "VALUE"]].copy()
     df["TRADEDATE"] = pd.to_datetime(df["TRADEDATE"])
