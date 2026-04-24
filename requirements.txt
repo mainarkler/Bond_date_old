@@ -9,6 +9,7 @@ matplotlib
 numpy
 yfinance
 scipy
+beautifulsoup4
 
 psycopg2-binary
 
