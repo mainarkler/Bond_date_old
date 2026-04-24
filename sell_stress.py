@@ -113,8 +113,7 @@ class MoexHTMLFreeFloatScraper:
 class MoexISSClient:
     """JSON-only ISS helper with retries."""
 
-    def __init__(self, request_get: Callable, timeout: int = 10, retries: int = 3, pause: float = 0.2):
-        self.request_get = request_get
+    def __init__(self, timeout: int = 5, retries: int = 3, pause: float = 0.2):
         self.timeout = timeout
         self.retries = retries
         self.pause = pause
@@ -123,7 +122,9 @@ class MoexISSClient:
         url = f"{BASE_ISS_URL}{path}"
         for _ in range(self.retries):
             try:
-                response = self.request_get(url, timeout=self.timeout)
+                response = requests.get(url, timeout=self.timeout)
+                response.raise_for_status()
+                time.sleep(self.pause)
                 return response.json()
             except Exception:
                 time.sleep(self.pause)
@@ -167,6 +168,8 @@ class FreeFloatResolverV2:
         self.html_scraper = html_scraper
         self.ttl = ttl
         self.cache: dict[str, tuple[float, dict]] = {}
+        self.external_ff_db: dict[str, float] = {}
+        self.index_membership: dict[str, list[str]] = {}
 
     def get(self, secid: str) -> dict:
         secid_norm = str(secid).strip().upper()
@@ -177,22 +180,50 @@ class FreeFloatResolverV2:
                 return payload
 
         desc = self.client.get_description(secid_norm)
-        ff = self._parse(desc.get("FREE_FLOAT"))
-        if ff is not None:
-            return self._store(secid_norm, ff, "iss_description")
-
         stats = self.client.get_statistics(secid_norm)
-        ff = self._parse(stats.get("FREE_FLOAT"))
+        ff = self._parse(desc.get("FREE_FLOAT")) or self._parse(stats.get("FREE_FLOAT"))
+        issuesize = desc.get("ISSUESIZE")
         if ff is not None:
-            return self._store(secid_norm, ff, "iss_statistics")
+            return self._store(secid_norm, ff, issuesize)
 
         html_ff = self.html_scraper.fetch_index_page()
         if secid_norm in html_ff:
             ff = self._parse(html_ff[secid_norm])
             if ff is not None:
-                return self._store(secid_norm, ff, "moex_html_index")
+                return self._store(secid_norm, ff, issuesize)
 
-        return self._store(secid_norm, None, "unknown")
+        ff_external = self.external_ff_db.get(secid_norm)
+        if ff_external is not None:
+            return self._store(secid_norm, ff_external, issuesize)
+
+        self._ensure_index_loaded()
+        if secid_norm in self.index_membership.get("IMOEX", []):
+            return self._store(secid_norm, None, issuesize)
+
+        return self._store(secid_norm, None, issuesize)
+
+    def get_many(self, secids: list[str]) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        for idx, secid in enumerate(secids):
+            secid_norm = str(secid).strip().upper()
+            if not secid_norm:
+                continue
+            try:
+                result[secid_norm] = self.get(secid_norm)
+            except Exception:
+                result[secid_norm] = {
+                    "secid": secid_norm,
+                    "free_float": None,
+                    "issuesize": None,
+                    "updated_at": time.time(),
+                }
+            if idx % 50 == 0:
+                time.sleep(0.05)
+        return result
+
+    def _ensure_index_loaded(self):
+        if "IMOEX" not in self.index_membership:
+            self.index_membership["IMOEX"] = []
 
     def _parse(self, value) -> float | None:
         try:
@@ -205,11 +236,11 @@ class FreeFloatResolverV2:
         except Exception:
             return None
 
-    def _store(self, secid: str, value: float | None, source: str) -> dict:
+    def _store(self, secid: str, value: float | None, issuesize=None) -> dict:
         payload = {
             "secid": secid,
             "free_float": value,
-            "source": source,
+            "issuesize": issuesize,
             "updated_at": time.time(),
         }
         self.cache[secid] = (time.time(), payload)
@@ -268,25 +299,19 @@ def load_issuesize(request_get: Callable, secid: str) -> float:
 
 
 def resolve_freefloat(request_get: Callable, secid: str) -> tuple[float, str]:
-    client = MoexISSClient(request_get=request_get)
+    client = MoexISSClient()
     resolver = FreeFloatResolverV2(client=client, html_scraper=MoexHTMLFreeFloatScraper())
     payload = resolver.get(secid)
     value = payload.get("free_float")
     if value is None:
-        raise ValueError(f"Не найден free-float для {secid} (source={payload.get('source')})")
-    return float(value), str(payload.get("source", "unknown"))
+        raise ValueError(f"Не найден free-float для {secid}")
+    return float(value), "resolved"
 
 
 def resolve_freefloat_batch(request_get: Callable, secids: list[str]) -> dict[str, dict]:
-    client = MoexISSClient(request_get=request_get)
+    client = MoexISSClient()
     resolver = FreeFloatResolverV2(client=client, html_scraper=MoexHTMLFreeFloatScraper())
-    result: dict[str, dict] = {}
-    for secid in secids:
-        secid_norm = str(secid).strip().upper()
-        if not secid_norm:
-            continue
-        result[secid_norm] = resolver.get(secid_norm)
-    return result
+    return resolver.get_many(secids)
 
 
 def generate_q(mode: str, q_max: int, points: int) -> np.ndarray:
@@ -368,13 +393,17 @@ def calculate_share_delta_p(
 
     if preloaded_freefloat:
         ff_raw = preloaded_freefloat.get("free_float")
-        ff_source = str(preloaded_freefloat.get("source", "preloaded"))
         if ff_raw is None:
-            raise ValueError(f"Не найден free-float для {secid} (source={ff_source})")
+            raise ValueError(f"Не найден free-float для {secid}")
         freefloat = float(ff_raw)
+        issuesize_raw = preloaded_freefloat.get("issuesize")
+        issuesize = pd.to_numeric(issuesize_raw, errors="coerce")
+        if not np.isfinite(issuesize) or float(issuesize) <= 0:
+            issuesize = load_issuesize(request_get, secid)
+        issuesize = float(issuesize)
     else:
-        freefloat, ff_source = resolve_freefloat(request_get=request_get, secid=secid)
-    issuesize = load_issuesize(request_get, secid)
+        freefloat, _ = resolve_freefloat(request_get=request_get, secid=secid)
+        issuesize = load_issuesize(request_get, secid)
     shares_in_ff = issuesize * freefloat
     ff_market_cap_rub = shares_in_ff * close_price
     if not np.isfinite(ff_market_cap_rub) or ff_market_cap_rub <= 0:
@@ -393,7 +422,6 @@ def calculate_share_delta_p(
         "MDTV": float(mdtv),
         "Close": close_price,
         "FreeFloat": freefloat,
-        "FreeFloatSource": ff_source,
         "IssueSize": float(issuesize),
         "FFShares": float(shares_in_ff),
         "FFMcapRUB": float(ff_market_cap_rub),

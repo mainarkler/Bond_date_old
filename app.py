@@ -2847,13 +2847,11 @@ if st.session_state["active_view"] == "sell_stres":
                                 "ISIN": entry["ISIN"],
                                 "SECID": secid,
                                 "FreeFloat": ff_payload.get("free_float"),
-                                "Source": ff_payload.get("source"),
                             }
                         )
                         if ff_payload.get("free_float") is None:
                             st.error(
-                                f"{entry['ISIN']} ({secid}): не найден free-float "
-                                f"(source={ff_payload.get('source', 'unknown')})"
+                                f"{entry['ISIN']} ({secid}): не найден free-float"
                             )
                             continue
                         entries_resolved.append({**entry, "FF_PAYLOAD": ff_payload})
@@ -2922,7 +2920,6 @@ if st.session_state["active_view"] == "sell_stres":
                                 "MDTV",
                                 "Close",
                                 "FreeFloat",
-                                "FreeFloatSource",
                                 "IssueSize",
                                 "FFShares",
                                 "FFMcapRUB",
@@ -2951,7 +2948,6 @@ if st.session_state["active_view"] == "sell_stres":
                             "MDTV",
                             "Close",
                             "FreeFloat",
-                            "FreeFloatSource",
                             "IssueSize",
                             "FFShares",
                             "FFMcapRUB",

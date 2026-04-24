@@ -201,10 +201,9 @@ function render(){
    const card=document.createElement('div'); card.className='meta-card';
    const ffPct = Number(r.FreeFloat);
    const ffMcap = Number(r.FFMcapRUB);
-   const ffSource = r.FreeFloatSource || '-';
    const ffText = Number.isFinite(ffPct) ? `${(ffPct*100).toFixed(2)}%` : '-';
    const ffMcapText = Number.isFinite(ffMcap) ? Math.round(ffMcap / 1000000.0).toLocaleString('ru-RU') : '-';
-   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (млн руб): ${formatMdtv(r.MDTV)}<br>FreeFloat: ${ffText}<br>FF source: ${ffSource}<br>FF MCap (млн руб): ${ffMcapText}`;
+   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (млн руб): ${formatMdtv(r.MDTV)}<br>FreeFloat: ${ffText}<br>FF MCap (млн руб): ${ffMcapText}`;
    metaBlock.appendChild(card);
  });
 
