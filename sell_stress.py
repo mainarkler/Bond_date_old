@@ -277,6 +277,18 @@ def resolve_freefloat(request_get: Callable, secid: str) -> tuple[float, str]:
     return float(value), str(payload.get("source", "unknown"))
 
 
+def resolve_freefloat_batch(request_get: Callable, secids: list[str]) -> dict[str, dict]:
+    client = MoexISSClient(request_get=request_get)
+    resolver = FreeFloatResolverV2(client=client, html_scraper=MoexHTMLFreeFloatScraper())
+    result: dict[str, dict] = {}
+    for secid in secids:
+        secid_norm = str(secid).strip().upper()
+        if not secid_norm:
+            continue
+        result[secid_norm] = resolver.get(secid_norm)
+    return result
+
+
 def generate_q(mode: str, q_max: int, points: int) -> np.ndarray:
     if q_max < 1:
         raise ValueError("Q_MAX должен быть ≥ 1")
@@ -315,6 +327,7 @@ def calculate_share_delta_p(
     c_value: float,
     date_from: str,
     q_values: np.ndarray,
+    preloaded_freefloat: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     secid = isin_to_secid(isin)
     ff_scraper = MoexHTMLFreeFloatScraper()
@@ -353,7 +366,14 @@ def calculate_share_delta_p(
     if not np.isfinite(close_price) or close_price <= 0:
         raise ValueError(f"Некорректная цена CLOSE для {secid}: {close_price}")
 
-    freefloat, ff_source = resolve_freefloat(request_get=request_get, secid=secid)
+    if preloaded_freefloat:
+        ff_raw = preloaded_freefloat.get("free_float")
+        ff_source = str(preloaded_freefloat.get("source", "preloaded"))
+        if ff_raw is None:
+            raise ValueError(f"Не найден free-float для {secid} (source={ff_source})")
+        freefloat = float(ff_raw)
+    else:
+        freefloat, ff_source = resolve_freefloat(request_get=request_get, secid=secid)
     issuesize = load_issuesize(request_get, secid)
     shares_in_ff = issuesize * freefloat
     ff_market_cap_rub = shares_in_ff * close_price

@@ -2821,24 +2821,67 @@ if st.session_state["active_view"] == "sell_stres":
                 meta_rows = []
                 results = {}
                 progress_bar = st.progress(0.0)
+                ff_table_df = pd.DataFrame()
                 with st.spinner("Рассчитываем Sell_stres..."):
-                    for idx, entry in enumerate(entries, start=1):
+                    entries_with_refs = []
+                    for entry in entries:
+                        isin = entry["ISIN"]
+                        try:
+                            secid = isin_to_secid(isin)
+                            entries_with_refs.append({**entry, "SECID": secid})
+                        except Exception as exc:
+                            st.error(f"{isin}: не удалось получить SECID ({exc})")
+
+                    unique_secids = sorted({e["SECID"] for e in entries_with_refs})
+                    ff_payloads = ss.resolve_freefloat_batch(
+                        request_get=request_get,
+                        secids=unique_secids,
+                    )
+                    ff_table_rows = []
+                    entries_resolved = []
+                    for entry in entries_with_refs:
+                        secid = entry["SECID"]
+                        ff_payload = ff_payloads.get(secid, {})
+                        ff_table_rows.append(
+                            {
+                                "ISIN": entry["ISIN"],
+                                "SECID": secid,
+                                "FreeFloat": ff_payload.get("free_float"),
+                                "Source": ff_payload.get("source"),
+                            }
+                        )
+                        if ff_payload.get("free_float") is None:
+                            st.error(
+                                f"{entry['ISIN']} ({secid}): не найден free-float "
+                                f"(source={ff_payload.get('source', 'unknown')})"
+                            )
+                            continue
+                        entries_resolved.append({**entry, "FF_PAYLOAD": ff_payload})
+
+                    ff_table_df = pd.DataFrame(ff_table_rows)
+
+                    for idx, entry in enumerate(entries_resolved, start=1):
                         isin = entry["ISIN"]
                         try:
                             q_vector = ss.build_q_vector(q_mode, entry["Q_MAX"])
                             delta_df, meta = ss.calculate_share_delta_p(
                                 request_get=request_get,
-                                isin_to_secid=isin_to_secid,
+                                isin_to_secid=lambda _isin, secid=entry["SECID"]: secid,
                                 isin=isin,
                                 c_value=float(c_value),
                                 date_from=data_from.strftime("%Y-%m-%d"),
                                 q_values=q_vector,
+                                preloaded_freefloat=entry["FF_PAYLOAD"],
                             )
                             results[isin] = delta_df
                             meta_rows.append(meta)
                         except Exception as exc:
                             st.error(f"{isin}: {exc}")
-                        progress_bar.progress(idx / len(entries))
+                        progress_bar.progress(idx / len(entries_resolved) if entries_resolved else 1.0)
+
+                if not ff_table_df.empty:
+                    st.markdown("#### Таблица free-float (предварительная загрузка)")
+                    st.dataframe(ff_table_df, use_container_width=True)
 
                 show_tables = len(entries) == 1 and not use_q_from_list and not share_calculate_all_clicked
                 st.session_state["sell_stres_share_show_tables"] = show_tables
