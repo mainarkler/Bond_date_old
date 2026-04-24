@@ -2735,11 +2735,12 @@ if st.session_state["active_view"] == "sell_stres":
             key="share_date_from",
         )
         q_max = st.number_input(
-            "Q (максимум для построения вектора)",
-            min_value=1,
-            value=33_000_000_000,
-            step=1_000_000,
-            format="%d",
+            "Q max (% от free-float капитализации, ось X)",
+            min_value=0.1,
+            max_value=100.0,
+            value=10.0,
+            step=0.1,
+            format="%.1f",
             key="share_q_max",
             disabled=use_q_from_list,
         )
@@ -2771,7 +2772,7 @@ if st.session_state["active_view"] == "sell_stres":
                 prep_progress = st.progress(0.0)
                 entries = []
                 for idx, isin in enumerate(all_isins, start=1):
-                    entries.append({"ISIN": isin, "Q_MAX": int(q_max)})
+                    entries.append({"ISIN": isin, "Q_MAX": float(q_max)})
                     prep_progress.progress(idx / len(all_isins) if all_isins else 1.0)
                 st.info(f"Подготовлено бумаг для полного расчёта: {len(entries)}")
             else:
@@ -2790,7 +2791,7 @@ if st.session_state["active_view"] == "sell_stres":
                         if q_val is None or q_val <= 0:
                             st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
                             continue
-                        entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_val)})
+                        entries.append({"ISIN": resolved_isin, "Q_MAX": float(q_val)})
                 else:
                     raw_text = isin_input.strip()
                     if raw_text:
@@ -2801,7 +2802,7 @@ if st.session_state["active_view"] == "sell_stres":
                             if not resolved_isin:
                                 unresolved_identifiers.append(identifier)
                                 continue
-                            entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_max)})
+                            entries.append({"ISIN": resolved_isin, "Q_MAX": float(q_max)})
 
             if unresolved_identifiers:
                 st.warning(
@@ -2820,24 +2821,67 @@ if st.session_state["active_view"] == "sell_stres":
                 meta_rows = []
                 results = {}
                 progress_bar = st.progress(0.0)
+                ff_table_df = pd.DataFrame()
                 with st.spinner("Рассчитываем Sell_stres..."):
-                    for idx, entry in enumerate(entries, start=1):
+                    entries_with_refs = []
+                    for entry in entries:
+                        isin = entry["ISIN"]
+                        try:
+                            secid = isin_to_secid(isin)
+                            entries_with_refs.append({**entry, "SECID": secid})
+                        except Exception as exc:
+                            st.error(f"{isin}: не удалось получить SECID ({exc})")
+
+                    unique_secids = sorted({e["SECID"] for e in entries_with_refs})
+                    ff_payloads = ss.resolve_freefloat_batch(
+                        request_get=request_get,
+                        secids=unique_secids,
+                    )
+                    ff_table_rows = []
+                    entries_resolved = []
+                    for entry in entries_with_refs:
+                        secid = entry["SECID"]
+                        ff_payload = ff_payloads.get(secid, {})
+                        ff_table_rows.append(
+                            {
+                                "ISIN": entry["ISIN"],
+                                "SECID": secid,
+                                "FreeFloat": ff_payload.get("free_float"),
+                                "Source": ff_payload.get("source"),
+                            }
+                        )
+                        if ff_payload.get("free_float") is None:
+                            st.error(
+                                f"{entry['ISIN']} ({secid}): не найден free-float "
+                                f"(source={ff_payload.get('source', 'unknown')})"
+                            )
+                            continue
+                        entries_resolved.append({**entry, "FF_PAYLOAD": ff_payload})
+
+                    ff_table_df = pd.DataFrame(ff_table_rows)
+
+                    for idx, entry in enumerate(entries_resolved, start=1):
                         isin = entry["ISIN"]
                         try:
                             q_vector = ss.build_q_vector(q_mode, entry["Q_MAX"])
                             delta_df, meta = ss.calculate_share_delta_p(
                                 request_get=request_get,
-                                isin_to_secid=isin_to_secid,
+                                isin_to_secid=lambda _isin, secid=entry["SECID"]: secid,
                                 isin=isin,
                                 c_value=float(c_value),
                                 date_from=data_from.strftime("%Y-%m-%d"),
                                 q_values=q_vector,
+                                preloaded_freefloat=entry["FF_PAYLOAD"],
                             )
                             results[isin] = delta_df
                             meta_rows.append(meta)
                         except Exception as exc:
                             st.error(f"{isin}: {exc}")
-                        progress_bar.progress(idx / len(entries))
+                        progress_bar.progress(idx / len(entries_resolved) if entries_resolved else 1.0)
+
+                if not ff_table_df.empty:
+                    st.markdown("#### Таблица free-float (предварительная загрузка)")
+                    st.dataframe(ff_table_df, use_container_width=True)
 
                 show_tables = len(entries) == 1 and not use_q_from_list and not share_calculate_all_clicked
                 st.session_state["sell_stres_share_show_tables"] = show_tables
@@ -2848,7 +2892,7 @@ if st.session_state["active_view"] == "sell_stres":
                     combined_delta_df = pd.concat(
                         [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
                         ignore_index=True,
-                    )[["ISIN", "Q", "DeltaP"]]
+                    )[["ISIN", "Q", "Q_RUB", "DeltaP"]]
                     ranking_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
                     ranking_df = ranking_df.reindex(
                         columns=["ISIN", "Ticker", "Indices", "RankScore"],
@@ -2867,8 +2911,25 @@ if st.session_state["active_view"] == "sell_stres":
                         combined_delta_df, sheet_name="delta_p"
                     )
                     html_report = build_share_batch_html_report(
-                        combined_delta_df=combined_delta_df[["ISIN", "Q", "DeltaP"]],
-                        meta_df=pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"]) if meta_rows else pd.DataFrame(),
+                        combined_delta_df=combined_delta_df[["ISIN", "Q", "Q_RUB", "DeltaP"]],
+                        meta_df=pd.DataFrame(
+                            meta_rows,
+                            columns=[
+                                "ISIN",
+                                "SECID",
+                                "T",
+                                "Sigma",
+                                "MDTV",
+                                "Close",
+                                "FreeFloat",
+                                "FreeFloatSource",
+                                "IssueSize",
+                                "FFShares",
+                                "FFMcapRUB",
+                            ],
+                        )
+                        if meta_rows
+                        else pd.DataFrame(),
                         ranking_df=ranking_df,
                     )
                     download_payload["html_report"] = html_report
@@ -2880,7 +2941,22 @@ if st.session_state["active_view"] == "sell_stres":
                     )
 
                 if meta_rows:
-                    meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
+                    meta_df = pd.DataFrame(
+                        meta_rows,
+                        columns=[
+                            "ISIN",
+                            "SECID",
+                            "T",
+                            "Sigma",
+                            "MDTV",
+                            "Close",
+                            "FreeFloat",
+                            "FreeFloatSource",
+                            "IssueSize",
+                            "FFShares",
+                            "FFMcapRUB",
+                        ],
+                    )
                     ranking_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
                     ranking_df = ranking_df.reindex(
                         columns=["ISIN", "Ticker", "Indices", "RankScore"],

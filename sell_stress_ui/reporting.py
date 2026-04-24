@@ -181,10 +181,10 @@ function render(){
  curves.forEach(r=>{
    const key = r.Ticker || r.ISIN;
    if(!tracesMap.has(key)) tracesMap.set(key, {x:[], y:[], name:key, mode:'lines+markers', type:'scatter'});
-   tracesMap.get(key).x.push(Number(r.Q) / 1000000.0);
+   tracesMap.get(key).x.push(Number(r.Q));
    tracesMap.get(key).y.push(Number(r.DeltaP) * 100.0);
  });
- Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализацию позиции в рынок (Млн. руб)'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
+ Plotly.newPlot('plot', Array.from(tracesMap.values()), {xaxis:{title:'реализация, % от FF капитализации'}, yaxis:{title:'изменение цены в %'}, margin:{t:20}}, {responsive:true});
 
  const metaBlock = document.getElementById('metaBlock'); metaBlock.innerHTML='';
  const formatSigma = (v) => {
@@ -199,7 +199,12 @@ function render(){
  };
  filteredIsinsFinal.forEach(r=>{
    const card=document.createElement('div'); card.className='meta-card';
-   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (млн руб): ${formatMdtv(r.MDTV)}`;
+   const ffPct = Number(r.FreeFloat);
+   const ffMcap = Number(r.FFMcapRUB);
+   const ffSource = r.FreeFloatSource || '-';
+   const ffText = Number.isFinite(ffPct) ? `${(ffPct*100).toFixed(2)}%` : '-';
+   const ffMcapText = Number.isFinite(ffMcap) ? Math.round(ffMcap / 1000000.0).toLocaleString('ru-RU') : '-';
+   card.innerHTML = `<b>${r.Ticker || '-'} / ${r.ISIN || '-'}</b><br>T: ${r.T || '-'}<br>Sigma: ${formatSigma(r.Sigma)}<br>MDTV (млн руб): ${formatMdtv(r.MDTV)}<br>FreeFloat: ${ffText}<br>FF source: ${ffSource}<br>FF MCap (млн руб): ${ffMcapText}`;
    metaBlock.appendChild(card);
  });
 
