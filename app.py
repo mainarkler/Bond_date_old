@@ -2380,6 +2380,10 @@ def _portfolio_emitent_name(row: dict) -> str:
     )
 
 
+def _portfolio_emitent_id(row: dict) -> str:
+    return _first_present_text(row, ("EMITTER_ID", "EMITTERID", "EMITENT_ID", "EMITENTID"))
+
+
 def _portfolio_bond_nominal_currency(row: dict) -> str:
     return _first_present_text(row, ("FACEUNIT", "FACEUNIT_S", "FACEUNIT_NAME"))
 
@@ -2578,6 +2582,7 @@ def resolve_portfolio_instrument(isin: str) -> dict:
         "SECID": str(row.get("SECID", "")).strip().upper(),
         "Название": _first_present_text(row, ("SHORTNAME", "SECNAME", "NAME")),
         "Эмитент": _portfolio_emitent_name(row),
+        "emitent_ID": _portfolio_emitent_id(row),
         "Тип": instrument_type,
         "Рынок": market,
         "Основной режим": _portfolio_primary_board(chosen["boards"], market),
@@ -2650,6 +2655,7 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
     combined_row = {**security_row, **market_row}
     name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
     emitter_name = _portfolio_emitent_name(combined_row) or profile.get("Эмитент", "")
+    emitter_id = _portfolio_emitent_id(combined_row) or profile.get("emitent_ID", "")
     bond_subtype = ""
     if market == "bonds":
         bond_subtype = _first_present_text(combined_row, ("SECSUBTYPE", "SEC_SUBTYPE"))
@@ -2683,6 +2689,7 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
         **profile,
         "Название": name,
         "Эмитент": emitter_name,
+        "emitent_ID": emitter_id,
         "Тип облигации": bond_subtype,
         "Валюта инструмента": _normalize_portfolio_currency(currency) or "—",
         "Цена": price,
@@ -2763,6 +2770,7 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str,
                 "Тип облигации": snapshot.get("Тип облигации", ""),
                 "Название": snapshot.get("Название", ""),
                 "Эмитент": snapshot.get("Эмитент", ""),
+                "emitent_ID": snapshot.get("emitent_ID", ""),
                 "Количество": quantity,
                 "Валюта инструмента": currency,
                 "Курс к RUB": rate_to_rub,
@@ -2872,6 +2880,7 @@ def _format_portfolio_excel_section(worksheet, section_df: pd.DataFrame, header_
 def build_portfolio_limit_request_df(details_df: pd.DataFrame) -> pd.DataFrame:
     limit_columns = {
         "Эмитент": "эмитент",
+        "emitent_ID": "emitent_ID",
         "ISIN": "isin",
         "Стоимость инструмента, RUB": "стоимость в рублях",
         "Тип": "тип",
@@ -2880,6 +2889,7 @@ def build_portfolio_limit_request_df(details_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=list(limit_columns.values()))
     limit_df = details_df.reindex(columns=limit_columns.keys()).rename(columns=limit_columns)
     limit_df["эмитент"] = limit_df["эмитент"].fillna("—").replace("", "—")
+    limit_df["emitent_ID"] = limit_df["emitent_ID"].fillna("").replace("", "—")
     limit_df["стоимость в рублях"] = pd.to_numeric(limit_df["стоимость в рублях"], errors="coerce")
     return limit_df
 
