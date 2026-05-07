@@ -2823,6 +2823,50 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str,
     return df, reports, errors
 
 
+def _portfolio_excel_is_percent_column(column_name: str) -> bool:
+    return "%" in str(column_name)
+
+
+def _portfolio_excel_is_money_column(column_name: str) -> bool:
+    normalized = str(column_name).lower()
+    if "цена" in normalized:
+        return False
+    money_markers = ("стоимость", "rub", "номинал", "нкд", "купон")
+    return any(marker in normalized for marker in money_markers)
+
+
+def _prepare_portfolio_excel_section(df: pd.DataFrame) -> pd.DataFrame:
+    prepared = df.copy()
+    for column in prepared.columns:
+        if _portfolio_excel_is_percent_column(column):
+            converted = pd.to_numeric(prepared[column], errors="coerce")
+            if converted.notna().any():
+                prepared[column] = converted.round(2)
+        elif _portfolio_excel_is_money_column(column):
+            converted = pd.to_numeric(prepared[column], errors="coerce")
+            if converted.notna().any():
+                prepared[column] = converted.round(0)
+    return prepared
+
+
+def _format_portfolio_excel_section(worksheet, section_df: pd.DataFrame, header_row: int) -> None:
+    money_format = '#,##0'
+    percent_format = '0.00'
+    data_start_row = header_row + 1
+    data_end_row = header_row + len(section_df)
+    if data_end_row < data_start_row:
+        return
+    for col_idx, column_name in enumerate(section_df.columns, start=1):
+        if _portfolio_excel_is_percent_column(column_name):
+            number_format = percent_format
+        elif _portfolio_excel_is_money_column(column_name):
+            number_format = money_format
+        else:
+            continue
+        for row_idx in range(data_start_row, data_end_row + 1):
+            worksheet.cell(row=row_idx, column=col_idx).number_format = number_format
+
+
 def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[str, pd.DataFrame]) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -2836,6 +2880,7 @@ def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[s
             ("Инструменты", details_df),
         ]
         for title, section_df in sections:
+            prepared_section = _prepare_portfolio_excel_section(section_df)
             pd.DataFrame({title: []}).to_excel(
                 writer,
                 index=False,
@@ -2843,13 +2888,15 @@ def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[s
                 startrow=startrow,
             )
             startrow += 1
-            section_df.to_excel(
+            header_row = startrow + 1
+            prepared_section.to_excel(
                 writer,
                 index=False,
                 sheet_name=sheet_name,
                 startrow=startrow,
             )
-            startrow += len(section_df) + 3
+            _format_portfolio_excel_section(writer.sheets[sheet_name], prepared_section, header_row)
+            startrow += len(prepared_section) + 3
     return output.getvalue()
 
 
