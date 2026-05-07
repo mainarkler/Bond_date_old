@@ -2346,13 +2346,24 @@ def _first_present_text(row: dict, columns: tuple[str, ...]) -> str:
     return ""
 
 
-def _format_portfolio_date(value) -> str:
-    if pd.isna(value) or not value:
-        return ""
+def _parse_portfolio_date(value):
+    if value is None or pd.isna(value):
+        return None
     try:
-        return pd.to_datetime(value).strftime("%Y-%m-%d")
+        parsed = pd.to_datetime(value, errors="coerce")
     except Exception:
-        return ""
+        return None
+    if pd.isna(parsed):
+        return None
+    try:
+        return parsed.date()
+    except Exception:
+        return None
+
+
+def _format_portfolio_date(value) -> str:
+    parsed_date = _parse_portfolio_date(value)
+    return parsed_date.strftime("%Y-%m-%d") if parsed_date else ""
 
 
 def _portfolio_rows_to_dicts(payload: dict, block_name: str) -> list[dict]:
@@ -2601,11 +2612,8 @@ def calculate_bond_portfolio_duration(put_date: str, maturity_date: str) -> tupl
     today = datetime.today().date()
     future_events = []
     for event_name, value in (("Put оферта", put_date), ("Погашение", maturity_date)):
-        try:
-            event_date = pd.to_datetime(value).date()
-        except Exception:
-            continue
-        if event_date >= today:
+        event_date = _parse_portfolio_date(value)
+        if event_date and event_date >= today:
             future_events.append((event_date, event_name))
     if not future_events:
         return "", None, None
