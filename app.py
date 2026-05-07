@@ -2366,6 +2366,24 @@ def _format_portfolio_date(value) -> str:
     return parsed_date.strftime("%Y-%m-%d") if parsed_date else ""
 
 
+def _portfolio_emitent_name(row: dict) -> str:
+    return _first_present_text(
+        row,
+        (
+            "EMITENTNAME",
+            "EMITENT_NAME",
+            "EMITENT_TITLE",
+            "EMITENTTITLE",
+            "ISSUERNAME",
+            "ISSUER",
+        ),
+    )
+
+
+def _portfolio_bond_nominal_currency(row: dict) -> str:
+    return _first_present_text(row, ("FACEUNIT", "FACEUNIT_S", "FACEUNIT_NAME"))
+
+
 def _portfolio_rows_to_dicts(payload: dict, block_name: str) -> list[dict]:
     block = payload.get(block_name, {}) if isinstance(payload, dict) else {}
     rows = block.get("data", []) or []
@@ -2504,6 +2522,7 @@ def resolve_portfolio_instrument(isin: str) -> dict:
         "ISIN": isin,
         "SECID": str(row.get("SECID", "")).strip().upper(),
         "Название": _first_present_text(row, ("SHORTNAME", "SECNAME", "NAME")),
+        "Эмитент": _portfolio_emitent_name(row),
         "Тип": instrument_type,
         "Рынок": market,
         "Основной режим": _portfolio_primary_board(chosen["boards"], market),
@@ -2573,25 +2592,31 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
     if price is None:
         price = _first_present_number(security_row, price_columns)
 
+    combined_row = {**security_row, **market_row}
     name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
-    currency = _first_present_text(
-        {**security_row, **market_row},
-        ("CURRENCYID", "CURRENCY", "FACEUNIT", "FACEUNIT_S", "SETTLECURRENCY", "PRICECURRENCY"),
-    )
+    emitter_name = _portfolio_emitent_name(combined_row) or profile.get("Эмитент", "")
+    nominal_currency = ""
     if market == "bonds":
         facevalue = _first_present_number(
             security_row,
             ("FACEVALUE", "INITIALFACEVALUE", "LOTVALUE", "FACEVALUE_RUB"),
         )
-        accrued_interest = _first_present_number({**security_row, **market_row}, ("ACCRUEDINT", "ACCRUEDINTEREST")) or 0.0
-        if not currency:
-            currency = _first_present_text(security_row, ("FACEUNIT", "FACEUNIT_S", "CURRENCYID"))
+        accrued_interest = _first_present_number(combined_row, ("ACCRUEDINT", "ACCRUEDINTEREST")) or 0.0
+        nominal_currency = _portfolio_bond_nominal_currency(security_row) or _portfolio_bond_nominal_currency(market_row)
+        currency = nominal_currency or _first_present_text(
+            combined_row,
+            ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+        )
         unit_value = None
         if price is not None and facevalue is not None:
             unit_value = facevalue * price / 100 + accrued_interest
     else:
         facevalue = None
         accrued_interest = None
+        currency = _first_present_text(
+            combined_row,
+            ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+        )
         unit_value = price
 
     if unit_value is None:
@@ -2600,7 +2625,9 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
     return {
         **profile,
         "Название": name,
+        "Эмитент": emitter_name,
         "Валюта инструмента": currency or "—",
+        "Валюта номинала": nominal_currency,
         "Цена": price,
         "Номинал": facevalue,
         "НКД": accrued_interest,
@@ -2640,8 +2667,10 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFr
                 "SECID": snapshot.get("SECID", ""),
                 "Тип": snapshot.get("Тип", ""),
                 "Название": snapshot.get("Название", ""),
+                "Эмитент": snapshot.get("Эмитент", ""),
                 "Количество": quantity,
                 "Валюта инструмента": snapshot.get("Валюта инструмента", "—"),
+                "Валюта номинала": snapshot.get("Валюта номинала", ""),
                 "Цена": snapshot.get("Цена"),
                 "Номинал": snapshot.get("Номинал"),
                 "НКД": snapshot.get("НКД"),
