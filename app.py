@@ -2384,6 +2384,63 @@ def _portfolio_bond_nominal_currency(row: dict) -> str:
     return _first_present_text(row, ("FACEUNIT", "FACEUNIT_S", "FACEUNIT_NAME"))
 
 
+def _normalize_portfolio_currency(currency: str) -> str:
+    normalized = str(currency or "").strip().upper()
+    currency_aliases = {
+        "": "",
+        "—": "",
+        "-": "",
+        "RUR": "RUB",
+        "SUR": "RUB",
+        "RUB": "RUB",
+        "РУБ": "RUB",
+        "РУБ.": "RUB",
+        "РОССИЙСКИЙ РУБЛЬ": "RUB",
+    }
+    return currency_aliases.get(normalized, normalized)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_cbr_currency_rates() -> dict[str, float]:
+    rates = {"RUB": 1.0, "RUR": 1.0, "SUR": 1.0}
+    response = request_get("https://www.cbr.ru/scripts/XML_daily.asp", timeout=30)
+    xml_content = response.content.decode("windows-1251", errors="ignore")
+    root = ET.fromstring(xml_content)
+    for valute in root.findall("Valute"):
+        char_code = (valute.findtext("CharCode") or "").strip().upper()
+        nominal = parse_number(valute.findtext("Nominal")) or 1.0
+        value = parse_number(valute.findtext("Value"))
+        if char_code and value is not None and nominal:
+            rates[char_code] = value / nominal
+    return rates
+
+
+def portfolio_currency_rate_to_rub(currency: str, rates: dict[str, float]) -> float | None:
+    normalized = _normalize_portfolio_currency(currency)
+    if not normalized:
+        return None
+    return rates.get(normalized)
+
+
+def _portfolio_is_fund_like(row: dict) -> bool:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    text = f"{group} {type_value}"
+    return any(token in text for token in ("pif", "ppif", "etf", "mutual", "fund", "пиф"))
+
+
+def _portfolio_instrument_type(row: dict, market: str) -> str:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    if "bond" in group or "bond" in type_value or market == "bonds":
+        return "Облигация"
+    if _portfolio_is_fund_like(row):
+        return "ПИФ"
+    if market == "shares":
+        return "Акция"
+    return "Инструмент"
+
+
 def _portfolio_rows_to_dicts(payload: dict, block_name: str) -> list[dict]:
     block = payload.get(block_name, {}) if isinstance(payload, dict) else {}
     rows = block.get("data", []) or []
@@ -2445,7 +2502,7 @@ def _portfolio_candidate_rank(row: dict, requested_isin: str) -> tuple[int, int,
     is_bond = "bond" in group or "bond" in type_value
     is_stock_share = any(token in group or token in type_value for token in ("stock_shares", "common_share", "preferred_share"))
     is_share_like = any(token in group or token in type_value for token in ("share", "stock"))
-    is_fund_like = any(token in group or token in type_value for token in ("etf", "ppif", "mutual", "fund"))
+    is_fund_like = _portfolio_is_fund_like(row)
 
     if is_bond:
         instrument_rank = 0
@@ -2502,13 +2559,11 @@ def resolve_portfolio_instrument(isin: str) -> dict:
         markets = _portfolio_candidate_markets(row, boards)
         if "bonds" in markets:
             market = "bonds"
-            instrument_type = "Облигация"
         elif "shares" in markets:
             market = "shares"
-            instrument_type = "Акция"
         else:
             market = ""
-            instrument_type = "Инструмент"
+        instrument_type = _portfolio_instrument_type(row, market)
         enriched_candidates.append({"row": row, "boards": boards, "market": market, "type": instrument_type})
 
     chosen = next((item for item in enriched_candidates if item["market"] in {"shares", "bonds"}), enriched_candidates[0])
@@ -2595,18 +2650,18 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
     combined_row = {**security_row, **market_row}
     name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
     emitter_name = _portfolio_emitent_name(combined_row) or profile.get("Эмитент", "")
-    nominal_currency = ""
     if market == "bonds":
         facevalue = _first_present_number(
             security_row,
             ("FACEVALUE", "INITIALFACEVALUE", "LOTVALUE", "FACEVALUE_RUB"),
         )
         accrued_interest = _first_present_number(combined_row, ("ACCRUEDINT", "ACCRUEDINTEREST")) or 0.0
-        nominal_currency = _portfolio_bond_nominal_currency(security_row) or _portfolio_bond_nominal_currency(market_row)
-        currency = nominal_currency or _first_present_text(
-            combined_row,
-            ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
-        )
+        currency = _portfolio_bond_nominal_currency(security_row) or _portfolio_bond_nominal_currency(market_row)
+        if not currency:
+            currency = _first_present_text(
+                combined_row,
+                ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+            )
         unit_value = None
         if price is not None and facevalue is not None:
             unit_value = facevalue * price / 100 + accrued_interest
@@ -2626,8 +2681,7 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
         **profile,
         "Название": name,
         "Эмитент": emitter_name,
-        "Валюта инструмента": currency or "—",
-        "Валюта номинала": nominal_currency,
+        "Валюта инструмента": _normalize_portfolio_currency(currency) or "—",
         "Цена": price,
         "Номинал": facevalue,
         "НКД": accrued_interest,
@@ -2649,9 +2703,40 @@ def calculate_bond_portfolio_duration(put_date: str, maturity_date: str) -> tupl
     return event_name, days, days / 360
 
 
-def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def build_portfolio_composition(
+    df: pd.DataFrame,
+    group_column: str,
+    value_column: str = "Стоимость инструмента, RUB",
+    total_value: float | None = None,
+) -> pd.DataFrame:
+    if df.empty or group_column not in df.columns or value_column not in df.columns:
+        return pd.DataFrame(columns=[group_column, "Стоимость, RUB", "Доля портфеля, %"])
+    total_value = float(total_value or pd.to_numeric(df[value_column], errors="coerce").sum())
+    result = (
+        df.assign(**{value_column: pd.to_numeric(df[value_column], errors="coerce").fillna(0.0)})
+        .groupby(group_column, dropna=False, as_index=False)[value_column]
+        .sum()
+        .rename(columns={value_column: "Стоимость, RUB"})
+        .sort_values("Стоимость, RUB", ascending=False)
+    )
+    result[group_column] = result[group_column].fillna("—").replace("", "—")
+    result["Доля портфеля, %"] = np.where(
+        total_value > 0,
+        result["Стоимость, RUB"] / total_value * 100,
+        0.0,
+    )
+    return result
+
+
+def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], list[str]]:
     rows = []
     errors = []
+    try:
+        rates = fetch_cbr_currency_rates()
+    except Exception as exc:
+        rates = {"RUB": 1.0, "RUR": 1.0, "SUR": 1.0}
+        errors.append(f"CBR: не удалось загрузить курсы валют ({exc})")
+
     for entry in entries:
         isin = entry["ISIN"]
         quantity = entry["Количество"]
@@ -2662,6 +2747,12 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFr
             if unit_value is not None:
                 instrument_value = unit_value * quantity
 
+            currency = _normalize_portfolio_currency(snapshot.get("Валюта инструмента", "")) or "—"
+            rate_to_rub = portfolio_currency_rate_to_rub(currency, rates)
+            instrument_value_rub = None
+            if instrument_value is not None and rate_to_rub is not None:
+                instrument_value_rub = instrument_value * rate_to_rub
+
             row = {
                 "ISIN": isin,
                 "SECID": snapshot.get("SECID", ""),
@@ -2669,13 +2760,15 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFr
                 "Название": snapshot.get("Название", ""),
                 "Эмитент": snapshot.get("Эмитент", ""),
                 "Количество": quantity,
-                "Валюта инструмента": snapshot.get("Валюта инструмента", "—"),
-                "Валюта номинала": snapshot.get("Валюта номинала", ""),
+                "Валюта инструмента": currency,
+                "Курс к RUB": rate_to_rub,
                 "Цена": snapshot.get("Цена"),
                 "Номинал": snapshot.get("Номинал"),
                 "НКД": snapshot.get("НКД"),
                 "Стоимость одной бумаги": unit_value,
                 "Стоимость инструмента": instrument_value,
+                "Стоимость инструмента, RUB": instrument_value_rub,
+                "Доля портфеля, %": None,
                 "Дата оферты Put": "",
                 "Дата погашения": "",
                 "Событие для дюрации": "",
@@ -2709,23 +2802,54 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFr
             errors.append(f"{isin}: {exc}")
 
     df = pd.DataFrame(rows)
-    if df.empty or "Стоимость инструмента" not in df.columns:
-        totals = pd.DataFrame(columns=["Валюта инструмента", "Общая стоимость портфеля"])
+    if df.empty or "Стоимость инструмента, RUB" not in df.columns:
+        total_value_rub = 0.0
     else:
-        totals = (
-            df.dropna(subset=["Стоимость инструмента"])
-            .groupby("Валюта инструмента", dropna=False, as_index=False)["Стоимость инструмента"]
-            .sum()
-            .rename(columns={"Стоимость инструмента": "Общая стоимость портфеля"})
+        df["Стоимость инструмента, RUB"] = pd.to_numeric(df["Стоимость инструмента, RUB"], errors="coerce")
+        total_value_rub = float(df["Стоимость инструмента, RUB"].fillna(0.0).sum())
+        df["Доля портфеля, %"] = np.where(
+            total_value_rub > 0,
+            df["Стоимость инструмента, RUB"].fillna(0.0) / total_value_rub * 100,
+            0.0,
         )
-    return df, totals, errors
+
+    totals = pd.DataFrame([{"Общая стоимость портфеля, RUB": total_value_rub}])
+    reports = {
+        "totals": totals,
+        "currency_composition": build_portfolio_composition(df, "Валюта инструмента", total_value=total_value_rub),
+        "type_composition": build_portfolio_composition(df, "Тип", total_value=total_value_rub),
+        "emitter_composition": build_portfolio_composition(df, "Эмитент", total_value=total_value_rub),
+    }
+    return df, reports, errors
 
 
-def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, totals_df: pd.DataFrame) -> bytes:
+def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[str, pd.DataFrame]) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        totals_df.to_excel(writer, index=False, sheet_name="Итого")
-        details_df.to_excel(writer, index=False, sheet_name="Инструменты")
+        sheet_name = "Портфель"
+        startrow = 0
+        sections = [
+            ("Итого", reports.get("totals", pd.DataFrame())),
+            ("Валютный состав", reports.get("currency_composition", pd.DataFrame())),
+            ("Состав инструментов", reports.get("type_composition", pd.DataFrame())),
+            ("Состав эмитентов", reports.get("emitter_composition", pd.DataFrame())),
+            ("Инструменты", details_df),
+        ]
+        for title, section_df in sections:
+            pd.DataFrame({title: []}).to_excel(
+                writer,
+                index=False,
+                sheet_name=sheet_name,
+                startrow=startrow,
+            )
+            startrow += 1
+            section_df.to_excel(
+                writer,
+                index=False,
+                sheet_name=sheet_name,
+                startrow=startrow,
+            )
+            startrow += len(section_df) + 3
     return output.getvalue()
 
 
@@ -2736,8 +2860,9 @@ if st.session_state["active_view"] == "portfolio":
     st.subheader("💼 Портфель по ISIN")
     st.markdown(
         "Введите смешанный портфель акций и облигаций в формате `ISIN | Количество`. "
-        "Стоимость считается в валюте инструмента; для облигаций цена MOEX в процентах от номинала "
-        "переводится в денежную стоимость одной бумаги с добавлением НКД, если MOEX вернул НКД."
+        "Стоимость считается в валюте инструмента и приводится в рубли по XML_daily ЦБ РФ; "
+        "для облигаций цена MOEX в процентах от номинала переводится в денежную стоимость "
+        "одной бумаги с добавлением НКД, если MOEX вернул НКД."
     )
     portfolio_input = st.text_area(
         "Список инструментов",
@@ -2756,11 +2881,11 @@ if st.session_state["active_view"] == "portfolio":
             st.error("Нет валидных строк в формате `ISIN | Количество`.")
         else:
             with st.spinner("Загружаем цены и параметры инструментов MOEX..."):
-                details_df, totals_df, errors = build_portfolio_report(entries)
-            xlsx = dataframe_to_portfolio_excel_bytes(details_df, totals_df)
+                details_df, report_tables, errors = build_portfolio_report(entries)
+            xlsx = dataframe_to_portfolio_excel_bytes(details_df, report_tables)
             st.session_state["portfolio_last_report"] = {
                 "details": details_df,
-                "totals": totals_df,
+                **report_tables,
                 "errors": errors,
                 "xlsx": xlsx,
                 "csv": details_df.to_csv(index=False).encode("utf-8-sig"),
@@ -2772,19 +2897,19 @@ if st.session_state["active_view"] == "portfolio":
         details_df = portfolio_report["details"]
         errors = portfolio_report.get("errors", [])
 
-        st.markdown("### Общая стоимость портфеля")
-        if totals_df.empty:
-            st.info("Нет инструментов с рассчитанной стоимостью.")
-        else:
-            metric_cols = st.columns(min(len(totals_df), 4))
-            for idx, (_, total_row) in enumerate(totals_df.iterrows()):
-                with metric_cols[idx % len(metric_cols)]:
-                    total_value = total_row.get("Общая стоимость портфеля")
-                    st.metric(
-                        str(total_row.get("Валюта инструмента", "—")),
-                        safe_format_int_with_sep(total_value) if total_value is not None else "—",
-                    )
-            st.dataframe(totals_df, use_container_width=True)
+        st.markdown("### Общая стоимость портфеля в рублях")
+        total_value = totals_df.iloc[0].get("Общая стоимость портфеля, RUB") if not totals_df.empty else None
+        st.metric("RUB", safe_format_int_with_sep(total_value) if total_value is not None else "—")
+        st.dataframe(totals_df, use_container_width=True)
+
+        st.markdown("### Валютный состав")
+        st.dataframe(portfolio_report.get("currency_composition", pd.DataFrame()), use_container_width=True)
+
+        st.markdown("### Состав инструментов")
+        st.dataframe(portfolio_report.get("type_composition", pd.DataFrame()), use_container_width=True)
+
+        st.markdown("### Состав эмитентов")
+        st.dataframe(portfolio_report.get("emitter_composition", pd.DataFrame()), use_container_width=True)
 
         st.markdown("### Инструменты портфеля")
         st.dataframe(details_df, use_container_width=True)
