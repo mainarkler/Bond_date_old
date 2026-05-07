@@ -2384,6 +2384,39 @@ def _portfolio_emitent_id(row: dict) -> str:
     return _first_present_text(row, ("EMITTER_ID", "EMITTERID", "EMITENT_ID", "EMITENTID"))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_portfolio_p_issuer_map() -> dict[str, str]:
+    csv_path = Path(__file__).resolve().parent / "Pifagr_name_with_emitter.csv"
+    try:
+        df_emitters = pd.read_csv(csv_path, dtype=str)
+    except Exception:
+        try:
+            df_emitters = pd.read_csv(
+                "https://raw.githubusercontent.com/mainarkler/Bond_date/refs/heads/main/Pifagr_name_with_emitter.csv",
+                dtype=str,
+            )
+        except Exception:
+            return {}
+
+    normalized_columns = {str(column).strip().lower(): column for column in df_emitters.columns}
+    issuer_column = normalized_columns.get("issuer")
+    emitter_id_column = normalized_columns.get("emitent_id") or normalized_columns.get("emitter_id")
+    if not issuer_column or not emitter_id_column:
+        return {}
+
+    mapping_df = df_emitters[[emitter_id_column, issuer_column]].dropna(subset=[emitter_id_column]).copy()
+    mapping_df[emitter_id_column] = mapping_df[emitter_id_column].astype(str).str.strip()
+    mapping_df[issuer_column] = mapping_df[issuer_column].fillna("").astype(str).str.strip()
+    return dict(zip(mapping_df[emitter_id_column], mapping_df[issuer_column]))
+
+
+def portfolio_p_issuer_by_emitent_id(emitent_id: str, p_issuer_map: dict[str, str]) -> str:
+    normalized = str(emitent_id or "").strip()
+    if not normalized:
+        return ""
+    return p_issuer_map.get(normalized, "")
+
+
 def _portfolio_bond_nominal_currency(row: dict) -> str:
     return _first_present_text(row, ("FACEUNIT", "FACEUNIT_S", "FACEUNIT_NAME"))
 
@@ -2746,6 +2779,7 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str,
     except Exception as exc:
         rates = {"RUB": 1.0, "RUR": 1.0, "SUR": 1.0}
         errors.append(f"CBR: не удалось загрузить курсы валют ({exc})")
+    p_issuer_map = fetch_portfolio_p_issuer_map()
 
     for entry in entries:
         isin = entry["ISIN"]
@@ -2771,6 +2805,7 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str,
                 "Название": snapshot.get("Название", ""),
                 "Эмитент": snapshot.get("Эмитент", ""),
                 "emitent_ID": snapshot.get("emitent_ID", ""),
+                "P_issuer": portfolio_p_issuer_by_emitent_id(snapshot.get("emitent_ID", ""), p_issuer_map),
                 "Количество": quantity,
                 "Валюта инструмента": currency,
                 "Курс к RUB": rate_to_rub,
@@ -2881,6 +2916,7 @@ def build_portfolio_limit_request_df(details_df: pd.DataFrame) -> pd.DataFrame:
     limit_columns = {
         "Эмитент": "эмитент",
         "emitent_ID": "emitent_ID",
+        "P_issuer": "P_issuer",
         "ISIN": "isin",
         "Стоимость инструмента, RUB": "стоимость в рублях",
         "Тип": "тип",
@@ -2890,6 +2926,7 @@ def build_portfolio_limit_request_df(details_df: pd.DataFrame) -> pd.DataFrame:
     limit_df = details_df.reindex(columns=limit_columns.keys()).rename(columns=limit_columns)
     limit_df["эмитент"] = limit_df["эмитент"].fillna("—").replace("", "—")
     limit_df["emitent_ID"] = limit_df["emitent_ID"].fillna("").replace("", "—")
+    limit_df["P_issuer"] = limit_df["P_issuer"].fillna("").replace("", "—")
     limit_df["стоимость в рублях"] = pd.to_numeric(limit_df["стоимость в рублях"], errors="coerce")
     return limit_df
 
