@@ -2326,16 +2326,18 @@ def parse_portfolio_entries(raw_text: str) -> tuple[list[dict], list[str]]:
 
 
 def _first_present_number(row: dict, columns: tuple[str, ...]) -> float | None:
+    normalized = {str(key).upper(): value for key, value in (row or {}).items()}
     for column in columns:
-        value = parse_number(row.get(column))
+        value = parse_number(normalized.get(column.upper()))
         if value is not None:
             return value
     return None
 
 
 def _first_present_text(row: dict, columns: tuple[str, ...]) -> str:
+    normalized = {str(key).upper(): value for key, value in (row or {}).items()}
     for column in columns:
-        value = row.get(column)
+        value = normalized.get(column.upper())
         if value is None or (isinstance(value, float) and math.isnan(value)):
             continue
         text = str(value).strip()
@@ -2353,49 +2355,170 @@ def _format_portfolio_date(value) -> str:
         return ""
 
 
+def _portfolio_rows_to_dicts(payload: dict, block_name: str) -> list[dict]:
+    block = payload.get(block_name, {}) if isinstance(payload, dict) else {}
+    rows = block.get("data", []) or []
+    columns = [str(column).upper() for column in block.get("columns", []) or []]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_portfolio_security_boards(secid: str) -> list[dict]:
+    secid = str(secid).strip().upper()
+    if not secid:
+        return []
+    try:
+        payload = request_json(
+            f"https://iss.moex.com/iss/securities/{secid}/boards.json",
+            params={"iss.meta": "off", "iss.only": "boards"},
+            timeout=30,
+        )
+        return _portfolio_rows_to_dicts(payload, "boards")
+    except Exception:
+        return []
+
+
+def _portfolio_candidate_markets(row: dict, boards: list[dict]) -> set[str]:
+    markets = {str(board.get("MARKET", "")).strip().lower() for board in boards if board.get("MARKET")}
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    if "bond" in group or "bond" in type_value:
+        markets.add("bonds")
+    if any(token in group or token in type_value for token in ("share", "stock", "common_share", "preferred_share")):
+        markets.add("shares")
+    return markets
+
+
+def _portfolio_primary_board(boards: list[dict], market: str) -> str:
+    market = str(market).lower()
+    market_boards = [board for board in boards if str(board.get("MARKET", "")).lower() == market]
+    traded_boards = [board for board in market_boards if str(board.get("IS_TRADED", "")).strip() in {"1", "1.0", "True", "true"}]
+    candidates = traded_boards or market_boards
+
+    preferred_order = ("TQBR", "TQTF", "TQIF", "TQOB", "TQCB", "TQOD", "TQIR", "EQBR")
+    for preferred in preferred_order:
+        for board in candidates:
+            if str(board.get("BOARDID", "")).upper() == preferred:
+                return preferred
+
+    primary = [board for board in candidates if str(board.get("IS_PRIMARY", "")).strip() in {"1", "1.0", "True", "true"}]
+    if primary:
+        return str(primary[0].get("BOARDID", "")).strip().upper()
+    if candidates:
+        return str(candidates[0].get("BOARDID", "")).strip().upper()
+    return ""
+
+
+def _portfolio_candidate_rank(row: dict, requested_isin: str) -> tuple[int, int, str]:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    is_exact_isin = str(row.get("ISIN", "")).strip().upper() == requested_isin
+    is_bond = "bond" in group or "bond" in type_value
+    is_stock_share = any(token in group or token in type_value for token in ("stock_shares", "common_share", "preferred_share"))
+    is_share_like = any(token in group or token in type_value for token in ("share", "stock"))
+    is_fund_like = any(token in group or token in type_value for token in ("etf", "ppif", "mutual", "fund"))
+
+    if is_bond:
+        instrument_rank = 0
+    elif is_stock_share:
+        instrument_rank = 1
+    elif is_share_like and not is_fund_like:
+        instrument_rank = 2
+    elif is_fund_like:
+        instrument_rank = 4
+    else:
+        instrument_rank = 3
+    return (0 if is_exact_isin else 1, instrument_rank, str(row.get("SECID", "")))
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def resolve_portfolio_instrument(isin: str) -> dict:
     isin = str(isin).strip().upper()
-    response = request_get(
-        "https://iss.moex.com/iss/securities.json",
-        params={"q": isin, "iss.meta": "off"},
-        timeout=30,
-    )
-    payload = response.json().get("securities", {})
-    rows = payload.get("data", []) or []
-    cols = payload.get("columns", []) or []
-    if not rows or not cols:
-        raise ValueError(f"ISIN {isin} не найден на MOEX")
+    raw_candidates: list[dict] = []
 
-    candidates = []
-    for raw_row in rows:
-        row = dict(zip(cols, raw_row))
-        if str(row.get("isin", "")).strip().upper() == isin:
-            candidates.append(row)
+    for url, params in (
+        (
+            f"https://iss.moex.com/iss/securities/{isin}.json",
+            {"iss.meta": "off", "iss.only": "securities"},
+        ),
+        (
+            "https://iss.moex.com/iss/securities.json",
+            {"q": isin, "iss.meta": "off", "iss.only": "securities"},
+        ),
+    ):
+        try:
+            payload = request_json(url, params=params, timeout=30)
+            raw_candidates.extend(_portfolio_rows_to_dicts(payload, "securities"))
+        except Exception:
+            continue
+
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in raw_candidates:
+        row = {str(key).upper(): value for key, value in row.items()}
+        row_isin = str(row.get("ISIN", "")).strip().upper()
+        secid = str(row.get("SECID", "")).strip().upper()
+        if row_isin != isin or not secid:
+            continue
+        row["ISIN"] = row_isin
+        row["SECID"] = secid
+        by_key[(row_isin, secid)] = row
+
+    candidates = list(by_key.values())
     if not candidates:
         raise ValueError(f"ISIN {isin} не найден на MOEX")
 
-    def candidate_rank(row: dict) -> int:
-        group = str(row.get("group", "")).lower()
-        type_value = str(row.get("type", "")).lower()
-        if "bond" in group or "bond" in type_value:
-            return 0
-        if any(token in group for token in ("share", "stock", "etf", "dr")):
-            return 1
-        return 2
+    enriched_candidates = []
+    for row in sorted(candidates, key=lambda candidate: _portfolio_candidate_rank(candidate, isin)):
+        boards = fetch_portfolio_security_boards(str(row.get("SECID", "")))
+        markets = _portfolio_candidate_markets(row, boards)
+        if "bonds" in markets:
+            market = "bonds"
+            instrument_type = "Облигация"
+        elif "shares" in markets:
+            market = "shares"
+            instrument_type = "Акция"
+        else:
+            market = ""
+            instrument_type = "Инструмент"
+        enriched_candidates.append({"row": row, "boards": boards, "market": market, "type": instrument_type})
 
-    profile = sorted(candidates, key=candidate_rank)[0]
-    group = str(profile.get("group", "")).lower()
-    type_value = str(profile.get("type", "")).lower()
-    is_bond = "bond" in group or "bond" in type_value
+    chosen = next((item for item in enriched_candidates if item["market"] in {"shares", "bonds"}), enriched_candidates[0])
+    row = chosen["row"]
+    market = chosen["market"]
+    instrument_type = chosen["type"]
+    if market not in {"shares", "bonds"}:
+        raise ValueError(f"Для ISIN {isin} MOEX не вернул рынок акций или облигаций")
+
     return {
         "ISIN": isin,
-        "SECID": str(profile.get("secid", "")).strip().upper(),
-        "Название": str(profile.get("shortname") or profile.get("name") or "").strip(),
-        "Тип": "Облигация" if is_bond else "Акция",
-        "Рынок": "bonds" if is_bond else "shares",
-        "Группа": str(profile.get("group", "")).strip(),
+        "SECID": str(row.get("SECID", "")).strip().upper(),
+        "Название": _first_present_text(row, ("SHORTNAME", "SECNAME", "NAME")),
+        "Тип": instrument_type,
+        "Рынок": market,
+        "Основной режим": _portfolio_primary_board(chosen["boards"], market),
+        "Группа": str(row.get("GROUP", "")).strip(),
     }
+
+
+def _portfolio_security_payloads(secid: str, market: str, board: str = "") -> list[dict]:
+    urls = []
+    if board:
+        urls.append(
+            f"https://iss.moex.com/iss/engines/stock/markets/{market}/boards/{board}/securities/{secid}.json"
+        )
+    urls.append(f"https://iss.moex.com/iss/engines/stock/markets/{market}/securities/{secid}.json")
+
+    payloads = []
+    seen_urls = set()
+    for url in urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        try:
+            payloads.append(request_json(url, timeout=30, params={"iss.meta": "off"}))
+        except Exception:
+            continue
+    return payloads
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -2403,21 +2526,13 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
     profile = resolve_portfolio_instrument(isin)
     secid = profile.get("SECID")
     market = profile.get("Рынок")
+    board = profile.get("Основной режим", "")
     if not secid or market not in {"shares", "bonds"}:
         raise ValueError(f"Не удалось определить рынок для {isin}")
 
-    url = f"https://iss.moex.com/iss/engines/stock/markets/{market}/securities/{secid}.json"
-    data = request_json(url, timeout=30, params={"iss.meta": "off"})
-
-    securities_rows = data.get("securities", {}).get("data", []) or []
-    securities_cols = [str(c).upper() for c in data.get("securities", {}).get("columns", []) or []]
-    market_rows = data.get("marketdata", {}).get("data", []) or []
-    market_cols = [str(c).upper() for c in data.get("marketdata", {}).get("columns", []) or []]
-
-    security_dicts = [dict(zip(securities_cols, row)) for row in securities_rows]
-    market_dicts = [dict(zip(market_cols, row)) for row in market_rows]
-    security_row = security_dicts[0] if security_dicts else {}
-
+    security_row: dict = {}
+    market_row: dict = {}
+    price = None
     price_columns = (
         "MARKETPRICE",
         "LAST",
@@ -2426,22 +2541,31 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
         "CLOSEPRICE",
         "WAPRICE",
         "PREVPRICE",
+        "PREVWAPRICE",
+        "PREVLEGALCLOSEPRICE",
     )
-    market_row = {}
-    price = None
-    for row in market_dicts:
-        candidate_price = _first_present_number(row, price_columns)
-        if candidate_price is not None and candidate_price > 0:
-            market_row = row
-            price = candidate_price
+
+    for payload in _portfolio_security_payloads(secid, market, board):
+        securities = _portfolio_rows_to_dicts(payload, "securities")
+        marketdata = _portfolio_rows_to_dicts(payload, "marketdata")
+        if securities and not security_row:
+            security_row = securities[0]
+        for row in marketdata:
+            candidate_price = _first_present_number(row, price_columns)
+            if candidate_price is not None and candidate_price > 0:
+                market_row = row
+                price = candidate_price
+                break
+        if price is not None:
             break
+
     if price is None:
         price = _first_present_number(security_row, price_columns)
 
     name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
     currency = _first_present_text(
         {**security_row, **market_row},
-        ("CURRENCYID", "CURRENCY", "FACEUNIT", "FACEUNIT_S", "SETTLECURRENCY"),
+        ("CURRENCYID", "CURRENCY", "FACEUNIT", "FACEUNIT_S", "SETTLECURRENCY", "PRICECURRENCY"),
     )
     if market == "bonds":
         facevalue = _first_present_number(
@@ -2455,15 +2579,20 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
         if price is not None and facevalue is not None:
             unit_value = facevalue * price / 100 + accrued_interest
     else:
+        facevalue = None
+        accrued_interest = None
         unit_value = price
+
+    if unit_value is None:
+        raise ValueError(f"Для ISIN {isin} не удалось получить цену инструмента")
 
     return {
         **profile,
         "Название": name,
         "Валюта инструмента": currency or "—",
         "Цена": price,
-        "Номинал": facevalue if market == "bonds" else None,
-        "НКД": accrued_interest if market == "bonds" else None,
+        "Номинал": facevalue,
+        "НКД": accrued_interest,
         "Стоимость одной бумаги": unit_value,
     }
 
