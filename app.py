@@ -58,6 +58,8 @@ if "vm_last_report" not in st.session_state:
     st.session_state["vm_last_report"] = None
 if "calendar_last_report" not in st.session_state:
     st.session_state["calendar_last_report"] = None
+if "portfolio_last_report" not in st.session_state:
+    st.session_state["portfolio_last_report"] = None
 
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {
@@ -71,6 +73,7 @@ if FORCED_ACTIVE_VIEW in {
     "turnover_export",
     "moex_news",
     "company_analysis",
+    "portfolio",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -131,6 +134,12 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
+    st.markdown("### Портфель по ISIN")
+    st.caption("Стоимость смешанного портфеля акций и облигаций с валютами, офертами, погашениями, дюрацией и купонами.")
+    if st.button("Открыть", key="open_portfolio", use_container_width=True):
+        st.session_state["active_view"] = "portfolio"
+        trigger_rerun()
+
     st.markdown("### AI Анализ компании")
     st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
     if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
@@ -2288,11 +2297,527 @@ def fetch_isins(isins, show_progress=True):
         time.sleep(0.12)
     except Exception:
         pass
+
     return results
 
 
 # ---------------------------
-# Calendar view
+# Portfolio valuation helpers
+# ---------------------------
+def parse_portfolio_entries(raw_text: str) -> tuple[list[dict], list[str]]:
+    """Parse lines like `ISIN | Amount` into normalized portfolio entries."""
+    entries: list[dict] = []
+    invalid_rows: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in re.split(r"[,;|/\t]+", line) if part.strip()]
+        if len(parts) < 2:
+            invalid_rows.append(line)
+            continue
+        isin = parts[0].upper()
+        amount = parse_number(parts[1])
+        if not isin_format_valid(isin) or not isin_checksum_valid(isin) or amount is None or amount <= 0:
+            invalid_rows.append(line)
+            continue
+        entries.append({"ISIN": isin, "Количество": amount})
+    return entries, invalid_rows
+
+
+def _first_present_number(row: dict, columns: tuple[str, ...]) -> float | None:
+    normalized = {str(key).upper(): value for key, value in (row or {}).items()}
+    for column in columns:
+        value = parse_number(normalized.get(column.upper()))
+        if value is not None:
+            return value
+    return None
+
+
+def _first_present_text(row: dict, columns: tuple[str, ...]) -> str:
+    normalized = {str(key).upper(): value for key, value in (row or {}).items()}
+    for column in columns:
+        value = normalized.get(column.upper())
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
+
+
+def _parse_portfolio_date(value):
+    if value is None or pd.isna(value):
+        return None
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    try:
+        return parsed.date()
+    except Exception:
+        return None
+
+
+def _format_portfolio_date(value) -> str:
+    parsed_date = _parse_portfolio_date(value)
+    return parsed_date.strftime("%Y-%m-%d") if parsed_date else ""
+
+
+def _portfolio_emitent_name(row: dict) -> str:
+    return _first_present_text(
+        row,
+        (
+            "EMITENTNAME",
+            "EMITENT_NAME",
+            "EMITENT_TITLE",
+            "EMITENTTITLE",
+            "ISSUERNAME",
+            "ISSUER",
+        ),
+    )
+
+
+def _portfolio_bond_nominal_currency(row: dict) -> str:
+    return _first_present_text(row, ("FACEUNIT", "FACEUNIT_S", "FACEUNIT_NAME"))
+
+
+def _portfolio_rows_to_dicts(payload: dict, block_name: str) -> list[dict]:
+    block = payload.get(block_name, {}) if isinstance(payload, dict) else {}
+    rows = block.get("data", []) or []
+    columns = [str(column).upper() for column in block.get("columns", []) or []]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_portfolio_security_boards(secid: str) -> list[dict]:
+    secid = str(secid).strip().upper()
+    if not secid:
+        return []
+    try:
+        payload = request_json(
+            f"https://iss.moex.com/iss/securities/{secid}/boards.json",
+            params={"iss.meta": "off", "iss.only": "boards"},
+            timeout=30,
+        )
+        return _portfolio_rows_to_dicts(payload, "boards")
+    except Exception:
+        return []
+
+
+def _portfolio_candidate_markets(row: dict, boards: list[dict]) -> set[str]:
+    markets = {str(board.get("MARKET", "")).strip().lower() for board in boards if board.get("MARKET")}
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    if "bond" in group or "bond" in type_value:
+        markets.add("bonds")
+    if any(token in group or token in type_value for token in ("share", "stock", "common_share", "preferred_share")):
+        markets.add("shares")
+    return markets
+
+
+def _portfolio_primary_board(boards: list[dict], market: str) -> str:
+    market = str(market).lower()
+    market_boards = [board for board in boards if str(board.get("MARKET", "")).lower() == market]
+    traded_boards = [board for board in market_boards if str(board.get("IS_TRADED", "")).strip() in {"1", "1.0", "True", "true"}]
+    candidates = traded_boards or market_boards
+
+    preferred_order = ("TQBR", "TQTF", "TQIF", "TQOB", "TQCB", "TQOD", "TQIR", "EQBR")
+    for preferred in preferred_order:
+        for board in candidates:
+            if str(board.get("BOARDID", "")).upper() == preferred:
+                return preferred
+
+    primary = [board for board in candidates if str(board.get("IS_PRIMARY", "")).strip() in {"1", "1.0", "True", "true"}]
+    if primary:
+        return str(primary[0].get("BOARDID", "")).strip().upper()
+    if candidates:
+        return str(candidates[0].get("BOARDID", "")).strip().upper()
+    return ""
+
+
+def _portfolio_candidate_rank(row: dict, requested_isin: str) -> tuple[int, int, str]:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    is_exact_isin = str(row.get("ISIN", "")).strip().upper() == requested_isin
+    is_bond = "bond" in group or "bond" in type_value
+    is_stock_share = any(token in group or token in type_value for token in ("stock_shares", "common_share", "preferred_share"))
+    is_share_like = any(token in group or token in type_value for token in ("share", "stock"))
+    is_fund_like = any(token in group or token in type_value for token in ("etf", "ppif", "mutual", "fund"))
+
+    if is_bond:
+        instrument_rank = 0
+    elif is_stock_share:
+        instrument_rank = 1
+    elif is_share_like and not is_fund_like:
+        instrument_rank = 2
+    elif is_fund_like:
+        instrument_rank = 4
+    else:
+        instrument_rank = 3
+    return (0 if is_exact_isin else 1, instrument_rank, str(row.get("SECID", "")))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def resolve_portfolio_instrument(isin: str) -> dict:
+    isin = str(isin).strip().upper()
+    raw_candidates: list[dict] = []
+
+    for url, params in (
+        (
+            f"https://iss.moex.com/iss/securities/{isin}.json",
+            {"iss.meta": "off", "iss.only": "securities"},
+        ),
+        (
+            "https://iss.moex.com/iss/securities.json",
+            {"q": isin, "iss.meta": "off", "iss.only": "securities"},
+        ),
+    ):
+        try:
+            payload = request_json(url, params=params, timeout=30)
+            raw_candidates.extend(_portfolio_rows_to_dicts(payload, "securities"))
+        except Exception:
+            continue
+
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in raw_candidates:
+        row = {str(key).upper(): value for key, value in row.items()}
+        row_isin = str(row.get("ISIN", "")).strip().upper()
+        secid = str(row.get("SECID", "")).strip().upper()
+        if row_isin != isin or not secid:
+            continue
+        row["ISIN"] = row_isin
+        row["SECID"] = secid
+        by_key[(row_isin, secid)] = row
+
+    candidates = list(by_key.values())
+    if not candidates:
+        raise ValueError(f"ISIN {isin} не найден на MOEX")
+
+    enriched_candidates = []
+    for row in sorted(candidates, key=lambda candidate: _portfolio_candidate_rank(candidate, isin)):
+        boards = fetch_portfolio_security_boards(str(row.get("SECID", "")))
+        markets = _portfolio_candidate_markets(row, boards)
+        if "bonds" in markets:
+            market = "bonds"
+            instrument_type = "Облигация"
+        elif "shares" in markets:
+            market = "shares"
+            instrument_type = "Акция"
+        else:
+            market = ""
+            instrument_type = "Инструмент"
+        enriched_candidates.append({"row": row, "boards": boards, "market": market, "type": instrument_type})
+
+    chosen = next((item for item in enriched_candidates if item["market"] in {"shares", "bonds"}), enriched_candidates[0])
+    row = chosen["row"]
+    market = chosen["market"]
+    instrument_type = chosen["type"]
+    if market not in {"shares", "bonds"}:
+        raise ValueError(f"Для ISIN {isin} MOEX не вернул рынок акций или облигаций")
+
+    return {
+        "ISIN": isin,
+        "SECID": str(row.get("SECID", "")).strip().upper(),
+        "Название": _first_present_text(row, ("SHORTNAME", "SECNAME", "NAME")),
+        "Эмитент": _portfolio_emitent_name(row),
+        "Тип": instrument_type,
+        "Рынок": market,
+        "Основной режим": _portfolio_primary_board(chosen["boards"], market),
+        "Группа": str(row.get("GROUP", "")).strip(),
+    }
+
+
+def _portfolio_security_payloads(secid: str, market: str, board: str = "") -> list[dict]:
+    urls = []
+    if board:
+        urls.append(
+            f"https://iss.moex.com/iss/engines/stock/markets/{market}/boards/{board}/securities/{secid}.json"
+        )
+    urls.append(f"https://iss.moex.com/iss/engines/stock/markets/{market}/securities/{secid}.json")
+
+    payloads = []
+    seen_urls = set()
+    for url in urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        try:
+            payloads.append(request_json(url, timeout=30, params={"iss.meta": "off"}))
+        except Exception:
+            continue
+    return payloads
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_portfolio_market_snapshot(isin: str) -> dict:
+    profile = resolve_portfolio_instrument(isin)
+    secid = profile.get("SECID")
+    market = profile.get("Рынок")
+    board = profile.get("Основной режим", "")
+    if not secid or market not in {"shares", "bonds"}:
+        raise ValueError(f"Не удалось определить рынок для {isin}")
+
+    security_row: dict = {}
+    market_row: dict = {}
+    price = None
+    price_columns = (
+        "MARKETPRICE",
+        "LAST",
+        "LCURRENTPRICE",
+        "LEGALCLOSEPRICE",
+        "CLOSEPRICE",
+        "WAPRICE",
+        "PREVPRICE",
+        "PREVWAPRICE",
+        "PREVLEGALCLOSEPRICE",
+    )
+
+    for payload in _portfolio_security_payloads(secid, market, board):
+        securities = _portfolio_rows_to_dicts(payload, "securities")
+        marketdata = _portfolio_rows_to_dicts(payload, "marketdata")
+        if securities and not security_row:
+            security_row = securities[0]
+        for row in marketdata:
+            candidate_price = _first_present_number(row, price_columns)
+            if candidate_price is not None and candidate_price > 0:
+                market_row = row
+                price = candidate_price
+                break
+        if price is not None:
+            break
+
+    if price is None:
+        price = _first_present_number(security_row, price_columns)
+
+    combined_row = {**security_row, **market_row}
+    name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
+    emitter_name = _portfolio_emitent_name(combined_row) or profile.get("Эмитент", "")
+    nominal_currency = ""
+    if market == "bonds":
+        facevalue = _first_present_number(
+            security_row,
+            ("FACEVALUE", "INITIALFACEVALUE", "LOTVALUE", "FACEVALUE_RUB"),
+        )
+        accrued_interest = _first_present_number(combined_row, ("ACCRUEDINT", "ACCRUEDINTEREST")) or 0.0
+        nominal_currency = _portfolio_bond_nominal_currency(security_row) or _portfolio_bond_nominal_currency(market_row)
+        currency = nominal_currency or _first_present_text(
+            combined_row,
+            ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+        )
+        unit_value = None
+        if price is not None and facevalue is not None:
+            unit_value = facevalue * price / 100 + accrued_interest
+    else:
+        facevalue = None
+        accrued_interest = None
+        currency = _first_present_text(
+            combined_row,
+            ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+        )
+        unit_value = price
+
+    if unit_value is None:
+        raise ValueError(f"Для ISIN {isin} не удалось получить цену инструмента")
+
+    return {
+        **profile,
+        "Название": name,
+        "Эмитент": emitter_name,
+        "Валюта инструмента": currency or "—",
+        "Валюта номинала": nominal_currency,
+        "Цена": price,
+        "Номинал": facevalue,
+        "НКД": accrued_interest,
+        "Стоимость одной бумаги": unit_value,
+    }
+
+
+def calculate_bond_portfolio_duration(put_date: str, maturity_date: str) -> tuple[str, int | None, float | None]:
+    today = datetime.today().date()
+    future_events = []
+    for event_name, value in (("Put оферта", put_date), ("Погашение", maturity_date)):
+        event_date = _parse_portfolio_date(value)
+        if event_date and event_date >= today:
+            future_events.append((event_date, event_name))
+    if not future_events:
+        return "", None, None
+    event_date, event_name = min(future_events, key=lambda item: item[0])
+    days = (event_date - today).days
+    return event_name, days, days / 360
+
+
+def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    rows = []
+    errors = []
+    for entry in entries:
+        isin = entry["ISIN"]
+        quantity = entry["Количество"]
+        try:
+            snapshot = fetch_portfolio_market_snapshot(isin)
+            instrument_value = None
+            unit_value = snapshot.get("Стоимость одной бумаги")
+            if unit_value is not None:
+                instrument_value = unit_value * quantity
+
+            row = {
+                "ISIN": isin,
+                "SECID": snapshot.get("SECID", ""),
+                "Тип": snapshot.get("Тип", ""),
+                "Название": snapshot.get("Название", ""),
+                "Эмитент": snapshot.get("Эмитент", ""),
+                "Количество": quantity,
+                "Валюта инструмента": snapshot.get("Валюта инструмента", "—"),
+                "Валюта номинала": snapshot.get("Валюта номинала", ""),
+                "Цена": snapshot.get("Цена"),
+                "Номинал": snapshot.get("Номинал"),
+                "НКД": snapshot.get("НКД"),
+                "Стоимость одной бумаги": unit_value,
+                "Стоимость инструмента": instrument_value,
+                "Дата оферты Put": "",
+                "Дата погашения": "",
+                "Событие для дюрации": "",
+                "Дней до события": None,
+                "Дюрация (дни/360)": None,
+                "Валюта купона": "",
+                "Размер купона": "",
+            }
+
+            if snapshot.get("Рынок") == "bonds":
+                bond_data = get_bond_data(isin)
+                put_date = _format_portfolio_date(bond_data.get("Дата оферты Put"))
+                maturity_date = _format_portfolio_date(bond_data.get("Дата погашения"))
+                duration_event, duration_days, duration_years = calculate_bond_portfolio_duration(
+                    put_date,
+                    maturity_date,
+                )
+                row.update(
+                    {
+                        "Дата оферты Put": put_date,
+                        "Дата погашения": maturity_date,
+                        "Событие для дюрации": duration_event,
+                        "Дней до события": duration_days,
+                        "Дюрация (дни/360)": duration_years,
+                        "Валюта купона": bond_data.get("Валюта купона", ""),
+                        "Размер купона": bond_data.get("Купон в валюте", ""),
+                    }
+                )
+            rows.append(row)
+        except Exception as exc:
+            errors.append(f"{isin}: {exc}")
+
+    df = pd.DataFrame(rows)
+    if df.empty or "Стоимость инструмента" not in df.columns:
+        totals = pd.DataFrame(columns=["Валюта инструмента", "Общая стоимость портфеля"])
+    else:
+        totals = (
+            df.dropna(subset=["Стоимость инструмента"])
+            .groupby("Валюта инструмента", dropna=False, as_index=False)["Стоимость инструмента"]
+            .sum()
+            .rename(columns={"Стоимость инструмента": "Общая стоимость портфеля"})
+        )
+    return df, totals, errors
+
+
+def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, totals_df: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        totals_df.to_excel(writer, index=False, sheet_name="Итого")
+        details_df.to_excel(writer, index=False, sheet_name="Инструменты")
+    return output.getvalue()
+
+
+# ---------------------------
+# Portfolio view
+# ---------------------------
+if st.session_state["active_view"] == "portfolio":
+    st.subheader("💼 Портфель по ISIN")
+    st.markdown(
+        "Введите смешанный портфель акций и облигаций в формате `ISIN | Количество`. "
+        "Стоимость считается в валюте инструмента; для облигаций цена MOEX в процентах от номинала "
+        "переводится в денежную стоимость одной бумаги с добавлением НКД, если MOEX вернул НКД."
+    )
+    portfolio_input = st.text_area(
+        "Список инструментов",
+        height=180,
+        placeholder="RU0009029540 | 10\nRU000A0JX0J2 | 100",
+        key="portfolio_manual_input",
+    )
+    if st.button("Рассчитать портфель", key="build_portfolio_report"):
+        entries, invalid_rows = parse_portfolio_entries(portfolio_input)
+        if invalid_rows:
+            st.warning(
+                "Строки с ошибками пропущены: "
+                f"{'; '.join(invalid_rows[:10])}{'...' if len(invalid_rows) > 10 else ''}"
+            )
+        if not entries:
+            st.error("Нет валидных строк в формате `ISIN | Количество`.")
+        else:
+            with st.spinner("Загружаем цены и параметры инструментов MOEX..."):
+                details_df, totals_df, errors = build_portfolio_report(entries)
+            xlsx = dataframe_to_portfolio_excel_bytes(details_df, totals_df)
+            st.session_state["portfolio_last_report"] = {
+                "details": details_df,
+                "totals": totals_df,
+                "errors": errors,
+                "xlsx": xlsx,
+                "csv": details_df.to_csv(index=False).encode("utf-8-sig"),
+            }
+
+    portfolio_report = st.session_state.get("portfolio_last_report")
+    if portfolio_report:
+        totals_df = portfolio_report["totals"]
+        details_df = portfolio_report["details"]
+        errors = portfolio_report.get("errors", [])
+
+        st.markdown("### Общая стоимость портфеля")
+        if totals_df.empty:
+            st.info("Нет инструментов с рассчитанной стоимостью.")
+        else:
+            metric_cols = st.columns(min(len(totals_df), 4))
+            for idx, (_, total_row) in enumerate(totals_df.iterrows()):
+                with metric_cols[idx % len(metric_cols)]:
+                    total_value = total_row.get("Общая стоимость портфеля")
+                    st.metric(
+                        str(total_row.get("Валюта инструмента", "—")),
+                        safe_format_int_with_sep(total_value) if total_value is not None else "—",
+                    )
+            st.dataframe(totals_df, use_container_width=True)
+
+        st.markdown("### Инструменты портфеля")
+        st.dataframe(details_df, use_container_width=True)
+
+        st.download_button(
+            label="💾 Скачать портфель (Excel)",
+            data=portfolio_report["xlsx"],
+            file_name="portfolio_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="portfolio_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать портфель (CSV)",
+            data=portfolio_report["csv"],
+            file_name="portfolio_report.csv",
+            mime="text/csv",
+            key="portfolio_csv_dl",
+        )
+        render_email_compose_section(
+            "Отчёт по портфелю",
+            "portfolio_report",
+            "portfolio_report.xlsx",
+            portfolio_report["xlsx"],
+        )
+        if errors:
+            st.warning("Не удалось обработать часть инструментов:")
+            for error in errors:
+                st.write(f"- {error}")
+    st.stop()
+
+
+# ---------------------------
+# Company analysis view
 # ---------------------------
 if st.session_state["active_view"] == "company_analysis":
     st.header("Новости по keyword + финансовое LLM summary")
