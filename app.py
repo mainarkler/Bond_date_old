@@ -2650,7 +2650,9 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
     combined_row = {**security_row, **market_row}
     name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
     emitter_name = _portfolio_emitent_name(combined_row) or profile.get("Эмитент", "")
+    bond_subtype = ""
     if market == "bonds":
+        bond_subtype = _first_present_text(combined_row, ("SECSUBTYPE", "SEC_SUBTYPE"))
         facevalue = _first_present_number(
             security_row,
             ("FACEVALUE", "INITIALFACEVALUE", "LOTVALUE", "FACEVALUE_RUB"),
@@ -2681,6 +2683,7 @@ def fetch_portfolio_market_snapshot(isin: str) -> dict:
         **profile,
         "Название": name,
         "Эмитент": emitter_name,
+        "Тип облигации": bond_subtype,
         "Валюта инструмента": _normalize_portfolio_currency(currency) or "—",
         "Цена": price,
         "Номинал": facevalue,
@@ -2757,6 +2760,7 @@ def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str,
                 "ISIN": isin,
                 "SECID": snapshot.get("SECID", ""),
                 "Тип": snapshot.get("Тип", ""),
+                "Тип облигации": snapshot.get("Тип облигации", ""),
                 "Название": snapshot.get("Название", ""),
                 "Эмитент": snapshot.get("Эмитент", ""),
                 "Количество": quantity,
@@ -2865,6 +2869,21 @@ def _format_portfolio_excel_section(worksheet, section_df: pd.DataFrame, header_
             worksheet.cell(row=row_idx, column=col_idx).number_format = number_format
 
 
+def build_portfolio_limit_request_df(details_df: pd.DataFrame) -> pd.DataFrame:
+    limit_columns = {
+        "Эмитент": "эмитент",
+        "ISIN": "isin",
+        "Стоимость инструмента, RUB": "стоимость в рублях",
+        "Тип": "тип",
+    }
+    if details_df.empty:
+        return pd.DataFrame(columns=list(limit_columns.values()))
+    limit_df = details_df.reindex(columns=limit_columns.keys()).rename(columns=limit_columns)
+    limit_df["эмитент"] = limit_df["эмитент"].fillna("—").replace("", "—")
+    limit_df["стоимость в рублях"] = pd.to_numeric(limit_df["стоимость в рублях"], errors="coerce")
+    return limit_df
+
+
 def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[str, pd.DataFrame]) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -2895,6 +2914,11 @@ def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[s
             )
             _format_portfolio_excel_section(writer.sheets[sheet_name], prepared_section, header_row)
             startrow += len(prepared_section) + 3
+
+        limit_sheet_name = "Limit_reqest"
+        limit_df = _prepare_portfolio_excel_section(build_portfolio_limit_request_df(details_df))
+        limit_df.to_excel(writer, index=False, sheet_name=limit_sheet_name)
+        _format_portfolio_excel_section(writer.sheets[limit_sheet_name], limit_df, 1)
     return output.getvalue()
 
 
