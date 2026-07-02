@@ -1021,34 +1021,40 @@ def load_market_wide_history_values(market_kind: str, start_date: str, end_date:
     if not boards:
         boards = ["TQBR"] if market_kind == "shares" else ["TQCB"]
 
+    # The board-wide securities endpoint ignores from/till and returns only the
+    # latest trading day. Iterate over each calendar day in the range using the
+    # `date` param so the full period is covered.
+    date_range = pd.date_range(start=start_date, end=end_date, freq="D")
+    trading_days = [d.strftime("%Y-%m-%d") for d in date_range]
+
     all_rows: list[list[object]] = []
     columns: list[str] = []
     for board in boards:
-        start = 0
-        while True:
-            url = (
-                f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/"
-                f"boards/{board}/securities.json"
-            )
-            response = request_get(
-                url,
-                params={
-                    "from": start_date,
-                    "till": end_date,
-                    "start": start,
-                    "iss.only": "history",
-                    "iss.meta": "off",
-                    "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID,BOARDID",
-                },
-                timeout=200,
-            )
-            payload = response.json().get("history", {})
-            rows = payload.get("data", [])
-            columns = payload.get("columns", columns)
-            if not rows:
-                break
-            all_rows.extend(rows)
-            start += len(rows)
+        for day in trading_days:
+            start = 0
+            while True:
+                url = (
+                    f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/"
+                    f"boards/{board}/securities.json"
+                )
+                response = request_get(
+                    url,
+                    params={
+                        "date": day,
+                        "start": start,
+                        "iss.only": "history",
+                        "iss.meta": "off",
+                        "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID,BOARDID",
+                    },
+                    timeout=200,
+                )
+                payload = response.json().get("history", {})
+                rows = payload.get("data", [])
+                columns = payload.get("columns", columns)
+                if not rows:
+                    break
+                all_rows.extend(rows)
+                start += len(rows)
 
     if not all_rows:
         return pd.DataFrame(columns=["TRADEDATE", "VALUE", "NUMTRADES", "VOLUME", "SECID", "SHORTNAME"])
@@ -4442,7 +4448,10 @@ if st.session_state["active_view"] == "market_statistics":
                 combined_df = pd.concat(full_rows, ignore_index=True)
                 if exclude_etf:
                     shortname_series = combined_df.get("SHORTNAME", pd.Series("", index=combined_df.index)).astype(str)
-                    combined_df = combined_df[~shortname_series.str.contains(r"\bETF\b", case=False, na=False)]
+                    etf_mask = shortname_series.str.contains(r"\bETF\b", case=False, na=False)
+                    secid_series = combined_df.get("SECID", pd.Series("", index=combined_df.index)).astype(str)
+                    ru000_mask = secid_series.str.startswith("RU000", na=False)
+                    combined_df = combined_df[~(etf_mask | ru000_mask)]
                     if combined_df.empty:
                         st.error("После исключения ETF данные отсутствуют.")
                         st.stop()
