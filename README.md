@@ -68,3 +68,15 @@ python -m compileall app.py sell_stress_ui
 - Sheet 1 contains the chart with vertical axis `DeltaP` and horizontal axis `Q`.
 - HTML report includes filters by index, ticker, and ISIN.
 - Batch report ranks ISINs by index inclusion across the full MOEX stock-index catalog (main/sector/thematic), using MOEX index analytics endpoint and ticker -> ISIN resolution via `.../markets/shares/securities/{ticker}`.
+
+## Анализ эмиссионных документов
+
+Панель **«Анализ эмиссионных документов»** принимает `PDF` и `DOCX`. PDF обрабатывается постранично: для страниц без текстового слоя используется OCR; затем текст разбивается на токенизированные блоки. Каждый блок локальная открытая модель преобразует в JSON фактов, а итоговая локальная модель формирует summary из этих JSON.
+
+Внешние API, `OPENAI_API_KEY` и сетевые запросы для анализа **не используются**. Базовый структурированный анализ работает без модели. Локальная GGUF-модель (опционально) улучшает summary и требует вручную подготовленного окружения с `llama-cpp-python`; рекомендуемый вариант для русского языка — `Qwen2.5-3B-Instruct-Q4_K_M.gguf`. Скачайте/разместите файл модели заранее в окружении и задайте путь:
+
+```bash
+export LOCAL_LLM_MODEL_PATH=/opt/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf
+```
+
+По умолчанию приложение ищет модель в `models/Qwen2.5-3B-Instruct-Q4_K_M.gguf`. Если файла либо `llama-cpp-python` нет, приложение остаётся работоспособным и формирует структурированную локальную сводку по правилам.
