@@ -3084,11 +3084,9 @@ if st.session_state["active_view"] == "emission_documents":
         "Результат — первичная аналитическая сводка, а не инвестиционная рекомендация. "
         "Все условия и цифры необходимо сверять с оригиналом документа."
     )
-    emission_model_path = os.getenv("LOCAL_LLM_MODEL_PATH", "models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
-    st.caption(f"Локальная модель: `{emission_model_path}`. Внешние API и ключи не используются.")
     uploaded_document = st.file_uploader(
         "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
-        help="Документ разбивается на токенизированные блоки; каждая страница без текста распознаётся через OCR.",
+        help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
     )
     if uploaded_document is not None:
         st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
@@ -3096,9 +3094,7 @@ if st.session_state["active_view"] == "emission_documents":
             with st.spinner("Извлекаем текст, при необходимости распознаём скан и анализируем условия выпуска..."):
                 try:
                     st.session_state["emission_document_result"] = analyse_emission_document(
-                        uploaded_document.name,
-                        uploaded_document.getvalue(),
-                        model_path=emission_model_path,
+                        uploaded_document.name, uploaded_document.getvalue()
                     )
                 except ValueError as exc:
                     st.error(str(exc))
@@ -3116,8 +3112,6 @@ if st.session_state["active_view"] == "emission_documents":
             f"{status} · {result.get('document_coverage', '')} · "
             f"страниц: {extraction.get('pages') or '—'} · OCR: {'да' if extraction.get('used_ocr') else 'нет'}"
         )
-        if result.get("recognized_blocks"):
-            st.caption(f"В JSON распознано блоков: {len(result['recognized_blocks'])}")
 
         st.subheader("Основные данные")
         key_data = result.get("key_data") or []
@@ -3133,8 +3127,6 @@ if st.session_state["active_view"] == "emission_documents":
 
         for warning in extraction.get("warnings", []):
             st.warning(warning)
-        with st.expander("Показать распознанные JSON-блоки"):
-            st.json(result.get("recognized_blocks", []))
         with st.expander("Показать извлечённый фрагмент"):
             st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
     st.stop()
