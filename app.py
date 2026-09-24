@@ -3088,8 +3088,7 @@ if st.session_state["active_view"] == "emission_documents":
     st.caption(f"Локальная модель: `{emission_model_path}`. Внешние API и ключи не используются.")
     uploaded_document = st.file_uploader(
         "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
-        help="Документ разбивается на токенизированные блоки; каждая страница без текста распознаётся через OCR.",
-    )
+        help="Документ разбивается на токенизированные блоки; каждая страница без текста распознаётся через OCR.",)
     uploaded_document = st.file_uploader(
         "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
         help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
