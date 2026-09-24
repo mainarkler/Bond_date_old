@@ -147,9 +147,10 @@ if st.session_state["active_view"] == "home":
     if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
         st.session_state["active_view"] = "company_analysis"
         trigger_rerun()
+
     st.markdown("### Анализ эмиссионных документов")
-    st.caption("Офлайн-разбор PDF/DOCX: ключевые параметры и пункты для проверки.")
-    if st.button("Открыть", key="open_emission_documents", use_container_width=True):
+    st.caption("Загрузка PDF/DOCX, OCR сканов и краткое резюме условий выпуска и рисков.")
+    if st.button("Открыть", key="open_emission_documents_tile", use_container_width=True):
         st.session_state["active_view"] = "emission_documents"
         trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
@@ -3071,51 +3072,85 @@ if st.session_state["active_view"] == "portfolio":
 
 
 # ---------------------------
-# Emission documents view
+# Issuer emission document analysis view
 # ---------------------------
 if st.session_state["active_view"] == "emission_documents":
     st.header("📄 Анализ эмиссионных документов")
-    st.caption("Работает локально, без API-ключей. PDF обрабатывается постранично; для сканов применяется OCR.")
-    uploaded_document = st.file_uploader(
-        label="Эмиссионный документ",
-        type=("pdf", "docx"),
-        key="emission_document_upload",
+    st.caption(
+        "Загрузите проспект, решение о выпуске или иной PDF/DOCX. Для PDF-сканов запускается OCR "
+        "(при установленном Tesseract с языками rus+eng)."
     )
-    if uploaded_document is not None and st.button("Проанализировать", type="primary", use_container_width=True):
-        with st.spinner("Извлекаем текст и формируем структурированную сводку..."):
-            try:
-                st.session_state["emission_document_result"] = analyse_emission_document(
-                    uploaded_document.name, uploaded_document.getvalue()
-                )
-            except ValueError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Ошибка обработки документа: {exc}")
+    st.info(
+        "Результат — первичная аналитическая сводка, а не инвестиционная рекомендация. "
+        "Все условия и цифры необходимо сверять с оригиналом документа."
+    )
+    emission_model_path = os.getenv("LOCAL_LLM_MODEL_PATH", "models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
+    st.caption(f"Локальная модель: `{emission_model_path}`. Внешние API и ключи не используются.")
+    uploaded_document = st.file_uploader(
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Документ разбивается на токенизированные блоки; каждая страница без текста распознаётся через OCR.",
+    uploaded_document = st.file_uploader(
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
+    )
+    if uploaded_document is not None:
+        st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
+        if st.button("Сформировать summary", type="primary", use_container_width=True, key="analyse_emission_document"):
+            with st.spinner("Извлекаем текст, при необходимости распознаём скан и анализируем условия выпуска..."):
+                try:
+                    st.session_state["emission_document_result"] = analyse_emission_document(
+                        uploaded_document.name,
+                        uploaded_document.getvalue(),
+                        model_path=emission_model_path,
+                        uploaded_document.name, uploaded_document.getvalue()
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Не удалось обработать документ: {exc}")
+
     result = st.session_state.get("emission_document_result")
     if result:
+        extraction = result.get("extraction", {})
+        st.divider()
         st.subheader("Краткое резюме")
-        st.write(result["summary"])
-        st.caption(result["coverage"])
+        st.write(result.get("summary", "Резюме не сформировано."))
+        status = "LLM-анализ" if result.get("llm_used") else "Извлечённый текст / резервный режим"
+        st.caption(
+            f"{status} · {result.get('document_coverage', '')} · "
+            f"страниц: {extraction.get('pages') or '—'} · OCR: {'да' if extraction.get('used_ocr') else 'нет'}"
+        )
+        if result.get("recognized_blocks"):
+            st.caption(f"В JSON распознано блоков: {len(result['recognized_blocks'])}")
+
         st.subheader("Основные данные")
-        if result["key_data"]:
-            st.dataframe(pd.DataFrame(result["key_data"]), use_container_width=True, hide_index=True)
+        key_data = result.get("key_data") or []
+        if key_data:
+            rows = [{"Параметр": item.get("name", ""), "Значение": item.get("value", ""), "Комментарий": item.get("note", "")} for item in key_data]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
-            st.info("Структурированные параметры не найдены автоматически.")
+            st.caption("Структурированные параметры не найдены автоматически.")
+
         st.subheader("На что обратить внимание")
-        for item in result["attention_points"]:
-            st.markdown(f"- {item}")
-        for warning in result["warnings"]:
+        for point in result.get("attention_points") or ["Риски не были выделены автоматически — проверьте первичный документ."]:
+            st.markdown(f"- {point}")
+
+        for warning in extraction.get("warnings", []):
             st.warning(warning)
-        with st.expander("Начальный фрагмент текста"):
-            st.caption("Показаны первые 3 000 символов.")
-            st.text(result["excerpt"])
-        page_numbers = [page["number"] for page in result["pages"] if page["number"] is not None]
-        if page_numbers:
-            with st.expander("Текст по страницам"):
-                page_number = st.selectbox("Страница", page_numbers, key="emission_page_number")
-                page = next(item for item in result["pages"] if item["number"] == page_number)
-                st.caption(f"Источник: {page['source']}")
-                st.text(page["text"] or "Текст страницы не извлечён.")
+        with st.expander("Показать распознанные JSON-блоки"):
+            st.json(result.get("recognized_blocks", []))
+        with st.expander("Показать начальный извлечённый фрагмент"):
+            st.caption("Показаны первые 3 000 символов. Для проверки остальных страниц используйте просмотр ниже.")
+            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
+        page_blocks = extraction.get("blocks", [])
+        available_pages = sorted({block.get("page") for block in page_blocks if block.get("page") is not None})
+        if available_pages:
+            with st.expander("Показать извлечённый текст по страницам"):
+                selected_page = st.selectbox("Страница", available_pages, key="emission_document_page")
+                selected_text = "\n\n".join(block.get("text", "") for block in page_blocks if block.get("page") == selected_page)
+                st.text(selected_text or "Текст страницы не извлечён.")
+        with st.expander("Показать извлечённый фрагмент"):
+            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
     st.stop()
 
 
