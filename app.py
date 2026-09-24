@@ -3092,7 +3092,7 @@ if st.session_state["active_view"] == "emission_documents":
     uploaded_document = st.file_uploader(
         "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
         help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
-    )
+    ))
     if uploaded_document is not None:
         st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
         if st.button("Сформировать summary", type="primary", use_container_width=True, key="analyse_emission_document"):
