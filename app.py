@@ -3103,7 +3103,7 @@ if st.session_state["active_view"] == "emission_documents":
                         uploaded_document.getvalue(),
                         model_path=emission_model_path,
                         uploaded_document.name, uploaded_document.getvalue()
-                    )
+                    
                 except ValueError as exc:
                     st.error(str(exc))
                 except Exception as exc:
