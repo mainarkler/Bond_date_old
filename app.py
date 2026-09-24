@@ -3087,13 +3087,11 @@ if st.session_state["active_view"] == "emission_documents":
     emission_model_path = os.getenv("LOCAL_LLM_MODEL_PATH", "models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
     st.caption(f"Локальная модель: `{emission_model_path}`. Внешние API и ключи не используются.")
     uploaded_document = st.file_uploader(
-        label="Эмиссионный документ",
-        type=("pdf", "docx"),
-        key="emission_document_upload",
-        help=(
-            "Документ разбивается на токенизированные блоки; "
-            "каждая страница без текста распознаётся через OCR."
-        ),
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Документ разбивается на токенизированные блоки; каждая страница без текста распознаётся через OCR.",
+    uploaded_document = st.file_uploader(
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
     )
     if uploaded_document is not None:
         st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
@@ -3104,6 +3102,7 @@ if st.session_state["active_view"] == "emission_documents":
                         uploaded_document.name,
                         uploaded_document.getvalue(),
                         model_path=emission_model_path,
+                        uploaded_document.name, uploaded_document.getvalue()
                     )
                 except ValueError as exc:
                     st.error(str(exc))
@@ -3150,6 +3149,8 @@ if st.session_state["active_view"] == "emission_documents":
                 selected_page = st.selectbox("Страница", available_pages, key="emission_document_page")
                 selected_text = "\n\n".join(block.get("text", "") for block in page_blocks if block.get("page") == selected_page)
                 st.text(selected_text or "Текст страницы не извлечён.")
+        with st.expander("Показать извлечённый фрагмент"):
+            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
     st.stop()
 
 
