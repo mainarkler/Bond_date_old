@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sellStressForm version="1.0">
+  <metadata>
+    <title>Sell Stress Analyzer</title>
+    <description>UI configuration for stress-testing price impact under sell pressure.</description>
+  </metadata>
+
+  <filters>
+    <field id="index_filter" type="select" label="Index" required="false" default="ALL">
+      <option value="ALL">All indices</option>
+      <option value="IMOEX">IMOEX</option>
+      <option value="RTS">RTS</option>
+    </field>
+
+    <field id="asset_filter" type="text" label="Stock filter" required="false" placeholder="Type ticker or company" />
+  </filters>
+
+  <inputs>
+    <field id="asset_selector" type="select" label="Asset" required="true" searchable="true" source="filtered_assets" />
+    <field id="volume" type="number" label="Volume to sell (RUB)" required="true" min="1" step="1000000" default="1000000000" />
+    <field id="c_value" type="number" label="Impact coefficient C" required="true" min="0" max="1" step="0.05" default="1" />
+    <field id="date_from" type="date" label="History start date" required="true" default="2024-01-01" />
+    <field id="q_mode" type="select" label="Q vector mode" required="true" default="log">
+      <option value="log">log</option>
+      <option value="linear">linear</option>
+    </field>
+  </inputs>
+
+  <actions>
+    <button id="calculate" label="Calculate sell stress" action="calculate_sell_stress" />
+  </actions>
+
+  <outputs>
+    <area id="result_table" type="table" />
+    <area id="impact_chart" type="chart" chartType="line" x="Q" y="PriceAfterSell" />
+    <area id="export" type="download" formats="csv,html" />
+    <area id="batch_web_report" type="html" description="Batch report with ISIN index grouping and interactive filters" />
+  </outputs>
+</sellStressForm>

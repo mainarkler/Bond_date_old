@@ -1,25 +1,42 @@
 import csv
+import asyncio
 import os
 import math
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
+from pathlib import Path
 
+import altair as alt
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
+from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
+from sell_stress_ui.data import ALL_STOCK_INDEX_CODES, fetch_index_membership_by_isin
+from sell_stress_ui.reporting import build_share_batch_html_report
 from email_compose import render_email_compose_section
+from news.fetcher import NewsFetcher
+from news.models import NewsQuery
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.moex_turnover import MoexTurnoverClient
+from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
+from services.keyword_news_block import build_keyword_news_block_sync
+from services.emission_document_analysis import analyse_emission_document
 
 # ---------------------------
 # Streamlit page setup
@@ -42,6 +59,8 @@ if "vm_last_report" not in st.session_state:
     st.session_state["vm_last_report"] = None
 if "calendar_last_report" not in st.session_state:
     st.session_state["calendar_last_report"] = None
+if "portfolio_last_report" not in st.session_state:
+    st.session_state["portfolio_last_report"] = None
 
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {
@@ -54,6 +73,9 @@ if FORCED_ACTIVE_VIEW in {
     "market_statistics",
     "turnover_export",
     "moex_news",
+    "company_analysis",
+    "emission_documents",
+    "portfolio",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -83,6 +105,17 @@ def init_sell_stres_state():
             st.session_state[key] = value
 
 
+@st.cache_data(show_spinner=False)
+def get_sell_stress_xml_form_config():
+    xml_path = Path(__file__).resolve().parent / "sell_stress_ui" / "schemas" / "sell_stress_form.xml"
+    return load_sell_stress_form_config(xml_path)
+
+
+@st.cache_data(show_spinner=False)
+def get_sell_stress_asset_universe():
+    return load_asset_universe()
+
+
 if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
     if st.button("⬅️ На главную"):
         st.session_state["active_view"] = "home"
@@ -103,6 +136,23 @@ if st.session_state["active_view"] == "home":
         if st.button("Открыть", key="open_calendar", use_container_width=True):
             st.session_state["active_view"] = "calendar"
             trigger_rerun()
+    st.markdown("### Портфель по ISIN")
+    st.caption("Стоимость смешанного портфеля акций и облигаций с валютами, офертами, погашениями, дюрацией и купонами.")
+    if st.button("Открыть", key="open_portfolio", use_container_width=True):
+        st.session_state["active_view"] = "portfolio"
+        trigger_rerun()
+
+    st.markdown("### AI Анализ компании")
+    st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
+    if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
+        st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
+
+    st.markdown("### Анализ эмиссионных документов")
+    st.caption("Загрузка PDF/DOCX, OCR сканов и краткое резюме условий выпуска и рисков.")
+    if st.button("Открыть", key="open_emission_documents_tile", use_container_width=True):
+        st.session_state["active_view"] = "emission_documents"
+        trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
         st.markdown("### Расчет VM")
@@ -156,6 +206,612 @@ if st.session_state["active_view"] == "home":
 # ---------------------------
 # HTTP session with retries
 # ---------------------------
+GRAMS_PER_TROY_OUNCE = 0.03574
+
+
+def convert_ounce_price_to_gram(price_series):
+    return price_series / GRAMS_PER_TROY_OUNCE
+
+
+def format_int_with_sep(value):
+    rounded = int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return f"{rounded:,}".replace(",", " ")
+
+
+def safe_format_int_with_sep(value):
+    formatter = globals().get("format_int_with_sep")
+    if callable(formatter):
+        return formatter(value)
+    rounded = int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return f"{rounded:,}".replace(",", " ")
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_gold_chart_data():
+    def _download(symbol, period, interval, prepost=False):
+        try:
+            return yf.download(
+                symbol,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                prepost=prepost,
+            )
+        except Exception:
+            return pd.DataFrame()
+
+    daily_candidates = [
+        ("GC=F", "6mo", "1d"),
+        ("XAUUSD=X", "6mo", "1d"),
+        ("GC=F", "1y", "1d"),
+        ("XAUUSD=X", "1y", "1d"),
+    ]
+    intraday_candidates = [
+        ("GC=F", "1d", "1m"),
+        ("XAUUSD=X", "5d", "5m"),
+        ("GC=F", "5d", "5m"),
+    ]
+
+    daily = pd.DataFrame()
+    for symbol, period, interval in daily_candidates:
+        daily = _download(symbol, period, interval)
+        if daily is not None and not daily.empty:
+            break
+
+    intraday = pd.DataFrame()
+    for symbol, period, interval in intraday_candidates:
+        intraday = _download(symbol, period, interval, prepost=False)
+        if intraday is not None and not intraday.empty:
+            break
+
+    return daily, intraday
+
+
+def _normalize_close_series(df):
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    close_series = df["Close"]
+    if isinstance(close_series, pd.DataFrame):
+        close_series = close_series.iloc[:, 0]
+    return close_series.dropna()
+
+
+def get_gold_close_series():
+    daily_raw, intraday_raw = fetch_gold_chart_data()
+    daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
+    intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
+    return daily_close, intraday_close
+
+
+def _extract_news_entries(payload, bucket):
+    if isinstance(payload, dict):
+        has_title = isinstance(payload.get("title"), str)
+        has_url = isinstance(payload.get("url"), str)
+        published = payload.get("publishedAt") or payload.get("datePublished") or payload.get("published")
+        if has_title and has_url and isinstance(published, str):
+            bucket.append(
+                {
+                    "title": payload.get("title", "").strip(),
+                    "url": payload.get("url", "").strip(),
+                    "published_at": str(published).strip(),
+                    "source": str(payload.get("publisher", "")) or "TradingView",
+                }
+            )
+        for value in payload.values():
+            _extract_news_entries(value, bucket)
+    elif isinstance(payload, list):
+        for item in payload:
+            _extract_news_entries(item, bucket)
+
+
+def _parse_news_datetime(value: str):
+    if not value:
+        return None
+    value = value.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is not None:
+            return dt.astimezone(tz=None).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        pass
+    for fmt in ("%a, %d %b %Y %H:%M:%S GMT", "%b %d, %Y, %H:%M %Z"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _strip_html_tags(value: str) -> str:
+    return re.sub(r"<[^>]+>", "", value or "").strip()
+
+
+def _extract_news_from_cards(html: str):
+    items = []
+    card_pattern = re.compile(
+        r'<a[^>]+href="(?P<href>/news/[^"]+)"[^>]*>.*?'
+        r'<relative-time[^>]+event-time="(?P<event_time>[^"]+)"[^>]*>.*?</relative-time>.*?'
+        r'<span class="provider-[^"]*"><span[^>]*>(?P<provider>.*?)</span>.*?</span>.*?'
+        r'<div[^>]+data-qa-id="news-headline-title"[^>]*>(?P<title>.*?)</div>.*?'
+        r"</a>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for match in card_pattern.finditer(html):
+        href = match.group("href") or ""
+        title = _strip_html_tags(match.group("title"))
+        provider = _strip_html_tags(match.group("provider"))
+        event_time = (match.group("event_time") or "").strip()
+        if not title or not event_time:
+            continue
+        items.append(
+            {
+                "title": title,
+                "url": f"https://www.tradingview.com{href}" if href.startswith("/") else href,
+                "published_at": event_time,
+                "source": provider or "TradingView",
+            }
+        )
+    return items
+
+
+def _fetch_xauusd_news_like_ai_analysis():
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(days=1)
+    query = NewsQuery(
+        query="XAUUSD OR Gold spot OR Gold price",
+        start_date=start_utc,
+        end_date=now_utc,
+        language="en",
+        limit=40,
+    )
+    try:
+        fetched_news = asyncio.run(NewsFetcher().fetch_news(query))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            fetched_news = loop.run_until_complete(NewsFetcher().fetch_news(query))
+        finally:
+            loop.close()
+    prepared = []
+    for item in fetched_news:
+        published = item.published_at
+        if published.tzinfo is not None:
+            published = published.astimezone(timezone.utc).replace(tzinfo=None)
+        if published >= datetime.utcnow() - timedelta(days=1):
+            prepared.append(
+                {
+                    "title": item.title.strip(),
+                    "url": item.url.strip(),
+                    "published_at": published.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+    prepared.sort(key=lambda x: x["published_at"], reverse=True)
+    if not prepared:
+        for item in fetched_news[:15]:
+            published = item.published_at
+            if published.tzinfo is not None:
+                published = published.astimezone(timezone.utc).replace(tzinfo=None)
+            prepared.append(
+                {
+                    "title": item.title.strip(),
+                    "url": item.url.strip(),
+                    "published_at": published.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+    return prepared
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_xauusd_tradingview_news():
+    url = "https://www.tradingview.com/symbols/XAUUSD/news/?exchange=OANDA"
+    response = HTTP_SESSION.get(
+        url,
+        timeout=20,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    response.raise_for_status()
+    html = response.text
+    scripts = re.findall(
+        r'<script[^>]*type="application/ld\\+json"[^>]*>(.*?)</script>',
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not scripts:
+        scripts = re.findall(
+            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+    parsed_entries = []
+    for block in scripts:
+        try:
+            payload = json.loads(block.strip())
+        except Exception:
+            continue
+        _extract_news_entries(payload, parsed_entries)
+    parsed_entries.extend(_extract_news_from_cards(html))
+
+    if not parsed_entries:
+        return _fetch_xauusd_news_like_ai_analysis()
+
+    unique_news = {}
+    for item in parsed_entries:
+        news_url = item.get("url")
+        if news_url and news_url not in unique_news:
+            unique_news[news_url] = item
+
+    yesterday_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    filtered = []
+    for item in unique_news.values():
+        parsed_dt = _parse_news_datetime(item.get("published_at", ""))
+        if parsed_dt and parsed_dt >= yesterday_start:
+            filtered.append(
+                {
+                    "title": item["title"],
+                    "url": item["url"],
+                    "published_at": parsed_dt.strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+
+    filtered.sort(key=lambda x: x["published_at"], reverse=True)
+    if not filtered:
+        return _fetch_xauusd_news_like_ai_analysis()
+    return filtered
+
+
+def calculate_var_results(result_D, K_values=None, t=0.95):
+    result_D = np.asarray(result_D, dtype=float)
+    result_D = result_D[np.isfinite(result_D)]
+
+    if result_D.size == 0:
+        return {
+            "confidence_level": t,
+            "T": norm.ppf(t),
+            "Q": None,
+            "result_D": result_D,
+            "K_values": K_values or [],
+            "VAR_results": {},
+        }
+
+    if K_values is None:
+        K_values = [1, 5, 10]
+
+    T = norm.ppf(t)
+    Q = float(np.std(result_D))
+    var_results = {}
+    for K in K_values:
+        M = float(np.mean(result_D) * K)
+        var_percent = (-Q * np.sqrt(K) * T + M) * 100
+        var_results[int(K)] = float(var_percent)
+
+    return {
+        "confidence_level": t,
+        "T": float(T),
+        "Q": Q,
+        "result_D": result_D,
+        "K_values": [int(k) for k in K_values],
+        "VAR_results": var_results,
+    }
+
+
+def build_var_table(var_payload):
+    var_results = var_payload.get("VAR_results", {})
+    if not var_results:
+        return pd.DataFrame(columns=["Дни", "VaR, %"])
+    return pd.DataFrame(
+        [{"Дни": int(k), "VaR, %": float(v)} for k, v in var_results.items()]
+    )
+
+
+def _style_gold_axis(ax, title, xlabel, ylabel, formatter=None, y_formatter=None):
+    ax.set_title(title, fontsize=12, fontweight="normal", color="#262730", pad=10)
+    ax.set_xlabel(xlabel, color="#262730")
+    ax.set_ylabel(ylabel, color="#262730")
+    ax.grid(True, linestyle="-", linewidth=0.5, alpha=0.18, color="#d9d9d9")
+    ax.set_facecolor("#ffffff")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#d9d9d9")
+    ax.spines["bottom"].set_color("#d9d9d9")
+    if formatter is not None:
+        ax.xaxis.set_major_formatter(formatter)
+    if y_formatter is not None:
+        ax.yaxis.set_major_formatter(y_formatter)
+    ax.tick_params(axis="x", labelrotation=25, colors="#262730")
+    ax.tick_params(axis="y", colors="#262730")
+
+
+def get_gold_y_bounds(series, intraday=False):
+    min_value = float(series.min())
+    max_value = float(series.max())
+    if min_value == max_value:
+        padding = abs(max_value) * 0.1 if max_value else 1.0
+        return min_value - padding, max_value + padding
+    spread = max_value - min_value
+    dynamic_padding = spread * (0.12 if intraday else 0.10)
+    min_floor_padding = max(abs(max_value), abs(min_value)) * 0.002
+    padding = max(dynamic_padding, min_floor_padding)
+    lower_bound = min_value - padding
+    upper_bound = max_value + padding
+    return lower_bound, upper_bound
+
+
+def _apply_gold_y_padding(ax, series, intraday=False):
+    lower_bound, upper_bound = get_gold_y_bounds(series, intraday=intraday)
+    ax.set_ylim(lower_bound, upper_bound)
+
+
+
+def build_gold_chart_display(series, title, intraday=False):
+    df = series.reset_index()
+    x_col = df.columns[0]
+    y_col = df.columns[1]
+    lower_bound, upper_bound = get_gold_y_bounds(series)
+    axis_format = "%H:%M" if intraday else "%d.%m.%Y"
+    chart = (
+        alt.Chart(df)
+        .mark_line(color="#1f77b4")
+        .encode(
+            x=alt.X(x_col, title="Date / Time", axis=alt.Axis(format=axis_format, labelAngle=-25)),
+            y=alt.Y(y_col, title="Price per gram", scale=alt.Scale(domain=[lower_bound, upper_bound])),
+            tooltip=[alt.Tooltip(x_col, title="Date / Time"), alt.Tooltip(y_col, title="Price per gram", format=",.4f")],
+        )
+        .properties(title=title, height=320)
+        .interactive()
+    )
+    return chart
+
+
+
+def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
+    fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
+    ax.plot(series.index, series.values, color=color, linewidth=2.0)
+    _apply_gold_y_padding(ax, series, intraday=intraday)
+    formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
+    thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+    _style_gold_axis(
+        ax,
+        title,
+        "Date / Time",
+        "Price per gram, thousand",
+        formatter=formatter,
+        y_formatter=thousands_formatter,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def figure_to_png_bytes(fig):
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def get_gold_var_payload(K_values=None, t=0.95):
+    gold_close_series, _ = get_gold_close_series()
+    result_D = gold_close_series.pct_change().dropna().to_numpy()
+    var_payload = calculate_var_results(result_D, K_values=K_values, t=t)
+    var_payload["result_D"] = result_D.tolist()
+    return var_payload
+
+
+def render_gold_charts():
+    daily_close, intraday_close = get_gold_close_series()
+
+    if daily_close.empty and intraday_close.empty:
+        st.info("Не удалось загрузить данные по золоту из yfinance для построения графиков.")
+        return
+
+    chart_columns = st.columns(2)
+
+    with chart_columns[0]:
+        st.markdown("#### Gold Daily Close (6M) - per gram")
+        if daily_close.empty:
+            st.info("Дневные данные по золоту за последние 6 месяцев временно недоступны.")
+        else:
+            chart = build_gold_chart_display(
+                daily_close,
+                "Gold Daily Close (6M) - per gram",
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+    with chart_columns[1]:
+        st.markdown("#### Gold Intraday (1M) - per gram")
+        if intraday_close.empty:
+            st.info("Нет внутридневных данных по золоту за текущий день.")
+        else:
+            chart = build_gold_chart_display(
+                intraday_close,
+                "Gold Intraday (1M) - per gram",
+                intraday=True,
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+
+def get_intraday_chart_attachment():
+    _, intraday_close = get_gold_close_series()
+    if intraday_close.empty:
+        return None
+    fig = build_gold_chart_figure(
+        intraday_close,
+        "Gold Intraday (1M) - per gram",
+        color="#1f77b4",
+        fill_color="#1f77b4",
+        intraday=True,
+    )
+    png_bytes = figure_to_png_bytes(fig)
+    plt.close(fig)
+    return ("gold_intraday_1m.png", png_bytes, "image", "png")
+
+
+def build_vm_pdf_report(vm_report):
+    daily_close, intraday_close = get_gold_close_series()
+    pdf_buffer = BytesIO()
+
+    with PdfPages(pdf_buffer) as pdf:
+        fig_cover = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
+        fig_cover.suptitle("VM Dashboard", fontsize=20, fontweight="bold", y=0.98, color="#1f3a5f")
+        fig_cover.text(
+            0.03,
+            0.92,
+            f"Инструмент: {vm_report['TRADE_NAME']} ({vm_report['SECID']}) | "
+            f"Дата клиринга: {vm_report['TRADEDATE']} | Кол-во: {vm_report['QUANTITY']}",
+            fontsize=10.5,
+            color="#262730",
+        )
+        news_items = vm_report.get("XAUUSD_NEWS", [])
+        if news_items:
+            preview_lines = []
+            for item in news_items[:2]:
+                title = item.get("title", "")[:85]
+                preview_lines.append(f"• {item.get('published_at', '')} | {title}")
+            fig_cover.text(
+                0.03,
+                0.875,
+                "XAUUSD новости (TradingView, со вчерашнего дня):\n" + "\n".join(preview_lines),
+                fontsize=8.6,
+                color="#3c4758",
+            )
+        vm_rows = [
+            ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
+            ("Дата цены", vm_report.get("PRICE_DATE", "н/д")),
+            ("Время цены", vm_report.get("QUOTE_TIME") or "н/д"),
+            ("VM", f"{vm_report['VM']:.2f}"),
+            ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
+            ("Маржа позиции", safe_format_int_with_sep(vm_report["POSITION_VM"])),
+            ("Сумма ограничения", safe_format_int_with_sep(vm_report["LIMIT_SUM"])),
+            ("USD/RUB", f"{vm_report['USD_RUB']} ({vm_report['USD_RUB_DATE']})"),
+        ]
+        ax_table = fig_cover.add_axes([0.03, 0.53, 0.44, 0.33])
+        ax_table.axis("off")
+        table = ax_table.table(
+            cellText=[[key, value] for key, value in vm_rows],
+            colLabels=["Показатель", "Значение"],
+            cellLoc="left",
+            colLoc="left",
+            loc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.6)
+        for (row, col), cell in table.get_celld().items():
+            if row == 0:
+                cell.set_facecolor("#e8f0fb")
+                cell.set_text_props(weight="bold", color="#1f3a5f")
+            else:
+                cell.set_facecolor("#f8fbff" if row % 2 == 0 else "#ffffff")
+        var_results = vm_report.get("VAR_RESULTS", {})
+        ax_var_table = fig_cover.add_axes([0.53, 0.53, 0.44, 0.33])
+        ax_var_table.axis("off")
+        ax_var_table.text(
+            0.0,
+            1.05,
+            "Value at Risk (VaR)",
+            fontsize=13,
+            fontweight="bold",
+            color="#1f3a5f",
+            transform=ax_var_table.transAxes,
+        )
+        if var_results:
+            ax_var_table.text(
+                0.0,
+                0.92,
+                f"Доверительный уровень: {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.2f} | "
+                f"T={vm_report.get('VAR_T', 0):.4f} | Q={vm_report.get('VAR_Q', 0):.6f}",
+                fontsize=10,
+                color="#262730",
+                transform=ax_var_table.transAxes,
+            )
+            var_df = build_var_table({"VAR_results": var_results})
+            var_table = ax_var_table.table(
+                cellText=[[int(row["Дни"]), f"{float(row['VaR, %']):.4f}"] for _, row in var_df.iterrows()],
+                colLabels=["Горизонт, дни", "VaR, %"],
+                cellLoc="center",
+                colLoc="center",
+                loc="lower center",
+                bbox=[0, 0.15, 1.0, 0.65],
+            )
+            var_table.auto_set_font_size(False)
+            var_table.set_fontsize(10)
+            var_table.scale(1, 1.25)
+            for (row, col), cell in var_table.get_celld().items():
+                if row == 0:
+                    cell.set_facecolor("#e8f0fb")
+                    cell.set_text_props(weight="bold", color="#1f3a5f")
+                else:
+                    cell.set_facecolor("#f8fbff" if row % 2 == 0 else "#ffffff")
+        elif vm_report.get("VAR_ERROR"):
+            ax_var_table.text(
+                0.0,
+                0.72,
+                f"VaR недоступен: {vm_report['VAR_ERROR']}",
+                fontsize=10,
+                color="#9b2c2c",
+                transform=ax_var_table.transAxes,
+            )
+        else:
+            ax_var_table.text(
+                0.0,
+                0.72,
+                "Недостаточно дневной истории золота для расчёта VaR.",
+                fontsize=10,
+                color="#9b2c2c",
+                transform=ax_var_table.transAxes,
+            )
+
+        if not daily_close.empty:
+            ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
+            ax_daily.plot(daily_close.index, daily_close.values, color="#1f77b4", linewidth=1.8)
+            _apply_gold_y_padding(ax_daily, daily_close, intraday=False)
+            thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+            _style_gold_axis(
+                ax_daily,
+                "Gold Daily Close (6M) - per gram",
+                "Date / Time",
+                "Price per gram, thousand",
+                formatter=mdates.DateFormatter("%d.%m.%Y"),
+                y_formatter=thousands_formatter,
+            )
+        else:
+            ax_daily = fig_cover.add_axes([0.03, 0.08, 0.44, 0.35])
+            ax_daily.axis("off")
+            ax_daily.text(0.5, 0.5, "Дневные данные временно недоступны.", ha="center", va="center", color="#9b2c2c")
+
+        if not intraday_close.empty:
+            ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
+            ax_intraday.plot(intraday_close.index, intraday_close.values, color="#1f77b4", linewidth=1.8)
+            _apply_gold_y_padding(ax_intraday, intraday_close, intraday=True)
+            thousands_formatter = FuncFormatter(lambda value, _: f"{value / 1000:.1f}")
+            _style_gold_axis(
+                ax_intraday,
+                "Gold Intraday (1M) - per gram",
+                "Date / Time",
+                "Price per gram, thousand",
+                formatter=mdates.DateFormatter("%H:%M"),
+                y_formatter=thousands_formatter,
+            )
+        else:
+            ax_intraday = fig_cover.add_axes([0.53, 0.08, 0.44, 0.35])
+            ax_intraday.axis("off")
+            ax_intraday.text(0.5, 0.5, "Внутридневные данные временно недоступны.", ha="center", va="center", color="#9b2c2c")
+
+        pdf.savefig(fig_cover, bbox_inches="tight")
+        plt.close(fig_cover)
+
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+
 def build_http_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -208,6 +864,57 @@ def resolve_market_security_profile(identifier: str, market_kind: str) -> dict:
     if not normalized:
         raise ValueError("Пустой идентификатор")
 
+    direct_rows: list[list[object]] = []
+    direct_columns: list[str] = []
+    try:
+        direct_response = request_get(
+            f"https://iss.moex.com/iss/securities/{normalized}.json",
+            params={"iss.meta": "off", "iss.only": "securities"},
+            timeout=200,
+        )
+        direct_payload = direct_response.json().get("securities", {})
+        direct_rows = direct_payload.get("data", []) or []
+        direct_columns = direct_payload.get("columns", []) or []
+    except Exception:
+        direct_rows = []
+        direct_columns = []
+
+    if direct_rows:
+        df_direct = pd.DataFrame(direct_rows, columns=direct_columns)
+        if "group" in df_direct.columns:
+            if market_kind == "shares":
+                share_mask = (
+                    df_direct["group"].astype(str).str.contains("share|stock|etf", case=False, na=False)
+                )
+                df_direct = df_direct[share_mask]
+            else:
+                df_direct = df_direct[df_direct["group"].astype(str).str.contains("bond", case=False, na=False)]
+        if not df_direct.empty:
+            row = df_direct.iloc[0]
+            secid = str(row.get("secid", "")).strip().upper()
+            if secid:
+                return {
+                    "input": identifier,
+                    "secid": secid,
+                    "isin": str(row.get("isin", "")).strip().upper(),
+                    "shortname": str(row.get("shortname", "")).strip(),
+                    "emitent_title": str(row.get("emitent_title", "")).strip(),
+                }
+
+    if isin_format_valid(normalized):
+        try:
+            secid_from_isin = isin_to_secid(normalized)
+            if secid_from_isin:
+                return {
+                    "input": identifier,
+                    "secid": str(secid_from_isin).strip().upper(),
+                    "isin": normalized,
+                    "shortname": "",
+                    "emitent_title": "",
+                }
+        except Exception:
+            pass
+
     response = request_get(
         "https://iss.moex.com/iss/securities.json",
         params={"q": normalized, "iss.meta": "off"},
@@ -220,7 +927,7 @@ def resolve_market_security_profile(identifier: str, market_kind: str) -> dict:
 
     if "group" in df.columns:
         if market_kind == "shares":
-            df_filtered = df[df["group"].astype(str).str.contains("share", case=False, na=False)]
+            df_filtered = df[df["group"].astype(str).str.contains("share|stock|etf", case=False, na=False)]
         else:
             df_filtered = df[df["group"].astype(str).str.contains("bond", case=False, na=False)]
         if not df_filtered.empty:
@@ -298,30 +1005,64 @@ def load_market_history_values(secid: str, market_kind: str, start_date: str, en
 
 
 def load_market_wide_history_values(market_kind: str, start_date: str, end_date: str) -> pd.DataFrame:
-    start = 0
-    all_rows = []
-    columns = []
-    while True:
-        url = f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/securities.json"
-        response = request_get(
-            url,
-            params={
-                "from": start_date,
-                "till": end_date,
-                "start": start,
-                "iss.only": "history",
-                "iss.meta": "off",
-                "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID",
-            },
+    boards: list[str] = []
+    try:
+        boards_response = request_get(
+            f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/boards.json",
+            params={"iss.meta": "off", "iss.only": "boards", "boards.columns": "boardid,is_traded"},
             timeout=200,
         )
-        payload = response.json().get("history", {})
-        rows = payload.get("data", [])
-        columns = payload.get("columns", columns)
-        if not rows:
-            break
-        all_rows.extend(rows)
-        start += len(rows)
+        boards_payload = boards_response.json().get("boards", {})
+        boards_df = pd.DataFrame(boards_payload.get("data", []), columns=boards_payload.get("columns", []))
+        if not boards_df.empty and "boardid" in boards_df.columns:
+            if "is_traded" in boards_df.columns:
+                boards_df["is_traded"] = pd.to_numeric(boards_df["is_traded"], errors="coerce").fillna(0)
+                boards_df = boards_df[boards_df["is_traded"] > 0]
+            boards = [
+                str(board).strip().upper()
+                for board in boards_df["boardid"].tolist()
+                if str(board).strip()
+            ]
+    except Exception:
+        boards = []
+
+    if not boards:
+        boards = ["TQBR"] if market_kind == "shares" else ["TQCB"]
+
+    # The board-wide securities endpoint ignores from/till and returns only the
+    # latest trading day. Iterate over each calendar day in the range using the
+    # `date` param so the full period is covered.
+    date_range = pd.date_range(start=start_date, end=end_date, freq="D")
+    trading_days = [d.strftime("%Y-%m-%d") for d in date_range]
+
+    all_rows: list[list[object]] = []
+    columns: list[str] = []
+    for board in boards:
+        for day in trading_days:
+            start = 0
+            while True:
+                url = (
+                    f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/"
+                    f"boards/{board}/securities.json"
+                )
+                response = request_get(
+                    url,
+                    params={
+                        "date": day,
+                        "start": start,
+                        "iss.only": "history",
+                        "iss.meta": "off",
+                        "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID,BOARDID",
+                    },
+                    timeout=200,
+                )
+                payload = response.json().get("history", {})
+                rows = payload.get("data", [])
+                columns = payload.get("columns", columns)
+                if not rows:
+                    break
+                all_rows.extend(rows)
+                start += len(rows)
 
     if not all_rows:
         return pd.DataFrame(columns=["TRADEDATE", "VALUE", "NUMTRADES", "VOLUME", "SECID", "SHORTNAME"])
@@ -952,7 +1693,7 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     hist_params = {
         "iss.meta": "off",
         "iss.only": "history",
-        "history.columns": "TRADEDATE,SETTLEPRICEDAY",
+        "history.columns": "TRADEDATE,SETTLEPRICE",
         "sort_order": "desc",
         "limit": 1,
     }
@@ -1570,12 +2311,911 @@ def fetch_isins(isins, show_progress=True):
         time.sleep(0.12)
     except Exception:
         pass
+
     return results
 
 
 # ---------------------------
-# Calendar view
+# Portfolio valuation helpers
 # ---------------------------
+def parse_portfolio_entries(raw_text: str) -> tuple[list[dict], list[str]]:
+    """Parse lines like `ISIN | Amount` into normalized portfolio entries."""
+    entries: list[dict] = []
+    invalid_rows: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in re.split(r"[,;|/\t]+", line) if part.strip()]
+        if len(parts) < 2:
+            invalid_rows.append(line)
+            continue
+        isin = parts[0].upper()
+        amount = parse_number(parts[1])
+        if not isin_format_valid(isin) or not isin_checksum_valid(isin) or amount is None or amount <= 0:
+            invalid_rows.append(line)
+            continue
+        entries.append({"ISIN": isin, "Количество": amount})
+    return entries, invalid_rows
+
+
+def _first_present_number(row: dict, columns: tuple[str, ...]) -> float | None:
+    normalized = {str(key).upper(): value for key, value in (row or {}).items()}
+    for column in columns:
+        value = parse_number(normalized.get(column.upper()))
+        if value is not None:
+            return value
+    return None
+
+
+def _first_present_text(row: dict, columns: tuple[str, ...]) -> str:
+    normalized = {str(key).upper(): value for key, value in (row or {}).items()}
+    for column in columns:
+        value = normalized.get(column.upper())
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
+
+
+def _parse_portfolio_date(value):
+    if value is None or pd.isna(value):
+        return None
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    try:
+        return parsed.date()
+    except Exception:
+        return None
+
+
+def _format_portfolio_date(value) -> str:
+    parsed_date = _parse_portfolio_date(value)
+    return parsed_date.strftime("%Y-%m-%d") if parsed_date else ""
+
+
+def _portfolio_emitent_name(row: dict) -> str:
+    return _first_present_text(
+        row,
+        (
+            "EMITENTNAME",
+            "EMITENT_NAME",
+            "EMITENT_TITLE",
+            "EMITENTTITLE",
+            "ISSUERNAME",
+            "ISSUER",
+        ),
+    )
+
+
+def _portfolio_emitent_id(row: dict) -> str:
+    return _first_present_text(row, ("EMITTER_ID", "EMITTERID", "EMITENT_ID", "EMITENTID"))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_portfolio_p_issuer_map() -> dict[str, str]:
+    csv_path = Path(__file__).resolve().parent / "Pifagr_name_with_emitter.csv"
+    try:
+        df_emitters = pd.read_csv(csv_path, dtype=str)
+    except Exception:
+        try:
+            df_emitters = pd.read_csv(
+                "https://raw.githubusercontent.com/mainarkler/Bond_date/refs/heads/main/Pifagr_name_with_emitter.csv",
+                dtype=str,
+            )
+        except Exception:
+            return {}
+
+    normalized_columns = {str(column).strip().lower(): column for column in df_emitters.columns}
+    issuer_column = normalized_columns.get("issuer")
+    emitter_id_column = normalized_columns.get("emitent_id") or normalized_columns.get("emitter_id")
+    if not issuer_column or not emitter_id_column:
+        return {}
+
+    mapping_df = df_emitters[[emitter_id_column, issuer_column]].dropna(subset=[emitter_id_column]).copy()
+    mapping_df[emitter_id_column] = mapping_df[emitter_id_column].astype(str).str.strip()
+    mapping_df[issuer_column] = mapping_df[issuer_column].fillna("").astype(str).str.strip()
+    return dict(zip(mapping_df[emitter_id_column], mapping_df[issuer_column]))
+
+
+def portfolio_p_issuer_by_emitent_id(emitent_id: str, p_issuer_map: dict[str, str]) -> str:
+    normalized = str(emitent_id or "").strip()
+    if not normalized:
+        return ""
+    return p_issuer_map.get(normalized, "")
+
+
+def _portfolio_bond_nominal_currency(row: dict) -> str:
+    return _first_present_text(row, ("FACEUNIT", "FACEUNIT_S", "FACEUNIT_NAME"))
+
+
+def _normalize_portfolio_currency(currency: str) -> str:
+    normalized = str(currency or "").strip().upper()
+    currency_aliases = {
+        "": "",
+        "—": "",
+        "-": "",
+        "RUR": "RUB",
+        "SUR": "RUB",
+        "RUB": "RUB",
+        "РУБ": "RUB",
+        "РУБ.": "RUB",
+        "РОССИЙСКИЙ РУБЛЬ": "RUB",
+    }
+    return currency_aliases.get(normalized, normalized)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_cbr_currency_rates() -> dict[str, float]:
+    rates = {"RUB": 1.0, "RUR": 1.0, "SUR": 1.0}
+    response = request_get("https://www.cbr.ru/scripts/XML_daily.asp", timeout=30)
+    xml_content = response.content.decode("windows-1251", errors="ignore")
+    root = ET.fromstring(xml_content)
+    for valute in root.findall("Valute"):
+        char_code = (valute.findtext("CharCode") or "").strip().upper()
+        nominal = parse_number(valute.findtext("Nominal")) or 1.0
+        value = parse_number(valute.findtext("Value"))
+        if char_code and value is not None and nominal:
+            rates[char_code] = value / nominal
+    return rates
+
+
+def portfolio_currency_rate_to_rub(currency: str, rates: dict[str, float]) -> float | None:
+    normalized = _normalize_portfolio_currency(currency)
+    if not normalized:
+        return None
+    return rates.get(normalized)
+
+
+def _portfolio_is_fund_like(row: dict) -> bool:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    text = f"{group} {type_value}"
+    return any(token in text for token in ("pif", "ppif", "etf", "mutual", "fund", "пиф"))
+
+
+def _portfolio_instrument_type(row: dict, market: str) -> str:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    if "bond" in group or "bond" in type_value or market == "bonds":
+        return "Облигация"
+    if _portfolio_is_fund_like(row):
+        return "ПИФ"
+    if market == "shares":
+        return "Акция"
+    return "Инструмент"
+
+
+def _portfolio_rows_to_dicts(payload: dict, block_name: str) -> list[dict]:
+    block = payload.get(block_name, {}) if isinstance(payload, dict) else {}
+    rows = block.get("data", []) or []
+    columns = [str(column).upper() for column in block.get("columns", []) or []]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_portfolio_security_boards(secid: str) -> list[dict]:
+    secid = str(secid).strip().upper()
+    if not secid:
+        return []
+    try:
+        payload = request_json(
+            f"https://iss.moex.com/iss/securities/{secid}/boards.json",
+            params={"iss.meta": "off", "iss.only": "boards"},
+            timeout=30,
+        )
+        return _portfolio_rows_to_dicts(payload, "boards")
+    except Exception:
+        return []
+
+
+def _portfolio_candidate_markets(row: dict, boards: list[dict]) -> set[str]:
+    markets = {str(board.get("MARKET", "")).strip().lower() for board in boards if board.get("MARKET")}
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    if "bond" in group or "bond" in type_value:
+        markets.add("bonds")
+    if any(token in group or token in type_value for token in ("share", "stock", "common_share", "preferred_share")):
+        markets.add("shares")
+    return markets
+
+
+def _portfolio_primary_board(boards: list[dict], market: str) -> str:
+    market = str(market).lower()
+    market_boards = [board for board in boards if str(board.get("MARKET", "")).lower() == market]
+    traded_boards = [board for board in market_boards if str(board.get("IS_TRADED", "")).strip() in {"1", "1.0", "True", "true"}]
+    candidates = traded_boards or market_boards
+
+    preferred_order = ("TQBR", "TQTF", "TQIF", "TQOB", "TQCB", "TQOD", "TQIR", "EQBR")
+    for preferred in preferred_order:
+        for board in candidates:
+            if str(board.get("BOARDID", "")).upper() == preferred:
+                return preferred
+
+    primary = [board for board in candidates if str(board.get("IS_PRIMARY", "")).strip() in {"1", "1.0", "True", "true"}]
+    if primary:
+        return str(primary[0].get("BOARDID", "")).strip().upper()
+    if candidates:
+        return str(candidates[0].get("BOARDID", "")).strip().upper()
+    return ""
+
+
+def _portfolio_candidate_rank(row: dict, requested_isin: str) -> tuple[int, int, str]:
+    group = str(row.get("GROUP", "")).lower()
+    type_value = str(row.get("TYPE", "")).lower()
+    is_exact_isin = str(row.get("ISIN", "")).strip().upper() == requested_isin
+    is_bond = "bond" in group or "bond" in type_value
+    is_stock_share = any(token in group or token in type_value for token in ("stock_shares", "common_share", "preferred_share"))
+    is_share_like = any(token in group or token in type_value for token in ("share", "stock"))
+    is_fund_like = _portfolio_is_fund_like(row)
+
+    if is_bond:
+        instrument_rank = 0
+    elif is_stock_share:
+        instrument_rank = 1
+    elif is_share_like and not is_fund_like:
+        instrument_rank = 2
+    elif is_fund_like:
+        instrument_rank = 4
+    else:
+        instrument_rank = 3
+    return (0 if is_exact_isin else 1, instrument_rank, str(row.get("SECID", "")))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def resolve_portfolio_instrument(isin: str) -> dict:
+    isin = str(isin).strip().upper()
+    raw_candidates: list[dict] = []
+
+    for url, params in (
+        (
+            f"https://iss.moex.com/iss/securities/{isin}.json",
+            {"iss.meta": "off", "iss.only": "securities"},
+        ),
+        (
+            "https://iss.moex.com/iss/securities.json",
+            {"q": isin, "iss.meta": "off", "iss.only": "securities"},
+        ),
+    ):
+        try:
+            payload = request_json(url, params=params, timeout=30)
+            raw_candidates.extend(_portfolio_rows_to_dicts(payload, "securities"))
+        except Exception:
+            continue
+
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in raw_candidates:
+        row = {str(key).upper(): value for key, value in row.items()}
+        row_isin = str(row.get("ISIN", "")).strip().upper()
+        secid = str(row.get("SECID", "")).strip().upper()
+        if row_isin != isin or not secid:
+            continue
+        row["ISIN"] = row_isin
+        row["SECID"] = secid
+        by_key[(row_isin, secid)] = row
+
+    candidates = list(by_key.values())
+    if not candidates:
+        raise ValueError(f"ISIN {isin} не найден на MOEX")
+
+    enriched_candidates = []
+    for row in sorted(candidates, key=lambda candidate: _portfolio_candidate_rank(candidate, isin)):
+        boards = fetch_portfolio_security_boards(str(row.get("SECID", "")))
+        markets = _portfolio_candidate_markets(row, boards)
+        if "bonds" in markets:
+            market = "bonds"
+        elif "shares" in markets:
+            market = "shares"
+        else:
+            market = ""
+        instrument_type = _portfolio_instrument_type(row, market)
+        enriched_candidates.append({"row": row, "boards": boards, "market": market, "type": instrument_type})
+
+    chosen = next((item for item in enriched_candidates if item["market"] in {"shares", "bonds"}), enriched_candidates[0])
+    row = chosen["row"]
+    market = chosen["market"]
+    instrument_type = chosen["type"]
+    if market not in {"shares", "bonds"}:
+        raise ValueError(f"Для ISIN {isin} MOEX не вернул рынок акций или облигаций")
+
+    return {
+        "ISIN": isin,
+        "SECID": str(row.get("SECID", "")).strip().upper(),
+        "Название": _first_present_text(row, ("SHORTNAME", "SECNAME", "NAME")),
+        "Эмитент": _portfolio_emitent_name(row),
+        "emitent_ID": _portfolio_emitent_id(row),
+        "Тип": instrument_type,
+        "Рынок": market,
+        "Основной режим": _portfolio_primary_board(chosen["boards"], market),
+        "Группа": str(row.get("GROUP", "")).strip(),
+    }
+
+
+def _portfolio_security_payloads(secid: str, market: str, board: str = "") -> list[dict]:
+    urls = []
+    if board:
+        urls.append(
+            f"https://iss.moex.com/iss/engines/stock/markets/{market}/boards/{board}/securities/{secid}.json"
+        )
+    urls.append(f"https://iss.moex.com/iss/engines/stock/markets/{market}/securities/{secid}.json")
+
+    payloads = []
+    seen_urls = set()
+    for url in urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        try:
+            payloads.append(request_json(url, timeout=30, params={"iss.meta": "off"}))
+        except Exception:
+            continue
+    return payloads
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_portfolio_market_snapshot(isin: str) -> dict:
+    profile = resolve_portfolio_instrument(isin)
+    secid = profile.get("SECID")
+    market = profile.get("Рынок")
+    board = profile.get("Основной режим", "")
+    if not secid or market not in {"shares", "bonds"}:
+        raise ValueError(f"Не удалось определить рынок для {isin}")
+
+    security_row: dict = {}
+    market_row: dict = {}
+    price = None
+    price_columns = (
+        "MARKETPRICE",
+        "LAST",
+        "LCURRENTPRICE",
+        "LEGALCLOSEPRICE",
+        "CLOSEPRICE",
+        "WAPRICE",
+        "PREVPRICE",
+        "PREVWAPRICE",
+        "PREVLEGALCLOSEPRICE",
+    )
+
+    for payload in _portfolio_security_payloads(secid, market, board):
+        securities = _portfolio_rows_to_dicts(payload, "securities")
+        marketdata = _portfolio_rows_to_dicts(payload, "marketdata")
+        if securities and not security_row:
+            security_row = securities[0]
+        for row in marketdata:
+            candidate_price = _first_present_number(row, price_columns)
+            if candidate_price is not None and candidate_price > 0:
+                market_row = row
+                price = candidate_price
+                break
+        if price is not None:
+            break
+
+    if price is None:
+        price = _first_present_number(security_row, price_columns)
+
+    combined_row = {**security_row, **market_row}
+    name = _first_present_text(security_row, ("SECNAME", "SHORTNAME", "NAME")) or profile.get("Название", "")
+    emitter_name = _portfolio_emitent_name(combined_row) or profile.get("Эмитент", "")
+    emitter_id = _portfolio_emitent_id(combined_row) or profile.get("emitent_ID", "")
+    bond_subtype = ""
+    if market == "bonds":
+        bond_subtype = _first_present_text(combined_row, ("SECSUBTYPE", "SEC_SUBTYPE"))
+        facevalue = _first_present_number(
+            security_row,
+            ("FACEVALUE", "INITIALFACEVALUE", "LOTVALUE", "FACEVALUE_RUB"),
+        )
+        accrued_interest = _first_present_number(combined_row, ("ACCRUEDINT", "ACCRUEDINTEREST")) or 0.0
+        currency = _portfolio_bond_nominal_currency(security_row) or _portfolio_bond_nominal_currency(market_row)
+        if not currency:
+            currency = _first_present_text(
+                combined_row,
+                ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+            )
+        unit_value = None
+        if price is not None and facevalue is not None:
+            unit_value = facevalue * price / 100 + accrued_interest
+    else:
+        facevalue = None
+        accrued_interest = None
+        currency = _first_present_text(
+            combined_row,
+            ("CURRENCYID", "CURRENCY", "SETTLECURRENCY", "PRICECURRENCY"),
+        )
+        unit_value = price
+
+    if unit_value is None:
+        raise ValueError(f"Для ISIN {isin} не удалось получить цену инструмента")
+
+    return {
+        **profile,
+        "Название": name,
+        "Эмитент": emitter_name,
+        "emitent_ID": emitter_id,
+        "Тип облигации": bond_subtype,
+        "Валюта инструмента": _normalize_portfolio_currency(currency) or "—",
+        "Цена": price,
+        "Номинал": facevalue,
+        "НКД": accrued_interest,
+        "Стоимость одной бумаги": unit_value,
+    }
+
+
+def calculate_bond_portfolio_duration(put_date: str, maturity_date: str) -> tuple[str, int | None, float | None]:
+    today = datetime.today().date()
+    future_events = []
+    for event_name, value in (("Put оферта", put_date), ("Погашение", maturity_date)):
+        event_date = _parse_portfolio_date(value)
+        if event_date and event_date >= today:
+            future_events.append((event_date, event_name))
+    if not future_events:
+        return "", None, None
+    event_date, event_name = min(future_events, key=lambda item: item[0])
+    days = (event_date - today).days
+    return event_name, days, days / 360
+
+
+def build_portfolio_composition(
+    df: pd.DataFrame,
+    group_column: str,
+    value_column: str = "Стоимость инструмента, RUB",
+    total_value: float | None = None,
+) -> pd.DataFrame:
+    if df.empty or group_column not in df.columns or value_column not in df.columns:
+        return pd.DataFrame(columns=[group_column, "Стоимость, RUB", "Доля портфеля, %"])
+    total_value = float(total_value or pd.to_numeric(df[value_column], errors="coerce").sum())
+    result = (
+        df.assign(**{value_column: pd.to_numeric(df[value_column], errors="coerce").fillna(0.0)})
+        .groupby(group_column, dropna=False, as_index=False)[value_column]
+        .sum()
+        .rename(columns={value_column: "Стоимость, RUB"})
+        .sort_values("Стоимость, RUB", ascending=False)
+    )
+    result[group_column] = result[group_column].fillna("—").replace("", "—")
+    result["Доля портфеля, %"] = np.where(
+        total_value > 0,
+        result["Стоимость, RUB"] / total_value * 100,
+        0.0,
+    )
+    return result
+
+
+def build_portfolio_report(entries: list[dict]) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], list[str]]:
+    rows = []
+    errors = []
+    try:
+        rates = fetch_cbr_currency_rates()
+    except Exception as exc:
+        rates = {"RUB": 1.0, "RUR": 1.0, "SUR": 1.0}
+        errors.append(f"CBR: не удалось загрузить курсы валют ({exc})")
+    p_issuer_map = fetch_portfolio_p_issuer_map()
+
+    for entry in entries:
+        isin = entry["ISIN"]
+        quantity = entry["Количество"]
+        try:
+            snapshot = fetch_portfolio_market_snapshot(isin)
+            instrument_value = None
+            unit_value = snapshot.get("Стоимость одной бумаги")
+            if unit_value is not None:
+                instrument_value = unit_value * quantity
+
+            currency = _normalize_portfolio_currency(snapshot.get("Валюта инструмента", "")) or "—"
+            rate_to_rub = portfolio_currency_rate_to_rub(currency, rates)
+            instrument_value_rub = None
+            if instrument_value is not None and rate_to_rub is not None:
+                instrument_value_rub = instrument_value * rate_to_rub
+
+            row = {
+                "ISIN": isin,
+                "SECID": snapshot.get("SECID", ""),
+                "Тип": snapshot.get("Тип", ""),
+                "Тип облигации": snapshot.get("Тип облигации", ""),
+                "Название": snapshot.get("Название", ""),
+                "Эмитент": snapshot.get("Эмитент", ""),
+                "emitent_ID": snapshot.get("emitent_ID", ""),
+                "P_issuer": portfolio_p_issuer_by_emitent_id(snapshot.get("emitent_ID", ""), p_issuer_map),
+                "Количество": quantity,
+                "Валюта инструмента": currency,
+                "Курс к RUB": rate_to_rub,
+                "Цена": snapshot.get("Цена"),
+                "Номинал": snapshot.get("Номинал"),
+                "НКД, RUB": snapshot.get("НКД"),
+                "Стоимость одной бумаги": unit_value,
+                "Стоимость инструмента": instrument_value,
+                "Стоимость инструмента, RUB": instrument_value_rub,
+                "Доля портфеля, %": None,
+                "Дата оферты Put": "",
+                "Дата погашения": "",
+                "Событие для дюрации": "",
+                "Дюрация (дни/360)": None,
+                "Валюта купона": "",
+                "Размер купона": "",
+            }
+
+            if snapshot.get("Рынок") == "bonds":
+                bond_data = get_bond_data(isin)
+                put_date = _format_portfolio_date(bond_data.get("Дата оферты Put"))
+                maturity_date = _format_portfolio_date(bond_data.get("Дата погашения"))
+                duration_event, duration_days, duration_years = calculate_bond_portfolio_duration(
+                    put_date,
+                    maturity_date,
+                )
+                row.update(
+                    {
+                        "Дата оферты Put": put_date,
+                        "Дата погашения": maturity_date,
+                        "Событие для дюрации": duration_event,
+                        "Дюрация (дни/360)": round(duration_years, 2) if duration_years is not None else None,
+                        "Валюта купона": bond_data.get("Валюта купона", ""),
+                        "Размер купона": bond_data.get("Купон в валюте", ""),
+                    }
+                )
+            rows.append(row)
+        except Exception as exc:
+            errors.append(f"{isin}: {exc}")
+
+    df = pd.DataFrame(rows)
+    if df.empty or "Стоимость инструмента, RUB" not in df.columns:
+        total_value_rub = 0.0
+    else:
+        df["Стоимость инструмента, RUB"] = pd.to_numeric(df["Стоимость инструмента, RUB"], errors="coerce")
+        total_value_rub = float(df["Стоимость инструмента, RUB"].fillna(0.0).sum())
+        df["Доля портфеля, %"] = np.where(
+            total_value_rub > 0,
+            df["Стоимость инструмента, RUB"].fillna(0.0) / total_value_rub * 100,
+            0.0,
+        )
+
+    totals = pd.DataFrame([{"Общая стоимость портфеля, RUB": total_value_rub}])
+    reports = {
+        "totals": totals,
+        "currency_composition": build_portfolio_composition(df, "Валюта инструмента", total_value=total_value_rub),
+        "type_composition": build_portfolio_composition(df, "Тип", total_value=total_value_rub),
+        "emitter_composition": build_portfolio_composition(df, "Эмитент", total_value=total_value_rub),
+    }
+    return df, reports, errors
+
+
+def _portfolio_excel_is_percent_column(column_name: str) -> bool:
+    return "%" in str(column_name)
+
+
+def _portfolio_excel_is_money_column(column_name: str) -> bool:
+    normalized = str(column_name).lower()
+    if "цена" in normalized:
+        return False
+    money_markers = ("стоимость", "rub", "номинал", "нкд", "купон")
+    return any(marker in normalized for marker in money_markers)
+
+
+def _prepare_portfolio_excel_section(df: pd.DataFrame) -> pd.DataFrame:
+    prepared = df.copy()
+    for column in prepared.columns:
+        if _portfolio_excel_is_percent_column(column):
+            converted = pd.to_numeric(prepared[column], errors="coerce")
+            if converted.notna().any():
+                prepared[column] = converted.round(2)
+        elif _portfolio_excel_is_money_column(column):
+            converted = pd.to_numeric(prepared[column], errors="coerce")
+            if converted.notna().any():
+                prepared[column] = converted.round(0)
+    return prepared
+
+
+def _format_portfolio_excel_section(worksheet, section_df: pd.DataFrame, header_row: int) -> None:
+    money_format = '#,##0'
+    percent_format = '0.00'
+    data_start_row = header_row + 1
+    data_end_row = header_row + len(section_df)
+    if data_end_row < data_start_row:
+        return
+    for col_idx, column_name in enumerate(section_df.columns, start=1):
+        if _portfolio_excel_is_percent_column(column_name):
+            number_format = percent_format
+        elif _portfolio_excel_is_money_column(column_name):
+            number_format = money_format
+        else:
+            continue
+        for row_idx in range(data_start_row, data_end_row + 1):
+            worksheet.cell(row=row_idx, column=col_idx).number_format = number_format
+
+
+def build_portfolio_limit_request_df(details_df: pd.DataFrame) -> pd.DataFrame:
+    limit_columns = {
+        "Эмитент": "эмитент",
+        "emitent_ID": "emitent_ID",
+        "P_issuer": "P_issuer",
+        "ISIN": "isin",
+        "Стоимость инструмента, RUB": "стоимость в рублях",
+        "Тип": "тип",
+    }
+    if details_df.empty:
+        return pd.DataFrame(columns=list(limit_columns.values()))
+    limit_df = details_df.reindex(columns=limit_columns.keys()).rename(columns=limit_columns)
+    limit_df["эмитент"] = limit_df["эмитент"].fillna("—").replace("", "—")
+    limit_df["emitent_ID"] = limit_df["emitent_ID"].fillna("").replace("", "—")
+    limit_df["P_issuer"] = limit_df["P_issuer"].fillna("").replace("", "—")
+    limit_df["стоимость в рублях"] = pd.to_numeric(limit_df["стоимость в рублях"], errors="coerce")
+    return limit_df
+
+
+def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[str, pd.DataFrame]) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        sheet_name = "Портфель"
+        startrow = 0
+        sections = [
+            ("Итого", reports.get("totals", pd.DataFrame())),
+            ("Валютный состав", reports.get("currency_composition", pd.DataFrame())),
+            ("Состав инструментов", reports.get("type_composition", pd.DataFrame())),
+            ("Состав эмитентов", reports.get("emitter_composition", pd.DataFrame())),
+            ("Инструменты", details_df),
+        ]
+        for title, section_df in sections:
+            prepared_section = _prepare_portfolio_excel_section(section_df)
+            pd.DataFrame({title: []}).to_excel(
+                writer,
+                index=False,
+                sheet_name=sheet_name,
+                startrow=startrow,
+            )
+            startrow += 1
+            header_row = startrow + 1
+            prepared_section.to_excel(
+                writer,
+                index=False,
+                sheet_name=sheet_name,
+                startrow=startrow,
+            )
+            _format_portfolio_excel_section(writer.sheets[sheet_name], prepared_section, header_row)
+            startrow += len(prepared_section) + 3
+
+        limit_sheet_name = "Limit_reqest"
+        limit_df = _prepare_portfolio_excel_section(build_portfolio_limit_request_df(details_df))
+        limit_df.to_excel(writer, index=False, sheet_name=limit_sheet_name)
+        _format_portfolio_excel_section(writer.sheets[limit_sheet_name], limit_df, 1)
+    return output.getvalue()
+
+
+# ---------------------------
+# Portfolio view
+# ---------------------------
+if st.session_state["active_view"] == "portfolio":
+    st.subheader("💼 Портфель по ISIN")
+    st.markdown(
+        "Введите смешанный портфель акций и облигаций в формате `ISIN | Количество`. "
+        "Стоимость считается в валюте инструмента и приводится в рубли по XML_daily ЦБ РФ; "
+        "для облигаций цена MOEX в процентах от номинала переводится в денежную стоимость "
+        "одной бумаги с добавлением НКД, если MOEX вернул НКД."
+    )
+    portfolio_input = st.text_area(
+        "Список инструментов",
+        height=180,
+        placeholder="RU0009029540 | 10\nRU000A0JX0J2 | 100",
+        key="portfolio_manual_input",
+    )
+    if st.button("Рассчитать портфель", key="build_portfolio_report"):
+        entries, invalid_rows = parse_portfolio_entries(portfolio_input)
+        if invalid_rows:
+            st.warning(
+                "Строки с ошибками пропущены: "
+                f"{'; '.join(invalid_rows[:10])}{'...' if len(invalid_rows) > 10 else ''}"
+            )
+        if not entries:
+            st.error("Нет валидных строк в формате `ISIN | Количество`.")
+        else:
+            with st.spinner("Загружаем цены и параметры инструментов MOEX..."):
+                details_df, report_tables, errors = build_portfolio_report(entries)
+            xlsx = dataframe_to_portfolio_excel_bytes(details_df, report_tables)
+            st.session_state["portfolio_last_report"] = {
+                "details": details_df,
+                **report_tables,
+                "errors": errors,
+                "xlsx": xlsx,
+                "csv": details_df.to_csv(index=False).encode("utf-8-sig"),
+            }
+
+    portfolio_report = st.session_state.get("portfolio_last_report")
+    if portfolio_report:
+        totals_df = portfolio_report["totals"]
+        details_df = portfolio_report["details"]
+        errors = portfolio_report.get("errors", [])
+
+        st.markdown("### Общая стоимость портфеля в рублях")
+        total_value = totals_df.iloc[0].get("Общая стоимость портфеля, RUB") if not totals_df.empty else None
+        st.metric("RUB", safe_format_int_with_sep(total_value) if total_value is not None else "—")
+        st.dataframe(totals_df, use_container_width=True)
+
+        st.markdown("### Валютный состав")
+        st.dataframe(portfolio_report.get("currency_composition", pd.DataFrame()), use_container_width=True)
+
+        st.markdown("### Состав инструментов")
+        st.dataframe(portfolio_report.get("type_composition", pd.DataFrame()), use_container_width=True)
+
+        st.markdown("### Состав эмитентов")
+        st.dataframe(portfolio_report.get("emitter_composition", pd.DataFrame()), use_container_width=True)
+
+        st.markdown("### Инструменты портфеля")
+        st.dataframe(details_df, use_container_width=True)
+
+        st.download_button(
+            label="💾 Скачать портфель (Excel)",
+            data=portfolio_report["xlsx"],
+            file_name="portfolio_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="portfolio_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать портфель (CSV)",
+            data=portfolio_report["csv"],
+            file_name="portfolio_report.csv",
+            mime="text/csv",
+            key="portfolio_csv_dl",
+        )
+        render_email_compose_section(
+            "Отчёт по портфелю",
+            "portfolio_report",
+            "portfolio_report.xlsx",
+            portfolio_report["xlsx"],
+        )
+        if errors:
+            st.warning("Не удалось обработать часть инструментов:")
+            for error in errors:
+                st.write(f"- {error}")
+    st.stop()
+
+
+# ---------------------------
+# Issuer emission document analysis view
+# ---------------------------
+if st.session_state["active_view"] == "emission_documents":
+    st.header("📄 Анализ эмиссионных документов")
+    st.caption(
+        "Загрузите проспект, решение о выпуске или иной PDF/DOCX. Для PDF-сканов запускается OCR "
+        "(при установленном Tesseract с языками rus+eng)."
+    )
+    st.info(
+        "Результат — первичная аналитическая сводка, а не инвестиционная рекомендация. "
+        "Все условия и цифры необходимо сверять с оригиналом документа."
+    )
+    emission_model_path = os.getenv("LOCAL_LLM_MODEL_PATH", "models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
+    st.caption(f"Локальная модель: `{emission_model_path}`. Внешние API и ключи не используются.")
+    uploaded_document = st.file_uploader(
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Документ разбивается на токенизированные блоки; каждая страница без текста распознаётся через OCR.",
+    uploaded_document = st.file_uploader(
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
+    )
+    if uploaded_document is not None:
+        st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
+        if st.button("Сформировать summary", type="primary", use_container_width=True, key="analyse_emission_document"):
+            with st.spinner("Извлекаем текст, при необходимости распознаём скан и анализируем условия выпуска..."):
+                try:
+                    st.session_state["emission_document_result"] = analyse_emission_document(
+                        uploaded_document.name,
+                        uploaded_document.getvalue(),
+                        model_path=emission_model_path,
+                        uploaded_document.name, uploaded_document.getvalue()
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Не удалось обработать документ: {exc}")
+
+    result = st.session_state.get("emission_document_result")
+    if result:
+        extraction = result.get("extraction", {})
+        st.divider()
+        st.subheader("Краткое резюме")
+        st.write(result.get("summary", "Резюме не сформировано."))
+        status = "LLM-анализ" if result.get("llm_used") else "Извлечённый текст / резервный режим"
+        st.caption(
+            f"{status} · {result.get('document_coverage', '')} · "
+            f"страниц: {extraction.get('pages') or '—'} · OCR: {'да' if extraction.get('used_ocr') else 'нет'}"
+        )
+        if result.get("recognized_blocks"):
+            st.caption(f"В JSON распознано блоков: {len(result['recognized_blocks'])}")
+
+        st.subheader("Основные данные")
+        key_data = result.get("key_data") or []
+        if key_data:
+            rows = [{"Параметр": item.get("name", ""), "Значение": item.get("value", ""), "Комментарий": item.get("note", "")} for item in key_data]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Структурированные параметры не найдены автоматически.")
+
+        st.subheader("На что обратить внимание")
+        for point in result.get("attention_points") or ["Риски не были выделены автоматически — проверьте первичный документ."]:
+            st.markdown(f"- {point}")
+
+        for warning in extraction.get("warnings", []):
+            st.warning(warning)
+        with st.expander("Показать распознанные JSON-блоки"):
+            st.json(result.get("recognized_blocks", []))
+        with st.expander("Показать начальный извлечённый фрагмент"):
+            st.caption("Показаны первые 3 000 символов. Для проверки остальных страниц используйте просмотр ниже.")
+            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
+        page_blocks = extraction.get("blocks", [])
+        available_pages = sorted({block.get("page") for block in page_blocks if block.get("page") is not None})
+        if available_pages:
+            with st.expander("Показать извлечённый текст по страницам"):
+                selected_page = st.selectbox("Страница", available_pages, key="emission_document_page")
+                selected_text = "\n\n".join(block.get("text", "") for block in page_blocks if block.get("page") == selected_page)
+                st.text(selected_text or "Текст страницы не извлечён.")
+        with st.expander("Показать извлечённый фрагмент"):
+            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
+    st.stop()
+
+
+# ---------------------------
+# Company analysis view
+# ---------------------------
+if st.session_state["active_view"] == "company_analysis":
+    st.header("Новости по keyword + финансовое LLM summary")
+    st.caption("Приоритет: русскоязычные источники (РБК, Интерфакс, Ведомости, Коммерсант, ТАСС) за последние 30 дней.")
+
+    with st.form("company_analysis_news_form"):
+        keyword_value = st.text_input(
+            "Keyword для поиска новостей",
+            value=st.session_state.get("company_analysis_query", "AAPL"),
+            key="company_analysis_keyword_input",
+        )
+        depth_days = st.number_input("Глубина поиска, дней", min_value=7, max_value=365, value=30, step=1)
+        summary_variants = st.selectbox("Количество вариантов summary", options=[3, 4, 5], index=0)
+        run_clicked = st.form_submit_button("Найти новости и собрать summary", use_container_width=True)
+
+    st.session_state["company_analysis_query"] = keyword_value
+
+    if run_clicked:
+        user_query = keyword_value.strip()
+        if not user_query:
+            st.warning("Введите keyword.")
+        else:
+            with st.spinner("Поиск новостей в интернете и LLM-агрегация..."):
+                try:
+                    payload = build_keyword_news_block_sync(
+                        user_query,
+                        depth_days=int(depth_days),
+                        summary_variants=int(summary_variants),
+                    )
+                except Exception as exc:
+                    st.error(f"Ошибка выполнения блока: {exc}")
+                else:
+                    news_pool = payload.get("news_pool", [])
+                    errors = payload.get("errors", [])
+
+                    st.subheader("Пул новостей")
+                    st.caption(
+                        f"Keyword: {payload.get('keyword')} | окно: {payload.get('window_days')} дней | найдено: {payload.get('news_count', len(news_pool))}"
+                    )
+                    st.caption("Расширенные ключи: " + ", ".join(payload.get("expanded_keywords", [])))
+                    st.caption("Приоритетные источники: " + ", ".join(payload.get("priority_sources", [])))
+                    st.json(news_pool)
+
+                    if errors:
+                        st.warning("Ошибки источников: " + " | ".join(str(e) for e in errors))
+
+                    st.subheader("Короткое summary (LLM)")
+                    if payload.get("best_summary"):
+                        st.markdown(f"**Лучший вариант (для обучения модели): Вариант {payload.get('best_variant', 1)}**")
+                        st.write(payload.get("best_summary", ""))
+                        if payload.get("summary_ranking"):
+                            st.caption("Ранжирование вариантов: " + ", ".join(
+                                f"#{row.get('variant')} (score={row.get('score')})" for row in payload.get("summary_ranking", [])
+                            ))
+                    with st.expander("Показать остальные варианты summary"):
+                        for idx, summary_text in enumerate(payload.get("summaries", []), start=1):
+                            st.markdown(f"**Вариант {idx}**")
+                            st.write(summary_text)
+    st.stop()
+
 if st.session_state["active_view"] == "calendar":
     st.subheader("📅 Календарь выплат")
     st.markdown(
@@ -1736,9 +3376,10 @@ if st.session_state["active_view"] == "vm":
                 position_vm = vm_data["VM"] * quantity
                 usd_rub_data = get_usd_rub_cb_today()
                 usd_rub = float(usd_rub_data["usd_rub"])
+                price_date = datetime.utcnow().strftime("%Y-%m-%d")
                 price_for_limit = vm_data["LAST_PRICE"] if vm_data.get("LAST_PRICE") is not None else vm_data["TODAY_PRICE"]
                 limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
-                st.session_state["vm_last_report"] = {
+                vm_report = {
                     "TRADE_NAME": vm_data["TRADE_NAME"],
                     "SECID": vm_data["SECID"],
                     "TRADEDATE": vm_data["TRADEDATE"],
@@ -1746,6 +3387,7 @@ if st.session_state["active_view"] == "vm":
                     "TODAY_PRICE": vm_data["TODAY_PRICE"],
                     "LAST_PRICE": vm_data.get("LAST_PRICE"),
                     "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
+                    "PRICE_DATE": price_date,
                     "MULTIPLIER": vm_data["MULTIPLIER"],
                     "VM": vm_data["VM"],
                     "VM_CLEARING": vm_data["VM_CLEARING"],
@@ -1754,7 +3396,35 @@ if st.session_state["active_view"] == "vm":
                     "USD_RUB": usd_rub_data["usd_rub"],
                     "USD_RUB_DATE": usd_rub_data["date"],
                     "LIMIT_SUM": limit_sum,
+                    "VM_SOURCE": "ISS MOEX",
+                    "VAR_SOURCE": "Yahoo Finance",
+                    "result_D": [],
+                    "VAR_CONFIDENCE_LEVEL": 0.95,
+                    "VAR_T": None,
+                    "VAR_Q": None,
+                    "VAR_K_VALUES": [],
+                    "VAR_RESULTS": {},
                 }
+                try:
+                    var_payload = get_gold_var_payload()
+                    vm_report.update(
+                        {
+                            "result_D": var_payload["result_D"],
+                            "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
+                            "VAR_T": var_payload["T"],
+                            "VAR_Q": var_payload["Q"],
+                            "VAR_K_VALUES": var_payload["K_values"],
+                            "VAR_RESULTS": var_payload["VAR_results"],
+                        }
+                    )
+                except Exception as exc:
+                    vm_report["VAR_ERROR"] = str(exc)
+                try:
+                    vm_report["XAUUSD_NEWS"] = fetch_xauusd_tradingview_news()
+                except Exception as exc:
+                    vm_report["XAUUSD_NEWS"] = []
+                    vm_report["XAUUSD_NEWS_ERROR"] = str(exc)
+                st.session_state["vm_last_report"] = vm_report
             except Exception as exc:
                 st.error(str(exc))
 
@@ -1765,22 +3435,50 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Дата клиринга:** {vm_report['TRADEDATE']}")
         st.markdown(f"**Расчетная цена последнего клиринга:** {vm_report['LAST_SETTLE_PRICE']}")
         st.markdown(f"**Последняя цена:** {vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']}")
+        st.markdown(f"**Дата последней цены:** {vm_report.get('PRICE_DATE', 'н/д')}")
         st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']}")
         st.markdown(f"**Вариационная маржа (по последней цене):** {vm_report['VM']:.2f}")
         st.markdown(f"**VM клиринговая (SETTLEPRICEDAY - PREVSETTLEPRICE):** {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}")
-        st.markdown(f"**Маржа позиции (VM × Кол-во):** {vm_report['POSITION_VM']:.2f}")
-        st.markdown(f"**Сумма ограничения:** {vm_report['LIMIT_SUM']:.2f}")
+        st.markdown(f"**Маржа позиции (VM × Кол-во):** {safe_format_int_with_sep(vm_report['POSITION_VM'])}")
+        st.markdown(f"**Сумма ограничения:** {safe_format_int_with_sep(vm_report['LIMIT_SUM'])}")
         st.caption(f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}")
+
+        st.markdown("#### Value at Risk (VaR)")
+        st.caption(
+            f"VM source: {vm_report.get('VM_SOURCE', 'ISS MOEX')}; "
+            f"VaR/charts source: {vm_report.get('VAR_SOURCE', 'Yahoo Finance')}"
+        )
+        var_results = vm_report.get("VAR_RESULTS", {})
+        if var_results:
+            st.caption(
+                f"Доверительный уровень: {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.2f}; "
+                f"T = {vm_report.get('VAR_T', 0):.4f}; "
+                f"Q = {vm_report.get('VAR_Q', 0):.6f}"
+            )
+            var_df = build_var_table({"VAR_results": var_results})
+            st.dataframe(var_df, use_container_width=True, hide_index=True)
+        elif vm_report.get("VAR_ERROR"):
+            st.info(f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}")
+        else:
+            st.info("Недостаточно дневной истории золота для расчёта VaR.")
 
         vm_df = pd.DataFrame([vm_report])
         vm_xlsx = ss.dataframe_to_excel_bytes(vm_df, sheet_name="vm_report")
+        vm_pdf = build_vm_pdf_report(vm_report)
         st.download_button(
             label="💾 Скачать VM (Excel)",
             data=vm_xlsx,
             file_name="vm_report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="vm_report_xlsx_dl",
+        )
+        st.download_button(
+            label="💾 Скачать VM (PDF)",
+            data=vm_pdf,
+            file_name="vm_report.pdf",
+            mime="application/pdf",
+            key="vm_report_pdf_dl",
         )
         st.download_button(
             label="💾 Скачать VM (CSV)",
@@ -1790,6 +3488,32 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
+        st.markdown("#### XAUUSD новости (TradingView)")
+        news_items = vm_report.get("XAUUSD_NEWS", [])
+        if news_items:
+            st.caption("Период: со вчерашнего дня до последней доступной новости.")
+            for item in news_items:
+                st.markdown(
+                    f"- **{item.get('published_at', '')}** — [{item.get('title', 'Без заголовка')}]({item.get('url', '')})"
+                )
+        elif vm_report.get("XAUUSD_NEWS_ERROR"):
+            st.info(f"Новости XAUUSD временно недоступны: {vm_report['XAUUSD_NEWS_ERROR']}")
+        else:
+            st.info("За период со вчерашнего дня новости XAUUSD не найдены.")
+
+        var_table_for_mail = build_var_table({"VAR_results": vm_report.get("VAR_RESULTS", {})})
+        if not var_table_for_mail.empty:
+            var_table_text = var_table_for_mail.to_string(index=False)
+        elif vm_report.get("VAR_ERROR"):
+            var_table_text = f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}"
+        else:
+            var_table_text = "Недостаточно дневной истории золота для расчёта VaR."
+        mail_news_lines = [
+            f"- {n.get('published_at', '')}: {n.get('title', '')}"
+            for n in vm_report.get("XAUUSD_NEWS", [])[:10]
+        ]
+        mail_news_text = "\n".join(mail_news_lines) if mail_news_lines else "Нет доступных новостей за период."
+
         vm_mail_body = (
             "Коллеги, добрый день!\n\n"
             "Направляю отчёт по вариационной марже (VM).\n\n"
@@ -1798,18 +3522,32 @@ if st.session_state["active_view"] == "vm":
             f"Кол-во: {vm_report['QUANTITY']}\n"
             f"VM (по последней цене): {vm_report['VM']:.2f}\n"
             f"VM клиринговая: {vm_report.get('VM_CLEARING', vm_report['VM']):.2f}\n"
-            f"Маржа позиции: {vm_report['POSITION_VM']:.2f}\n"
-            f"Сумма ограничения: {vm_report['LIMIT_SUM']:.2f}\n"
+            f"Маржа позиции: {safe_format_int_with_sep(vm_report['POSITION_VM'])}\n"
+            f"Сумма ограничения: {safe_format_int_with_sep(vm_report['LIMIT_SUM'])}\n"
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
-            "Детали во вложении."
+            "Value at Risk (VaR):\n"
+            f"{var_table_text}\n\n"
+            "XAUUSD новости (TradingView, со вчерашнего дня):\n"
+            f"{mail_news_text}\n\n"
+            "Во вложении: Excel- и PDF-отчёты, а также график Gold Intraday (1M) - per gram.\n"
         )
 
         st.session_state["vm_report_default_body"] = vm_mail_body
+
+        intraday_chart_attachment = None
+        vm_pdf_attachment = ("vm_report.pdf", vm_pdf, "application", "pdf")
+        try:
+            render_gold_charts()
+            intraday_chart_attachment = get_intraday_chart_attachment()
+        except Exception as exc:
+            st.warning(f"Не удалось построить графики по золоту: {exc}")
+
         render_email_compose_section(
             "VM отчёт",
             "vm_report",
             "vm_report.xlsx",
             vm_xlsx,
+            extra_attachments=[att for att in [vm_pdf_attachment, intraday_chart_attachment] if att],
         )
 
     st.stop()
@@ -1826,6 +3564,7 @@ if st.session_state["active_view"] == "sell_stres":
 
     with share_tab:
         st.markdown("### Share")
+        st.markdown("#### Пакетный режим")
         use_q_from_list = st.checkbox(
             "Вводить Q для каждого ISIN/Ticker (формат: ISIN/Ticker | Q)", value=False, key="share_q_per_isin"
         )
@@ -1859,47 +3598,74 @@ if st.session_state["active_view"] == "sell_stres":
             key="share_date_from",
         )
         q_max = st.number_input(
-            "Q (максимум для построения вектора)",
-            min_value=1,
-            value=33_000_000_000,
-            step=1_000_000,
-            format="%d",
+            "Q max (% от free-float капитализации, ось X)",
+            min_value=0.1,
+            max_value=100.0,
+            value=10.0,
+            step=0.1,
+            format="%.1f",
             key="share_q_max",
             disabled=use_q_from_list,
         )
         use_log = st.checkbox("Логарифмическое приближение", value=True, key="share_q_log")
         q_mode = "log" if use_log else "linear"
+        action_col1, action_col2 = st.columns(2)
+        with action_col1:
+            share_calculate_clicked = st.button("Рассчитать Sell_stres (Share)", key="share_calculate")
+        with action_col2:
+            share_calculate_all_clicked = st.button(
+                "Выгрузить модель по всем акциям",
+                key="share_calculate_all",
+                use_container_width=True,
+            )
 
-        if st.button("Рассчитать Sell_stres (Share)", key="share_calculate"):
+        if share_calculate_clicked or share_calculate_all_clicked:
             entries = []
             unresolved_identifiers = []
-            if use_q_from_list:
-                raw_lines = [line.strip() for line in isin_q_input.splitlines() if line.strip()]
-                for line in raw_lines:
-                    parts = [p.strip() for p in re.split(r"[|;	,]+", line) if p.strip()]
-                    if not parts:
-                        continue
-                    identifier = parts[0].upper()
-                    q_val = parse_number(parts[1]) if len(parts) > 1 else None
-                    resolved_isin = resolve_share_identifier_to_isin(identifier)
-                    if not resolved_isin:
-                        unresolved_identifiers.append(identifier)
-                        continue
-                    if q_val is None or q_val <= 0:
-                        st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
-                        continue
-                    entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_val)})
+            if share_calculate_all_clicked:
+                ranking_all_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
+                ranking_all_df = ranking_all_df.reindex(columns=["ISIN"], fill_value="")
+                all_isins = sorted(
+                    {
+                        str(isin).strip().upper()
+                        for isin in ranking_all_df["ISIN"].tolist()
+                        if str(isin).strip()
+                    }
+                )
+                prep_progress = st.progress(0.0)
+                entries = []
+                for idx, isin in enumerate(all_isins, start=1):
+                    entries.append({"ISIN": isin, "Q_MAX": float(q_max)})
+                    prep_progress.progress(idx / len(all_isins) if all_isins else 1.0)
+                st.info(f"Подготовлено бумаг для полного расчёта: {len(entries)}")
             else:
-                raw_text = isin_input.strip()
-                if raw_text:
-                    identifiers = re.split(r"[\s,;]+", raw_text)
-                    identifiers = [i.strip().upper() for i in identifiers if i.strip()]
-                    for identifier in identifiers:
+                if use_q_from_list:
+                    raw_lines = [line.strip() for line in isin_q_input.splitlines() if line.strip()]
+                    for line in raw_lines:
+                        parts = [p.strip() for p in re.split(r"[|;	,]+", line) if p.strip()]
+                        if not parts:
+                            continue
+                        identifier = parts[0].upper()
+                        q_val = parse_number(parts[1]) if len(parts) > 1 else None
                         resolved_isin = resolve_share_identifier_to_isin(identifier)
                         if not resolved_isin:
                             unresolved_identifiers.append(identifier)
                             continue
-                        entries.append({"ISIN": resolved_isin, "Q_MAX": int(q_max)})
+                        if q_val is None or q_val <= 0:
+                            st.warning(f"Некорректный Q для {identifier}: {parts[1] if len(parts) > 1 else ''}")
+                            continue
+                        entries.append({"ISIN": resolved_isin, "Q_MAX": float(q_val)})
+                else:
+                    raw_text = isin_input.strip()
+                    if raw_text:
+                        identifiers = re.split(r"[\s,;]+", raw_text)
+                        identifiers = [i.strip().upper() for i in identifiers if i.strip()]
+                        for identifier in identifiers:
+                            resolved_isin = resolve_share_identifier_to_isin(identifier)
+                            if not resolved_isin:
+                                unresolved_identifiers.append(identifier)
+                                continue
+                            entries.append({"ISIN": resolved_isin, "Q_MAX": float(q_max)})
 
             if unresolved_identifiers:
                 st.warning(
@@ -1918,26 +3684,67 @@ if st.session_state["active_view"] == "sell_stres":
                 meta_rows = []
                 results = {}
                 progress_bar = st.progress(0.0)
+                ff_table_df = pd.DataFrame()
                 with st.spinner("Рассчитываем Sell_stres..."):
-                    for idx, entry in enumerate(entries, start=1):
+                    entries_with_refs = []
+                    for entry in entries:
+                        isin = entry["ISIN"]
+                        try:
+                            secid = isin_to_secid(isin)
+                            entries_with_refs.append({**entry, "SECID": secid})
+                        except Exception as exc:
+                            st.error(f"{isin}: не удалось получить SECID ({exc})")
+
+                    unique_secids = sorted({e["SECID"] for e in entries_with_refs})
+                    ff_payloads = ss.resolve_freefloat_batch(
+                        request_get=request_get,
+                        secids=unique_secids,
+                    )
+                    ff_table_rows = []
+                    entries_resolved = []
+                    for entry in entries_with_refs:
+                        secid = entry["SECID"]
+                        ff_payload = ff_payloads.get(secid, {})
+                        ff_table_rows.append(
+                            {
+                                "ISIN": entry["ISIN"],
+                                "SECID": secid,
+                                "FreeFloat": ff_payload.get("free_float"),
+                            }
+                        )
+                        if ff_payload.get("free_float") is None:
+                            st.error(
+                                f"{entry['ISIN']} ({secid}): не найден free-float"
+                            )
+                            continue
+                        entries_resolved.append({**entry, "FF_PAYLOAD": ff_payload})
+
+                    ff_table_df = pd.DataFrame(ff_table_rows)
+
+                    for idx, entry in enumerate(entries_resolved, start=1):
                         isin = entry["ISIN"]
                         try:
                             q_vector = ss.build_q_vector(q_mode, entry["Q_MAX"])
                             delta_df, meta = ss.calculate_share_delta_p(
                                 request_get=request_get,
-                                isin_to_secid=isin_to_secid,
+                                isin_to_secid=lambda _isin, secid=entry["SECID"]: secid,
                                 isin=isin,
                                 c_value=float(c_value),
                                 date_from=data_from.strftime("%Y-%m-%d"),
                                 q_values=q_vector,
+                                preloaded_freefloat=entry["FF_PAYLOAD"],
                             )
                             results[isin] = delta_df
                             meta_rows.append(meta)
                         except Exception as exc:
                             st.error(f"{isin}: {exc}")
-                        progress_bar.progress(idx / len(entries))
+                        progress_bar.progress(idx / len(entries_resolved) if entries_resolved else 1.0)
 
-                show_tables = len(entries) == 1 and not use_q_from_list
+                if not ff_table_df.empty:
+                    st.markdown("#### Таблица free-float (предварительная загрузка)")
+                    st.dataframe(ff_table_df, use_container_width=True)
+
+                show_tables = len(entries) == 1 and not use_q_from_list and not share_calculate_all_clicked
                 st.session_state["sell_stres_share_show_tables"] = show_tables
                 st.session_state["sell_stres_share_table_results"] = results if show_tables else {}
 
@@ -1946,11 +3753,46 @@ if st.session_state["active_view"] == "sell_stres":
                     combined_delta_df = pd.concat(
                         [df_delta.assign(ISIN=isin) for isin, df_delta in results.items()],
                         ignore_index=True,
-                    )[["ISIN", "Q", "DeltaP"]]
+                    )[["ISIN", "Q", "Q_RUB", "DeltaP"]]
+                    ranking_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
+                    ranking_df = ranking_df.reindex(
+                        columns=["ISIN", "Ticker", "Indices", "RankScore"],
+                        fill_value="",
+                    )
+                    combined_delta_df = combined_delta_df.merge(
+                        ranking_df,
+                        on="ISIN",
+                        how="left",
+                    )
+                    combined_delta_df["Ticker"] = combined_delta_df["Ticker"].fillna("")
+                    combined_delta_df["Indices"] = combined_delta_df["Indices"].fillna("")
+                    combined_delta_df["RankScore"] = combined_delta_df["RankScore"].fillna(0).astype(int)
                     download_payload["delta_csv"] = combined_delta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["delta_xlsx"] = ss.dataframe_to_excel_bytes(
                         combined_delta_df, sheet_name="delta_p"
                     )
+                    html_report = build_share_batch_html_report(
+                        combined_delta_df=combined_delta_df[["ISIN", "Q", "Q_RUB", "DeltaP"]],
+                        meta_df=pd.DataFrame(
+                            meta_rows,
+                            columns=[
+                                "ISIN",
+                                "SECID",
+                                "T",
+                                "Sigma",
+                                "MDTV",
+                                "Close",
+                                "FreeFloat",
+                                "IssueSize",
+                                "FFShares",
+                                "FFMcapRUB",
+                            ],
+                        )
+                        if meta_rows
+                        else pd.DataFrame(),
+                        ranking_df=ranking_df,
+                    )
+                    download_payload["html_report"] = html_report
                     st.download_button(
                         label="💾 Скачать общий ΔP Excel",
                         data=ss.dataframe_to_excel_bytes(combined_delta_df, sheet_name="delta_p"),
@@ -1959,7 +3801,32 @@ if st.session_state["active_view"] == "sell_stres":
                     )
 
                 if meta_rows:
-                    meta_df = pd.DataFrame(meta_rows, columns=["ISIN", "T", "Sigma", "MDTV"])
+                    meta_df = pd.DataFrame(
+                        meta_rows,
+                        columns=[
+                            "ISIN",
+                            "SECID",
+                            "T",
+                            "Sigma",
+                            "MDTV",
+                            "Close",
+                            "FreeFloat",
+                            "IssueSize",
+                            "FFShares",
+                            "FFMcapRUB",
+                        ],
+                    )
+                    ranking_df = fetch_index_membership_by_isin(ALL_STOCK_INDEX_CODES)
+                    ranking_df = ranking_df.reindex(
+                        columns=["ISIN", "Ticker", "Indices", "RankScore"],
+                        fill_value="",
+                    )
+                    if not ranking_df.empty:
+                        meta_df = meta_df.merge(ranking_df, on="ISIN", how="left")
+                        meta_df["Ticker"] = meta_df["Ticker"].fillna("")
+                        meta_df["Indices"] = meta_df["Indices"].fillna("")
+                        meta_df["RankScore"] = meta_df["RankScore"].fillna(0).astype(int)
+                        meta_df = meta_df.sort_values(["RankScore", "ISIN"], ascending=[False, True]).reset_index(drop=True)
                     download_payload["meta_csv"] = meta_df.to_csv(index=False).encode("utf-8-sig")
                     download_payload["meta_xlsx"] = ss.dataframe_to_excel_bytes(meta_df, sheet_name="meta")
                     if show_tables:
@@ -2015,6 +3882,14 @@ if st.session_state["active_view"] == "sell_stres":
                     file_name="sell_stres_share_meta_all.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="share_meta_xlsx_dl",
+                )
+            if "html_report" in share_downloads:
+                st.download_button(
+                    label="💾 Скачать веб-отчёт HTML (Share batch)",
+                    data=share_downloads["html_report"],
+                    file_name="sell_stres_share_batch_report.html",
+                    mime="text/html",
+                    key="share_html_report_dl",
                 )
             render_email_compose_section("Sell_stres Share отчёт", "share_report", "sell_stres_share_deltaP_all.xlsx", share_downloads.get("delta_xlsx") if share_downloads else None)
 
@@ -2241,19 +4116,24 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
         datetime_label = item_datetime.strftime("%Y-%m-%d %H:%M:%S") if item_datetime else f"{item.get('date', '')} {item.get('time', '')}".strip()
         event_type = item.get("event_type") or "general"
         emitter = item.get("emitter") or "—"
-        isin = item.get("isin") or "—"
+        isins = item.get("related_isins") or []
+        isin = ", ".join(isins) if isins else (item.get("isin") or "—")
         with st.container(border=True):
             st.markdown(f"**{item.get('title', 'Без заголовка')}**")
+            body = str(item.get("body") or "").strip()
+            if body:
+                st.markdown(body)
             meta_left, meta_right = st.columns([2, 3])
             with meta_left:
                 st.caption(f"{datetime_label} · {item.get('source', 'MOEX')}")
             with meta_right:
                 st.caption(f"ID: {item.get('id', 'n/a')} · event_type: {event_type}")
             detail_left, detail_right = st.columns(2)
-            detail_left.caption(f"Emitter: {emitter}")
+            detail_left.caption(f"Эмитент: {emitter}")
             detail_right.caption(f"ISIN: {isin}")
-            if item.get('body'):
-                st.markdown(str(item.get('body')))
+            source_link = str(item.get("link") or "").strip()
+            if source_link:
+                st.link_button("Открыть источник", source_link)
 
 
 # ---------------------------
@@ -2261,7 +4141,7 @@ def render_news_items(news_items: list[dict], empty_message: str) -> None:
 # ---------------------------
 if st.session_state["active_view"] == "moex_news":
     st.subheader("📰 Новости MOEX")
-    st.markdown("Поиск событий MOEX ISS: список загружается из `/iss/sitenews.json`, а для каждой новости body подтягивается из `/iss/sitenews/{id}.json`. Из данных извлекаются `event_type`, `isin` и `emitter`.")
+    st.markdown("Поиск событий MOEX ISS `/iss/sitenews.json`: для вкладки ISIN поиск связанных новостей идет по всем другим ISIN того же эмитента, найденным через внутренний `emitent/emitter id`, а в карточке новости показывается полный текст, подтянутый через ID новости.")
 
     latest_col, date_col, isin_col = st.tabs(["Последние", "По дате", "По ISIN"])
 
@@ -2312,9 +4192,15 @@ if st.session_state["active_view"] == "moex_news":
                 except (ValueError, NewsServiceError, requests.RequestException) as exc:
                     st.error(f"Не удалось получить новости по ISIN: {exc}")
                 else:
-                    metric_col1, metric_col2 = st.columns(2)
+                    metric_col1, metric_col2, metric_col3 = st.columns(3)
                     metric_col1.metric("Target news", len(isin_result.get("target_news", [])))
                     metric_col2.metric("Related news", len(isin_result.get("related_news", [])))
+                    metric_col3.metric("Other issuer ISINs", len(isin_result.get("other_isins", [])))
+                    emitter_name = isin_result.get("emitter") or "—"
+                    st.caption(f"Эмитент: {emitter_name}")
+                    other_isins = isin_result.get("other_isins", [])
+                    if other_isins:
+                        st.caption("Другие ISIN этого эмитента: " + ", ".join(other_isins))
                     st.markdown("#### Target news")
                     render_news_items(
                         isin_result.get("target_news", []),
@@ -2440,7 +4326,45 @@ if st.session_state["active_view"] == "moex_turnover":
                     )
                     st.dataframe(board_df, use_container_width=True)
                 else:
+                    board_df = pd.DataFrame(columns=["input", "SECID", "board", "turnover"])
                     st.info("Нет данных по boards за указанный период.")
+
+                report_export_df = report_df.copy()
+                board_export_df = board_df.copy()
+                report_csv = report_export_df.to_csv(index=False).encode("utf-8-sig")
+                board_csv = board_export_df.to_csv(index=False).encode("utf-8-sig")
+
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    report_export_df.to_excel(writer, index=False, sheet_name="turnover_totals")
+                    board_export_df.to_excel(writer, index=False, sheet_name="turnover_by_board")
+                excel_buffer.seek(0)
+
+                st.markdown("### Скачать отчеты")
+                download_col_left, download_col_right = st.columns(2)
+                with download_col_left:
+                    st.download_button(
+                        label="💾 Оборот по инструментам (CSV)",
+                        data=report_csv,
+                        file_name=f"moex_turnover_totals_{start_date_input}_{end_date_input}.csv",
+                        mime="text/csv",
+                        key="moex_turnover_totals_csv",
+                    )
+                    st.download_button(
+                        label="💾 Оборот по boards (CSV)",
+                        data=board_csv,
+                        file_name=f"moex_turnover_boards_{start_date_input}_{end_date_input}.csv",
+                        mime="text/csv",
+                        key="moex_turnover_boards_csv",
+                    )
+                with download_col_right:
+                    st.download_button(
+                        label="💾 Полный отчет (Excel)",
+                        data=excel_buffer.getvalue(),
+                        file_name=f"moex_turnover_{start_date_input}_{end_date_input}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="moex_turnover_excel",
+                    )
 
             if errors:
                 st.warning("Не удалось посчитать часть инструментов:")
@@ -2480,6 +4404,12 @@ if st.session_state["active_view"] == "market_statistics":
         "Считать статистику по всем бумагам выбранного рынка (без списка ISIN/SECID)",
         value=False,
         key="market_statistics_all_papers",
+    )
+    exclude_etf = st.checkbox(
+        "Исключать ETF из расчета",
+        value=False,
+        key="market_statistics_exclude_etf",
+        help="Фильтрует инструменты, где название содержит ETF (например, LQDT ETF).",
     )
 
     emitent_cache_key = f"market_statistics_emitent_map_{market_kind}"
@@ -2607,6 +4537,15 @@ if st.session_state["active_view"] == "market_statistics":
 
             if full_rows:
                 combined_df = pd.concat(full_rows, ignore_index=True)
+                if exclude_etf:
+                    shortname_series = combined_df.get("SHORTNAME", pd.Series("", index=combined_df.index)).astype(str)
+                    etf_mask = shortname_series.str.contains(r"\bETF\b", case=False, na=False)
+                    secid_series = combined_df.get("SECID", pd.Series("", index=combined_df.index)).astype(str)
+                    ru000_mask = secid_series.str.startswith("RU000", na=False)
+                    combined_df = combined_df[~(etf_mask | ru000_mask)]
+                    if combined_df.empty:
+                        st.error("После исключения ETF данные отсутствуют.")
+                        st.stop()
                 combined_df = combined_df.sort_values(["TRADEDATE", "SECID"])
 
                 st.success("Статистика рассчитана")

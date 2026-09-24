@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from html import unescape
 import json
 import re
 from typing import Any, Protocol, Sequence
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import requests
 
 MOEX_SITENEWS_URL = "https://iss.moex.com/iss/sitenews.json"
 MOEX_SITENEWS_DETAIL_URL = "https://iss.moex.com/iss/sitenews/{news_id}.json"
+MOEX_SITENEWS_DETAIL_XML_URL = "https://iss.moex.com/iss/sitenews/{news_id}"
+MOEX_SECURITY_URL = "https://iss.moex.com/iss/securities/{security_id}.json"
+MOEX_SECURITY_XML_URL = "https://iss.moex.com/iss/securities/{security_id}.xml"
+MOEX_BONDS_SECURITY_URL = "https://iss.moex.com/iss/engines/stock/markets/bonds/securities/{secid}.json"
 DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 100
 MAX_NEWS_LIMIT = 500
+MOEX_PAGE_SIZE = 50
 SOURCE_NAME = "MOEX"
 ISIN_PATTERN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b")
+_HTML_BREAK_RE = re.compile(r"<(?:br|/p|/div|/li|/tr|/h[1-6])\b[^>]*>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 _EMITTER_STOP_WORDS = {
     "акции",
     "акций",
@@ -76,9 +85,14 @@ def _build_session() -> requests.Session:
 
 
 
-def _request_json(url: str, params: dict[str, Any] | None = None, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    session = _build_session()
-    response = session.get(url, params=params, timeout=timeout)
+def _request_json(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    session = session or _build_session()
+    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     try:
         return response.json()
@@ -88,16 +102,48 @@ def _request_json(url: str, params: dict[str, Any] | None = None, timeout: int =
 
 
 
-def _request_news(limit: int) -> dict[str, Any]:
-    return _request_json(MOEX_SITENEWS_URL, params={"iss.meta": "off", "limit": limit})
-
-
-
-def _request_news_detail(news_id: int | str) -> dict[str, Any]:
+def _request_news_page(limit: int, start: int = 0, session: requests.Session | None = None) -> dict[str, Any]:
     return _request_json(
-        MOEX_SITENEWS_DETAIL_URL.format(news_id=news_id),
-        params={"iss.meta": "off"},
+        MOEX_SITENEWS_URL,
+        params={"iss.meta": "off", "limit": limit, "start": start},
+        session=session,
     )
+
+
+def _request_news(limit: int, session: requests.Session | None = None) -> dict[str, Any]:
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+
+    session = session or _build_session()
+    start = 0
+    remaining = limit
+    aggregated_payload: dict[str, Any] | None = None
+    aggregated_data: list[list[Any]] = []
+
+    while remaining > 0:
+        page_limit = min(remaining, MOEX_PAGE_SIZE)
+        page_payload = _request_news_page(page_limit, start=start, session=session)
+        sitenews_payload = page_payload.get("sitenews") or {}
+        page_data = sitenews_payload.get("data") or []
+
+        if aggregated_payload is None:
+            aggregated_payload = page_payload
+        aggregated_data.extend(page_data)
+
+        received = len(page_data)
+        if received < page_limit:
+            break
+
+        start += received
+        remaining -= received
+
+    if aggregated_payload is None:
+        aggregated_payload = {"sitenews": {"columns": [], "data": []}}
+
+    aggregated_sitenews = dict(aggregated_payload.get("sitenews") or {})
+    aggregated_sitenews["data"] = aggregated_data[:limit]
+    aggregated_payload["sitenews"] = aggregated_sitenews
+    return aggregated_payload
 
 
 
@@ -111,6 +157,86 @@ def _request_text(url: str, params: dict[str, Any] | None = None, timeout: int =
 
 def _zip_rows(columns: list[str], data: list[list[Any]]) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in data]
+
+
+
+def _extract_body_from_payload(payload: Any) -> str:
+    if isinstance(payload, dict):
+        direct_body = payload.get("body") or payload.get("BODY")
+        if isinstance(direct_body, str) and direct_body.strip():
+            return direct_body.strip()
+
+        for block_name in ("content", "CONTENT", "sitenews", "SITENEWS", "text", "TEXT"):
+            block = payload.get(block_name)
+            if isinstance(block, dict):
+                columns = block.get("columns") or []
+                data = block.get("data") or []
+                if isinstance(columns, list) and isinstance(data, list):
+                    for row in _zip_rows(columns, data):
+                        extracted = _extract_body_from_payload(row)
+                        if extracted:
+                            return extracted
+                extracted = _extract_body_from_payload(block)
+                if extracted:
+                    return extracted
+            elif isinstance(block, str) and block.strip():
+                return block.strip()
+
+        for value in payload.values():
+            extracted = _extract_body_from_payload(value)
+            if extracted:
+                return extracted
+
+    elif isinstance(payload, list):
+        for value in payload:
+            extracted = _extract_body_from_payload(value)
+            if extracted:
+                return extracted
+
+    elif isinstance(payload, str) and payload.strip():
+        return payload.strip()
+
+    return ""
+
+
+
+def _extract_body_from_xml(xml_text: str) -> str:
+    if not xml_text.strip():
+        return ""
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise NewsServiceError("MOEX ISS returned malformed XML for sitenews detail") from exc
+
+    for row in root.findall(".//row"):
+        body = (row.attrib.get("body") or "").strip()
+        if body:
+            return body
+
+    return ""
+
+
+def _request_news_body(event_id: int, session: requests.Session | None = None) -> str:
+    try:
+        detail_payload = _request_json(
+            MOEX_SITENEWS_DETAIL_URL.format(news_id=event_id),
+            params={"iss.meta": "off"},
+            session=session,
+        )
+    except Exception:
+        detail_payload = {}
+
+    body = _extract_body_from_payload(detail_payload)
+    if body:
+        return body
+
+    xml_text = _request_text(
+        MOEX_SITENEWS_DETAIL_XML_URL.format(news_id=event_id),
+        params={"iss.meta": "off"},
+        timeout=DEFAULT_TIMEOUT,
+    )
+    return _extract_body_from_xml(xml_text)
 
 
 
@@ -149,6 +275,125 @@ def _parse_datetime(value: str | None) -> datetime | None:
 def _extract_isin(title: str) -> str | None:
     match = ISIN_PATTERN.search(title.upper())
     return match.group(0) if match else None
+
+
+def _extract_security_row(payload: dict[str, Any]) -> dict[str, Any]:
+    for block_name in ("securities", "SECURITIES"):
+        block = payload.get(block_name) or {}
+        columns = block.get("columns") or []
+        data = block.get("data") or []
+        if isinstance(columns, list) and isinstance(data, list) and data:
+            return _zip_rows(columns, data)[0]
+    return {}
+
+
+def _extract_security_row_from_xml(xml_text: str) -> dict[str, str]:
+    if not xml_text.strip():
+        return {}
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+
+    for row in root.findall(".//row"):
+        attributes = {str(key): str(value) for key, value in row.attrib.items()}
+        upper_attributes = {str(key).upper(): str(value) for key, value in row.attrib.items()}
+        merged = dict(attributes)
+        merged.update(upper_attributes)
+        if any(field in merged for field in ("ISIN", "SECID", "EMITTER_ID", "EMITENT_ID", "EMITTERID", "EMITENTID")):
+            return merged
+    return {}
+
+
+def _normalize_security_profile(row: dict[str, Any]) -> dict[str, str | None]:
+    if not row:
+        return {"isin": None, "secid": None, "emitter_id": None, "emitent_title": None}
+
+    normalized = {str(key).upper(): value for key, value in row.items()}
+
+    def _pick(*keys: str) -> str | None:
+        for key in keys:
+            value = normalized.get(key)
+            if value is None:
+                continue
+            text_value = str(value).strip()
+            if text_value:
+                return text_value
+        return None
+
+    return {
+        "isin": (_pick("ISIN") or "").upper() or None,
+        "secid": _pick("SECID"),
+        "emitter_id": _pick("EMITTER_ID", "EMITTERID", "EMITENT_ID", "EMITENTID"),
+        "emitent_title": _pick("EMITENT_TITLE", "EMITTER_TITLE", "SHORTNAME", "SECNAME", "NAME"),
+    }
+
+
+@lru_cache(maxsize=2048)
+def _resolve_security_profile_by_isin(isin: str) -> dict[str, str | None]:
+    normalized_isin = str(isin or "").strip().upper()
+    if not normalized_isin:
+        return {"isin": None, "secid": None, "emitter_id": None, "emitent_title": None}
+
+    session = _build_session()
+    profile = {"isin": normalized_isin, "secid": None, "emitter_id": None, "emitent_title": None}
+
+    try:
+        payload = _request_json(
+            MOEX_SECURITY_URL.format(security_id=normalized_isin),
+            params={"iss.meta": "off"},
+            session=session,
+        )
+        profile.update({k: v for k, v in _normalize_security_profile(_extract_security_row(payload)).items() if v})
+    except Exception:
+        pass
+
+    if not profile.get("emitter_id") or not profile.get("secid"):
+        try:
+            xml_text = _request_text(
+                MOEX_SECURITY_XML_URL.format(security_id=normalized_isin),
+                params={"iss.meta": "off"},
+                timeout=DEFAULT_TIMEOUT,
+            )
+            profile.update({k: v for k, v in _normalize_security_profile(_extract_security_row_from_xml(xml_text)).items() if v})
+        except Exception:
+            pass
+
+    secid = profile.get("secid")
+    if secid and (not profile.get("emitter_id") or not profile.get("emitent_title")):
+        try:
+            payload = _request_json(
+                MOEX_BONDS_SECURITY_URL.format(secid=secid),
+                params={"iss.meta": "off"},
+                session=session,
+            )
+            profile.update({k: v for k, v in _normalize_security_profile(_extract_security_row(payload)).items() if v})
+        except Exception:
+            pass
+
+    return profile
+
+
+@lru_cache(maxsize=2048)
+def _resolve_emitter_id_by_isin(isin: str) -> str | None:
+    return _resolve_security_profile_by_isin(isin).get("emitter_id")
+
+
+def _extract_isins(text: str) -> list[str]:
+    return sorted({match.group(0) for match in ISIN_PATTERN.finditer((text or "").upper())})
+
+
+def _html_to_text(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    normalized = unescape(str(raw_html))
+    normalized = _HTML_BREAK_RE.sub("\n", normalized)
+    normalized = _HTML_TAG_RE.sub(" ", normalized)
+    normalized = normalized.replace(" ", " ")
+    normalized = re.sub(r"\n\s*\n+", "\n\n", normalized)
+    normalized = re.sub(r"[ 	]+", " ", normalized)
+    return normalized.strip()
 
 
 
@@ -195,18 +440,39 @@ def build_event(
     source: str,
     event_id: int | str | None = None,
     body: str | None = None,
+    link: str | None = None,
+    resolve_related_profiles: bool = True,
 ) -> Event:
-    """Build a normalized event from any provider using title-derived structure only."""
+    """Build a normalized event from provider payload, including optional news body."""
     normalized_title = unescape(title.strip())
-    normalized_body = unescape((body or "").strip()) or None
+    normalized_body = _html_to_text(str(body or "").strip())
     event_datetime = _parse_datetime(published_at)
-    isin = _extract_isin(normalized_title)
-    emitter = _extract_emitter(normalized_title, isin)
-    raw_id = str(event_id or "").strip()
-    event_identifier = f"sitenews/{raw_id}" if source == SOURCE_NAME and raw_id else raw_id or ""
+    related_isins = _extract_isins(f"{normalized_title}\n{normalized_body}")
+    isin = related_isins[0] if related_isins else None
+    related_profiles: list[dict[str, str | None]] = []
+    if resolve_related_profiles:
+        related_profiles = [_resolve_security_profile_by_isin(candidate_isin) for candidate_isin in related_isins]
+
+    emitter = (
+        next(
+            (str(profile.get("emitent_title") or "").strip() for profile in related_profiles if profile.get("emitent_title")),
+            None,
+        )
+        if related_profiles
+        else None
+    ) or _extract_emitter(normalized_title, isin)
+    related_emitter_ids = (
+        [
+            str(profile.get("emitter_id")).strip()
+            for profile in related_profiles
+            if profile.get("emitter_id")
+        ]
+        if related_profiles
+        else []
+    )
 
     return {
-        "id": event_identifier,
+        "id": int(event_id) if isinstance(event_id, int) or str(event_id or "").isdigit() else 0,
         "title": normalized_title,
         "body": normalized_body,
         "datetime": event_datetime,
@@ -215,23 +481,68 @@ def build_event(
         "source": source,
         "event_type": classify_news(normalized_title),
         "isin": isin,
+        "related_isins": related_isins,
         "emitter": emitter,
+        "emitter_id": related_emitter_ids[0] if related_emitter_ids else None,
+        "related_emitter_ids": sorted(set(related_emitter_ids)),
         "published_at": str(published_at or "").strip(),
+        "link": _normalize_event_link(link),
     }
 
 
 
-def _extract_first_row(payload: dict[str, Any]) -> dict[str, Any]:
-    sitenews_payload = payload.get("sitenews") or {}
-    columns = sitenews_payload.get("columns") or []
-    data = sitenews_payload.get("data") or []
-    if isinstance(columns, list) and isinstance(data, list) and data:
-        return dict(zip(columns, data[0]))
-    return {}
 
 
+@lru_cache(maxsize=4096)
+def _resolve_google_news_link(url: str) -> str:
+    candidate = (url or "").strip()
+    if not candidate:
+        return ""
+    session = _build_session()
+    try:
+        response = session.get(candidate, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+        response.raise_for_status()
+        return str(response.url or candidate).strip()
+    except Exception:
+        return candidate
 
-def _build_moex_event(item: dict[str, Any]) -> Event:
+
+def _normalize_event_link(link: str | None) -> str | None:
+    candidate = str(link or "").strip()
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    if parsed.netloc.endswith("news.google.com") and "/rss/articles/" in parsed.path:
+        resolved = _resolve_google_news_link(candidate)
+        return resolved or candidate
+    return candidate
+
+
+def _hydrate_news_bodies(events: list[Event], session: requests.Session | None = None) -> list[Event]:
+    if not events:
+        return events
+
+    session = session or _build_session()
+    body_cache: dict[int, str] = {}
+    for event in events:
+        event_id = event.get("id")
+        if not isinstance(event_id, int) or event_id <= 0:
+            continue
+        if event_id not in body_cache:
+            try:
+                body_cache[event_id] = _request_news_body(event_id, session=session)
+            except Exception:
+                body_cache[event_id] = ""
+        event["body"] = body_cache[event_id]
+    return events
+
+
+def _build_moex_event(
+    item: dict[str, Any],
+    body: str = "",
+    *,
+    resolve_related_profiles: bool = True,
+) -> Event:
     published_at = str(
         item.get("published_at")
         or item.get("PUBLISHED_AT")
@@ -240,29 +551,33 @@ def _build_moex_event(item: dict[str, Any]) -> Event:
         or ""
     ).strip()
     title = str(item.get("title") or item.get("TITLE") or "")
-    news_id = item.get("id") or item.get("ID")
-    detail_payload = _request_news_detail(news_id) if news_id not in (None, "") else {}
-    detail_row = _extract_first_row(detail_payload)
-    body = detail_row.get("body") or detail_row.get("BODY") or item.get("body") or item.get("BODY")
-    detail_title = detail_row.get("title") or detail_row.get("TITLE") or title
-    detail_published_at = (
-        detail_row.get("published_at")
-        or detail_row.get("PUBLISHED_AT")
-        or detail_row.get("date")
-        or detail_row.get("DATE")
-        or published_at
+    resolved_body = str(body or "").strip() or str(
+        item.get("body")
+        or item.get("BODY")
+        or item.get("text")
+        or item.get("TEXT")
+        or item.get("content")
+        or item.get("CONTENT")
+        or ""
     )
     return build_event(
-        title=str(detail_title or title),
-        published_at=str(detail_published_at or published_at),
+        title=title,
+        published_at=published_at,
         source=SOURCE_NAME,
-        event_id=news_id,
-        body=str(body or "") or None,
+        event_id=item.get("id") or item.get("ID"),
+        body=resolved_body,
+        resolve_related_profiles=resolve_related_profiles,
     )
 
 
 
-def parse_news(response_json: dict[str, Any]) -> list[Event]:
+def parse_news(
+    response_json: dict[str, Any],
+    session: requests.Session | None = None,
+    *,
+    include_body: bool = True,
+    resolve_related_profiles: bool = True,
+) -> list[Event]:
     """Convert MOEX sitenews payload into normalized event dictionaries."""
     sitenews_payload = response_json.get("sitenews") or {}
     columns = sitenews_payload.get("columns") or []
@@ -272,7 +587,20 @@ def parse_news(response_json: dict[str, Any]) -> list[Event]:
         raise NewsServiceError("Unexpected MOEX sitenews payload structure")
 
     raw_items = _zip_rows(columns, data)
-    return [_build_moex_event(item) for item in raw_items]
+    events: list[Event] = []
+    for item in raw_items:
+        event_id = item.get("id") or item.get("ID")
+        body = ""
+        if include_body and (isinstance(event_id, int) or str(event_id or "").isdigit()):
+            body = _request_news_body(int(event_id), session=session)
+        events.append(
+            _build_moex_event(
+                item,
+                body=body,
+                resolve_related_profiles=resolve_related_profiles,
+            )
+        )
+    return events
 
 
 class MoexNewsProvider:
@@ -283,7 +611,25 @@ class MoexNewsProvider:
     def fetch_events(self, limit: int = DEFAULT_LIMIT) -> list[Event]:
         if limit <= 0:
             raise ValueError("limit must be a positive integer")
-        return parse_news(_request_news(limit=limit))
+        session = _build_session()
+        return parse_news(_request_news(limit=limit, session=session), session=session)
+
+
+def _fetch_moex_events(
+    limit: int,
+    *,
+    include_body: bool = True,
+    resolve_related_profiles: bool = True,
+) -> list[Event]:
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    session = _build_session()
+    return parse_news(
+        _request_news(limit=limit, session=session),
+        session=session,
+        include_body=include_body,
+        resolve_related_profiles=resolve_related_profiles,
+    )
 
 
 class RSSNewsProvider:
@@ -307,16 +653,16 @@ class RSSNewsProvider:
             title = (item.findtext("title") or "").strip()
             published_at = (item.findtext("pubDate") or item.findtext("published") or "").strip()
             guid = (item.findtext("guid") or "").strip()
-            description = (item.findtext("description") or "").strip() or None
             if not title:
                 continue
+            link = (item.findtext("link") or "").strip()
             events.append(
                 build_event(
                     title=title,
                     published_at=published_at,
                     source=self.source_name,
-                    event_id=guid if guid else None,
-                    body=description,
+                    event_id=guid if guid.isdigit() else None,
+                    link=link,
                 )
             )
         return sorted(events, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
@@ -337,7 +683,7 @@ def collect_news_events(
 
 def get_news(limit: int = DEFAULT_LIMIT) -> list[Event]:
     """Fetch the latest MOEX site news and convert them to events."""
-    return MoexNewsProvider().fetch_events(limit=limit)
+    return _fetch_moex_events(limit=limit, include_body=True, resolve_related_profiles=True)
 
 
 
@@ -365,18 +711,34 @@ def _tokenize_emitter(emitter: str | None) -> list[str]:
 
 
 
-def _event_matches_related(event: Event, emitter_keywords: list[str], since: datetime, isin: str) -> bool:
+def _event_matches_related(
+    event: Event,
+    emitter_keywords: list[str],
+    emitter_id: str | None,
+    since: datetime,
+    isin: str,
+    same_emitter_isins: set[str] | None = None,
+) -> bool:
     event_datetime = event.get("datetime")
     if event_datetime is None or event_datetime < since:
         return False
 
-    title_lower = str(event.get("title") or "").lower()
-    if isin.lower() in title_lower:
+    related_isins = [str(value).upper() for value in event.get("related_isins") or []]
+    if isin.upper() in related_isins:
+        return False
+    if same_emitter_isins and set(related_isins).intersection(same_emitter_isins):
+        return True
+
+    event_emitter_ids = {str(value).strip() for value in event.get("related_emitter_ids") or [] if str(value).strip()}
+    if emitter_id and emitter_id in event_emitter_ids:
+        return True
+
+    if not emitter_keywords:
         return False
 
-    event_emitter = str(event.get("emitter") or "")
-    event_body = str(event.get("body") or "")
-    haystacks = [title_lower, event_emitter.lower(), event_body.lower()]
+    title_lower = str(event.get("title") or "").lower()
+    body_lower = str(event.get("body") or "").lower()
+    haystacks = [title_lower, body_lower]
     return any(keyword.lower() in haystack for haystack in haystacks for keyword in emitter_keywords)
 
 
@@ -389,24 +751,69 @@ def get_news_by_isin(isin: str, days: int = 7) -> dict[str, Any]:
     if days < 0:
         raise ValueError("days must be greater than or equal to zero")
 
-    events = get_news(limit=MAX_NEWS_LIMIT)
-    target_news = [event for event in events if event.get("isin") == normalized_isin]
+    security_profile = _resolve_security_profile_by_isin(normalized_isin)
+    emitter_id = security_profile.get("emitter_id")
+    lightweight_limit = min(MAX_NEWS_LIMIT, max(DEFAULT_LIMIT, days * 40))
+    events = _fetch_moex_events(
+        limit=lightweight_limit,
+        include_body=False,
+        resolve_related_profiles=False,
+    )
+    target_news = [
+        event
+        for event in events
+        if normalized_isin in [str(value).upper() for value in event.get("related_isins") or []]
+    ]
     target_news = sorted(target_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
 
-    emitter = next((event.get("emitter") for event in target_news if event.get("emitter")), None)
+    emitter = security_profile.get("emitent_title") or next((event.get("emitter") for event in target_news if event.get("emitter")), None)
     emitter_keywords = _tokenize_emitter(str(emitter) if emitter else None)
 
     since = datetime.utcnow() - timedelta(days=days)
+    recent_events = [event for event in events if event.get("datetime") and event["datetime"] >= since]
+    candidate_related_isins = {
+        str(related_isin).upper()
+        for event in recent_events
+        for related_isin in (event.get("related_isins") or [])
+        if str(related_isin).strip() and str(related_isin).upper() != normalized_isin
+    }
+    same_emitter_isins = {
+        candidate_isin
+        for candidate_isin in candidate_related_isins
+        if _resolve_emitter_id_by_isin(candidate_isin) == emitter_id
+    } if emitter_id else set()
+
     related_news = [
-        event for event in events if _event_matches_related(event, emitter_keywords, since, normalized_isin)
+        event
+        for event in events
+        if _event_matches_related(
+            event,
+            emitter_keywords,
+            emitter_id,
+            since,
+            normalized_isin,
+            same_emitter_isins=same_emitter_isins,
+        )
     ]
     related_news = sorted(related_news, key=lambda event: event.get("datetime") or datetime.min, reverse=True)
+    _hydrate_news_bodies(target_news + related_news)
+
+    other_isins = sorted(
+        {
+            str(related_isin).upper()
+            for event in related_news
+            for related_isin in (event.get("related_isins") or [])
+            if str(related_isin).strip() and str(related_isin).upper() != normalized_isin
+        }
+    )
 
     return {
         "isin": normalized_isin,
         "emitter": emitter,
+        "emitter_id": emitter_id,
         "target_news": target_news,
         "related_news": related_news,
+        "other_isins": other_isins,
     }
 
 
