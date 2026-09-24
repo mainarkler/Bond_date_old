@@ -3112,8 +3112,6 @@ if st.session_state["active_view"] == "emission_documents":
             f"{status} · {result.get('document_coverage', '')} · "
             f"страниц: {extraction.get('pages') or '—'} · OCR: {'да' if extraction.get('used_ocr') else 'нет'}"
         )
-        if result.get("recognized_blocks"):
-            st.caption(f"В JSON распознано блоков: {len(result['recognized_blocks'])}")
 
         st.subheader("Основные данные")
         key_data = result.get("key_data") or []
@@ -3129,8 +3127,6 @@ if st.session_state["active_view"] == "emission_documents":
 
         for warning in extraction.get("warnings", []):
             st.warning(warning)
-        with st.expander("Показать распознанные JSON-блоки"):
-            st.json(result.get("recognized_blocks", []))
         with st.expander("Показать извлечённый фрагмент"):
             st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
     st.stop()
