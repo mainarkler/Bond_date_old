@@ -36,6 +36,7 @@ from services.moex_turnover import MoexTurnoverClient
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 from services.keyword_news_block import build_keyword_news_block_sync
+from services.emission_document_analysis import analyse_emission_document
 
 # ---------------------------
 # Streamlit page setup
@@ -73,6 +74,7 @@ if FORCED_ACTIVE_VIEW in {
     "turnover_export",
     "moex_news",
     "company_analysis",
+    "emission_documents",
     "portfolio",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
@@ -144,6 +146,12 @@ if st.session_state["active_view"] == "home":
     st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
     if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
         st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
+
+    st.markdown("### Анализ эмиссионных документов")
+    st.caption("Загрузка PDF/DOCX, OCR сканов и краткое резюме условий выпуска и рисков.")
+    if st.button("Открыть", key="open_emission_documents_tile", use_container_width=True):
+        st.session_state["active_view"] = "emission_documents"
         trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
@@ -3060,6 +3068,71 @@ if st.session_state["active_view"] == "portfolio":
             st.warning("Не удалось обработать часть инструментов:")
             for error in errors:
                 st.write(f"- {error}")
+    st.stop()
+
+
+# ---------------------------
+# Issuer emission document analysis view
+# ---------------------------
+if st.session_state["active_view"] == "emission_documents":
+    st.header("📄 Анализ эмиссионных документов")
+    st.caption(
+        "Загрузите проспект, решение о выпуске или иной PDF/DOCX. Для PDF-сканов запускается OCR "
+        "(при установленном Tesseract с языками rus+eng)."
+    )
+    st.info(
+        "Результат — первичная аналитическая сводка, а не инвестиционная рекомендация. "
+        "Все условия и цифры необходимо сверять с оригиналом документа."
+    )
+    uploaded_document = st.file_uploader(
+        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
+        help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
+    )
+    if uploaded_document is not None:
+        st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
+        if st.button("Сформировать summary", type="primary", use_container_width=True, key="analyse_emission_document"):
+            with st.spinner("Извлекаем текст, при необходимости распознаём скан и анализируем условия выпуска..."):
+                try:
+                    st.session_state["emission_document_result"] = analyse_emission_document(
+                        uploaded_document.name, uploaded_document.getvalue()
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Не удалось обработать документ: {exc}")
+
+    result = st.session_state.get("emission_document_result")
+    if result:
+        extraction = result.get("extraction", {})
+        st.divider()
+        st.subheader("Краткое резюме")
+        st.write(result.get("summary", "Резюме не сформировано."))
+        status = "LLM-анализ" if result.get("llm_used") else "Извлечённый текст / резервный режим"
+        st.caption(
+            f"{status} · {result.get('document_coverage', '')} · "
+            f"страниц: {extraction.get('pages') or '—'} · OCR: {'да' if extraction.get('used_ocr') else 'нет'}"
+        )
+        if result.get("recognized_blocks"):
+            st.caption(f"В JSON распознано блоков: {len(result['recognized_blocks'])}")
+
+        st.subheader("Основные данные")
+        key_data = result.get("key_data") or []
+        if key_data:
+            rows = [{"Параметр": item.get("name", ""), "Значение": item.get("value", ""), "Комментарий": item.get("note", "")} for item in key_data]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Структурированные параметры не найдены автоматически.")
+
+        st.subheader("На что обратить внимание")
+        for point in result.get("attention_points") or ["Риски не были выделены автоматически — проверьте первичный документ."]:
+            st.markdown(f"- {point}")
+
+        for warning in extraction.get("warnings", []):
+            st.warning(warning)
+        with st.expander("Показать распознанные JSON-блоки"):
+            st.json(result.get("recognized_blocks", []))
+        with st.expander("Показать извлечённый фрагмент"):
+            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
     st.stop()
 
 
