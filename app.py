@@ -12,7 +12,6 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 import altair as alt
-import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_pdf import PdfPages
