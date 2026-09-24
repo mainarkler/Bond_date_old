@@ -14,3 +14,9 @@ beautifulsoup4
 psycopg2-binary
 
 redis
+
+pypdf
+python-docx
+pymupdf
+pytesseract
+Pillow
