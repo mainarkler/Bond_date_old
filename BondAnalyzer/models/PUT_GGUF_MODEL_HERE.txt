@@ -1,0 +1,1 @@
+Place one GGUF model file in this directory. GGUF files are intentionally ignored by Git.

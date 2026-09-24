@@ -1,0 +1,1 @@
+{"type":"object","properties":{"issuer":{"type":["string","null"]},"nominal_value":{"type":["string","null"]},"sources":{"type":"object"},"confidence":{"type":"object"}},"additionalProperties":true}

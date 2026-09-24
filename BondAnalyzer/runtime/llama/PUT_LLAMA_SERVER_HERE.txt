@@ -1,0 +1,1 @@
+Place the Windows llama.cpp executable here with the exact name llama-server.exe.
