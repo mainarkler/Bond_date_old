@@ -36,6 +36,7 @@ from services.moex_turnover import MoexTurnoverClient
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 from services.keyword_news_block import build_keyword_news_block_sync
+from services.emission_document_analysis import analyse_emission_document
 
 # ---------------------------
 # Streamlit page setup
@@ -73,6 +74,7 @@ if FORCED_ACTIVE_VIEW in {
     "turnover_export",
     "moex_news",
     "company_analysis",
+    "emission_documents",
     "portfolio",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
@@ -144,6 +146,11 @@ if st.session_state["active_view"] == "home":
     st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
     if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
         st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
+    st.markdown("### Анализ эмиссионных документов")
+    st.caption("Офлайн-разбор PDF/DOCX: ключевые параметры и пункты для проверки.")
+    if st.button("Открыть", key="open_emission_documents", use_container_width=True):
+        st.session_state["active_view"] = "emission_documents"
         trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
@@ -3060,6 +3067,55 @@ if st.session_state["active_view"] == "portfolio":
             st.warning("Не удалось обработать часть инструментов:")
             for error in errors:
                 st.write(f"- {error}")
+    st.stop()
+
+
+# ---------------------------
+# Emission documents view
+# ---------------------------
+if st.session_state["active_view"] == "emission_documents":
+    st.header("📄 Анализ эмиссионных документов")
+    st.caption("Работает локально, без API-ключей. PDF обрабатывается постранично; для сканов применяется OCR.")
+    uploaded_document = st.file_uploader(
+        label="Эмиссионный документ",
+        type=("pdf", "docx"),
+        key="emission_document_upload",
+    )
+    if uploaded_document is not None and st.button("Проанализировать", type="primary", use_container_width=True):
+        with st.spinner("Извлекаем текст и формируем структурированную сводку..."):
+            try:
+                st.session_state["emission_document_result"] = analyse_emission_document(
+                    uploaded_document.name, uploaded_document.getvalue()
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Ошибка обработки документа: {exc}")
+    result = st.session_state.get("emission_document_result")
+    if result:
+        st.subheader("Краткое резюме")
+        st.write(result["summary"])
+        st.caption(result["coverage"])
+        st.subheader("Основные данные")
+        if result["key_data"]:
+            st.dataframe(pd.DataFrame(result["key_data"]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Структурированные параметры не найдены автоматически.")
+        st.subheader("На что обратить внимание")
+        for item in result["attention_points"]:
+            st.markdown(f"- {item}")
+        for warning in result["warnings"]:
+            st.warning(warning)
+        with st.expander("Начальный фрагмент текста"):
+            st.caption("Показаны первые 3 000 символов.")
+            st.text(result["excerpt"])
+        page_numbers = [page["number"] for page in result["pages"] if page["number"] is not None]
+        if page_numbers:
+            with st.expander("Текст по страницам"):
+                page_number = st.selectbox("Страница", page_numbers, key="emission_page_number")
+                page = next(item for item in result["pages"] if item["number"] == page_number)
+                st.caption(f"Источник: {page['source']}")
+                st.text(page["text"] or "Текст страницы не извлечён.")
     st.stop()
 
 
