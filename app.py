@@ -3485,12 +3485,9 @@ if st.session_state["active_view"] == "vm":
             st.caption("Показываются только наиболее значимые события за последние 24 часа; близкие по смыслу публикации объединяются.")
             for item in news_items:
                 st.markdown(
-                    f"**{item.get('published_at', '')} — {item.get('source', 'TradingView')}**  
-"
-                    f"**{item.get('title', 'Без заголовка')}**  
-"
-                    f"{item.get('summary', '')}  
-"
+                    f"**{item.get('published_at', '')} — {item.get('source', 'TradingView')}**  \n"
+                    f"**{item.get('title', 'Без заголовка')}**  \n"
+                    f"{item.get('summary', '')}  \n"
                     f"[Открыть источник]({item.get('url', '')})"
                 )
         elif vm_report.get("XAUUSD_NEWS_ERROR"):
