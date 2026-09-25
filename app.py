@@ -12,8 +12,6 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 import altair as alt
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
@@ -3071,65 +3069,6 @@ if st.session_state["active_view"] == "portfolio":
     st.stop()
 
 
-# ---------------------------
-# Issuer emission document analysis view
-# ---------------------------
-if st.session_state["active_view"] == "emission_documents":
-    st.header("📄 Анализ эмиссионных документов")
-    st.caption(
-        "Загрузите проспект, решение о выпуске или иной PDF/DOCX. Для PDF-сканов запускается OCR "
-        "(при установленном Tesseract с языками rus+eng)."
-    )
-    st.info(
-        "Результат — первичная аналитическая сводка, а не инвестиционная рекомендация. "
-        "Все условия и цифры необходимо сверять с оригиналом документа."
-    )
-    uploaded_document = st.file_uploader(
-        "Эмиссионный документ", type=["pdf", "docx"], key="emission_document_upload",
-        help="Максимум текста, передаваемого на суммаризацию: 60 000 символов.",
-    )
-    if uploaded_document is not None:
-        st.caption(f"Файл: {uploaded_document.name} · {uploaded_document.size / 1024 / 1024:.2f} МБ")
-        if st.button("Сформировать summary", type="primary", use_container_width=True, key="analyse_emission_document"):
-            with st.spinner("Извлекаем текст, при необходимости распознаём скан и анализируем условия выпуска..."):
-                try:
-                    st.session_state["emission_document_result"] = analyse_emission_document(
-                        uploaded_document.name, uploaded_document.getvalue()
-                    )
-                except ValueError as exc:
-                    st.error(str(exc))
-                except Exception as exc:
-                    st.error(f"Не удалось обработать документ: {exc}")
-
-    result = st.session_state.get("emission_document_result")
-    if result:
-        extraction = result.get("extraction", {})
-        st.divider()
-        st.subheader("Краткое резюме")
-        st.write(result.get("summary", "Резюме не сформировано."))
-        status = "LLM-анализ" if result.get("llm_used") else "Извлечённый текст / резервный режим"
-        st.caption(
-            f"{status} · {result.get('document_coverage', '')} · "
-            f"страниц: {extraction.get('pages') or '—'} · OCR: {'да' if extraction.get('used_ocr') else 'нет'}"
-        )
-
-        st.subheader("Основные данные")
-        key_data = result.get("key_data") or []
-        if key_data:
-            rows = [{"Параметр": item.get("name", ""), "Значение": item.get("value", ""), "Комментарий": item.get("note", "")} for item in key_data]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            st.caption("Структурированные параметры не найдены автоматически.")
-
-        st.subheader("На что обратить внимание")
-        for point in result.get("attention_points") or ["Риски не были выделены автоматически — проверьте первичный документ."]:
-            st.markdown(f"- {point}")
-
-        for warning in extraction.get("warnings", []):
-            st.warning(warning)
-        with st.expander("Показать извлечённый фрагмент"):
-            st.text(result.get("source_excerpt") or extraction.get("text", "")[:3_000])
-    st.stop()
 
 
 # ---------------------------
