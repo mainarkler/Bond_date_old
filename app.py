@@ -1029,7 +1029,7 @@ def build_vm_pdf_report(vm_report):
         # Gold charts: full page width, strictly stacked.
         # Top = actual 1-day intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
-            ax_month = fig.add_axes([0.055, 0.245, 0.89, 0.16])
+            ax_month = fig.add_axes([0.055, 0.245, 0.89, 0.155])
             ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
@@ -1043,12 +1043,26 @@ def build_vm_pdf_report(vm_report):
                 ),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f}"),
             )
-            # The lower chart carries the shared date axis.
-            ax_month.tick_params(axis="x", labelbottom=False)
-            ax_month.set_xlabel("")
+            # Explicit intraday ticks keep the time axis visible in the PDF.
+            intraday_tick_count = min(7, max(3, len(intraday_close)))
+            intraday_tick_positions = pd.to_datetime(
+                np.linspace(
+                    intraday_close.index[0].value,
+                    intraday_close.index[-1].value,
+                    intraday_tick_count,
+                )
+            )
+            ax_month.set_xticks(mdates.date2num(intraday_tick_positions.to_pydatetime()))
+            ax_month.set_xticklabels(
+                [ts.strftime("%H:%M") for ts in intraday_tick_positions],
+                rotation=0,
+                ha="center",
+            )
+            ax_month.tick_params(axis="x", labelbottom=True, labelrotation=0, pad=4)
+            ax_month.set_xlabel("Date / Time")
 
         if not daily_close.empty:
-            ax_six = fig.add_axes([0.055, 0.045, 0.89, 0.16])
+            ax_six = fig.add_axes([0.055, 0.04, 0.89, 0.15])
             ax_six.plot(daily_close.index, daily_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_six, daily_close, intraday=False)
             _style_gold_axis(
@@ -1059,7 +1073,22 @@ def build_vm_pdf_report(vm_report):
                 formatter=mdates.DateFormatter("%d.%m"),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f}"),
             )
-            ax_six.tick_params(axis="x", labelrotation=0)
+            # Explicit date ticks keep the six-month axis readable and separated.
+            daily_tick_count = min(7, max(4, len(daily_close)))
+            daily_tick_positions = pd.to_datetime(
+                np.linspace(
+                    daily_close.index[0].value,
+                    daily_close.index[-1].value,
+                    daily_tick_count,
+                )
+            )
+            ax_six.set_xticks(mdates.date2num(daily_tick_positions.to_pydatetime()))
+            ax_six.set_xticklabels(
+                [ts.strftime("%d.%m") for ts in daily_tick_positions],
+                rotation=0,
+                ha="center",
+            )
+            ax_six.tick_params(axis="x", labelrotation=0, pad=4)
 
         # Preserve exact A4 page geometry.
         pdf.savefig(fig)
