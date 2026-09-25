@@ -1034,11 +1034,14 @@ def build_vm_pdf_report(vm_report):
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
                 ax_month,
-                "Золото — 1 день",
-                "",
-                "Цена за грамм",
-                formatter=mdates.DateFormatter("%H:%M", tz=__import__("zoneinfo").ZoneInfo("America/New_York")),
-                y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
+                "Gold Intraday (1W) - per gram",
+                "Date / Time",
+                "Price per gram",
+                formatter=mdates.DateFormatter(
+                    "%H:%M",
+                    tz=__import__("zoneinfo").ZoneInfo("America/New_York"),
+                ),
+                y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f}"),
             )
             # The lower chart carries the shared date axis.
             ax_month.tick_params(axis="x", labelbottom=False)
@@ -1050,11 +1053,11 @@ def build_vm_pdf_report(vm_report):
             _apply_gold_y_padding(ax_six, daily_close, intraday=False)
             _style_gold_axis(
                 ax_six,
-                "Золото — 6 месяцев",
-                "Дата",
-                "Цена за грамм",
+                "Gold Daily Close (6M) - per gram",
+                "Date / Time",
+                "Price per gram",
                 formatter=mdates.DateFormatter("%d.%m"),
-                y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
+                y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f}"),
             )
             ax_six.tick_params(axis="x", labelrotation=0)
 
