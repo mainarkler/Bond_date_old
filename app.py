@@ -282,6 +282,20 @@ def _normalize_close_series(df):
     return close_series.dropna()
 
 
+def _convert_gold_intraday_to_new_york(series):
+    """Convert Yahoo intraday timestamps from source timezone to New York time."""
+    if series.empty:
+        return series
+    series = series.copy()
+    idx = pd.DatetimeIndex(series.index)
+    if idx.tz is None:
+        # Yahoo may return naive timestamps; treat them as UTC before conversion.
+        idx = idx.tz_localize("UTC")
+    idx = idx.tz_convert("America/New_York")
+    series.index = idx
+    return series
+
+
 def get_gold_close_series():
     daily_raw, intraday_raw = fetch_gold_chart_data()
     daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
@@ -293,12 +307,11 @@ def get_gold_close_series():
     if not intraday_close.empty:
         intraday_close = intraday_close.copy()
         intraday_close.index = pd.to_datetime(intraday_close.index)
-        if getattr(intraday_close.index, "tz", None) is not None:
-            intraday_close.index = intraday_close.index.tz_localize(None)
+        intraday_close = _convert_gold_intraday_to_new_york(intraday_close)
         intraday_close = intraday_close[~intraday_close.index.duplicated(keep="last")]
         intraday_close = intraday_close.sort_index()
 
-        # Оставляем только последнюю доступную торговую дату.
+        # После перевода в Нью-Йорк оставляем последнюю доступную торговую дату.
         last_trade_date = intraday_close.index.max().date()
         intraday_close = intraday_close[intraday_close.index.date == last_trade_date]
 
@@ -949,7 +962,7 @@ def build_vm_pdf_report(vm_report):
             )
 
         # News: date only | fixed source column | translated title | clickable original.
-        ax_news = fig.add_axes([0.055, 0.405, 0.89, 0.135])
+        ax_news = fig.add_axes([0.055, 0.425, 0.89, 0.135])
         ax_news.axis("off")
         ax_news.text(
             0,
@@ -1016,7 +1029,7 @@ def build_vm_pdf_report(vm_report):
         # Gold charts: full page width, strictly stacked.
         # Top = actual 1-day intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
-            ax_month = fig.add_axes([0.055, 0.225, 0.89, 0.145])
+            ax_month = fig.add_axes([0.055, 0.255, 0.89, 0.145])
             ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
@@ -1024,7 +1037,7 @@ def build_vm_pdf_report(vm_report):
                 "Золото — 1 день",
                 "",
                 "Цена за грамм",
-                formatter=mdates.DateFormatter("%d.%m"),
+                formatter=mdates.DateFormatter("%H:%M", tz=__import__("zoneinfo").ZoneInfo("America/New_York")),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
             )
             # The lower chart carries the shared date axis.
