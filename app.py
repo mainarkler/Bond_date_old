@@ -247,12 +247,11 @@ def fetch_gold_chart_data():
         ("GC=F", "1y", "1d"),
         ("XAUUSD=X", "1y", "1d"),
     ]
-    # Yahoo Finance does not reliably provide 1-minute data for a full month.
-    # Prefer 1-hour data for a true 1-month chart, then use shorter intraday
-    # ranges only as fallbacks.
+    # Для недельного графика используем часовые данные: они дают достаточно
+    # точек и позволяют показать динамику цены внутри недели без лишнего шума.
     intraday_candidates = [
-        ("GC=F", "1mo", "1h"),
-        ("XAUUSD=X", "1mo", "1h"),
+        ("GC=F", "7d", "1h"),
+        ("XAUUSD=X", "7d", "1h"),
         ("GC=F", "5d", "1h"),
         ("XAUUSD=X", "5d", "5m"),
         ("GC=F", "5d", "5m"),
@@ -287,7 +286,7 @@ def get_gold_close_series():
     daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
     intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
 
-    # Делаем 1M-график непрерывным: Yahoo может возвращать NaN
+    # Делаем недельный график непрерывным: Yahoo может возвращать NaN
     # и разрывы между торговыми сессиями.
     if not intraday_close.empty:
         intraday_close = intraday_close.copy()
@@ -719,13 +718,13 @@ def render_gold_charts():
             st.altair_chart(chart, use_container_width=True)
 
     with chart_columns[1]:
-        st.markdown("#### Gold Intraday (1M) - per gram")
+        st.markdown("#### Gold Intraday (1W) - per gram")
         if intraday_close.empty:
             st.info("Нет внутридневных данных по золоту за текущий день.")
         else:
             chart = build_gold_chart_display(
                 intraday_close,
-                "Gold Intraday (1M) - per gram",
+                "Gold Intraday (1W) - per gram",
                 intraday=True,
             )
             st.altair_chart(chart, use_container_width=True)
@@ -737,14 +736,14 @@ def get_intraday_chart_attachment():
         return None
     fig = build_gold_chart_figure(
         intraday_close,
-        "Gold Intraday (1M) - per gram",
+        "Gold Intraday (1W) - per gram",
         color="#1f77b4",
         fill_color="#1f77b4",
         intraday=True,
     )
     png_bytes = figure_to_png_bytes(fig)
     plt.close(fig)
-    return ("gold_intraday_1m.png", png_bytes, "image", "png")
+    return ("gold_intraday_1w.png", png_bytes, "image", "png")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1005,14 +1004,14 @@ def build_vm_pdf_report(vm_report):
             )
 
         # Gold charts: full page width, strictly stacked.
-        # Top = actual 1-month intraday series; bottom = 6-month daily series.
+        # Top = actual 1-week intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
             ax_month = fig.add_axes([0.055, 0.225, 0.89, 0.145])
             ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
                 ax_month,
-                "Золото — 1 месяц",
+                "Золото — 1 неделя",
                 "",
                 "Цена за грамм",
                 formatter=mdates.DateFormatter("%d.%m"),
@@ -3694,7 +3693,7 @@ if st.session_state["active_view"] == "vm":
             f"{var_table_text}\n\n"
             "XAUUSD новости (TradingView, со вчерашнего дня):\n"
             f"{mail_news_text}\n\n"
-            "Во вложении: Excel- и PDF-отчёты, а также график Gold Intraday (1M) - per gram.\n"
+            "Во вложении: Excel- и PDF-отчёты, а также график Gold Intraday (1W) - per gram.\n"
         )
 
         st.session_state["vm_report_default_body"] = vm_mail_body
