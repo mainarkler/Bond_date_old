@@ -139,7 +139,10 @@ class GoogleNewsRSSProvider(BaseHTTPNewsProvider):
 
     async def fetch(self, query: NewsQuery) -> list[NewsItem]:
         params = {"q": query.query, "hl": (query.language or "en"), "gl": "US", "ceid": "US:en"}
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                follow_redirects=True,
+            ) as client:
             response = await client.get(self.endpoint, params=params)
             response.raise_for_status()
             text = response.text
