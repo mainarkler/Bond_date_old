@@ -649,7 +649,7 @@ def build_gold_chart_display(series, title, intraday=False):
 
 
 def build_gold_chart_figure(series, title, color, fill_color, intraday=False):
-    fig, ax = plt.subplots(figsize=(11.69, 8.27), facecolor="#ffffff")
+    fig, ax = plt.subplots(figsize=(9, 4.8), facecolor="#ffffff")
     ax.plot(series.index, series.values, color=color, linewidth=2.0)
     _apply_gold_y_padding(ax, series, intraday=intraday)
     formatter = mdates.DateFormatter("%H:%M") if intraday else mdates.DateFormatter("%d.%m.%Y")
@@ -786,7 +786,7 @@ def build_vm_pdf_report(vm_report):
     with PdfPages(pdf_buffer) as pdf:
         # A4 landscape. Keep the native page size instead of bbox_inches="tight":
         # this prevents the footer and chart labels from shifting outside the page.
-        fig = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
+        fig = plt.figure(figsize=(14, 10), facecolor="#ffffff")
         fig.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.035)
 
         fig.suptitle(
