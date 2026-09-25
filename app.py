@@ -405,97 +405,94 @@ def _fetch_xauusd_news_like_ai_analysis():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_xauusd_tradingview_news():
-    """Fetch XAUUSD headlines from TradingView's news-headlines service.
+    """Load XAUUSD news with TradingView as primary source and Google RSS as fallback."""
 
-    The public TradingView page is a dynamic application and its HTML changes
-    frequently, so scraping JSON-LD / Next.js markup is intentionally avoided.
-    """
-    endpoint = "https://news-headlines.tradingview.com/v2/view/headlines/symbol"
-    params = {
-        "symbol": "OANDA:XAUUSD",
-        "client": "web",
-        "streaming": "false",
-        "lang": "en",
-        "limit": "50",
-    }
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json,text/plain,*/*",
-        "Origin": "https://www.tradingview.com",
-        "Referer": "https://www.tradingview.com/",
-    }
+    def _run(coro):
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+    def _google_fallback():
+        query = "XAUUSD OR Gold spot OR Gold price"
+        endpoint = "https://news.google.com/rss/search"
+        params = {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+        }
+        try:
+            response = HTTP_SESSION.get(
+                endpoint,
+                params=params,
+                headers=headers,
+                timeout=20,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            root = ET.fromstring(response.text)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+            result = []
+            seen = set()
+            for node in root.findall(".//item"):
+                title = re.sub(r"<[^>]+>", "", node.findtext("title") or "").strip()
+                link = (node.findtext("link") or "").strip()
+                pub_raw = (node.findtext("pubDate") or "").strip()
+                if not title or not link or link in seen:
+                    continue
+                try:
+                    published = parsedate_to_datetime(pub_raw)
+                    if published.tzinfo is None:
+                        published = published.replace(tzinfo=timezone.utc)
+                    published = published.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                if published < cutoff:
+                    continue
+                seen.add(link)
+                result.append(
+                    {
+                        "title": title,
+                        "url": link,
+                        "published_at": published.strftime("%Y-%m-%d %H:%M"),
+                        "source": "Google News",
+                    }
+                )
+            result.sort(key=lambda x: x["published_at"], reverse=True)
+            return result[:50]
+        except Exception:
+            return []
 
     try:
-        response = HTTP_SESSION.get(
-            endpoint,
-            params=params,
-            headers=headers,
-            timeout=20,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:
-        logger = globals().get("logger")
-        if logger:
-            logger.warning("tradingview_news_failed", extra={"error": str(exc)})
-        return _fetch_xauusd_news_like_ai_analysis()
+        items = _run(fetch_tradingview_news("OANDA:XAUUSD", limit=50))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        result = []
+        for item in items:
+            if item.published_at < cutoff:
+                continue
+            result.append(
+                {
+                    "title": item.title.strip(),
+                    "url": item.url.strip(),
+                    "published_at": item.published_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "source": item.source or "TradingView",
+                }
+            )
+        result.sort(key=lambda x: x["published_at"], reverse=True)
+        if result:
+            return result
+    except Exception:
+        pass
 
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list):
-        return _fetch_xauusd_news_like_ai_analysis()
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
-    result = []
-    seen = set()
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        title = str(item.get("title") or "").strip()
-        if not title:
-            continue
-
-        story_path = str(item.get("storyPath") or "").strip()
-        link = str(item.get("link") or "").strip()
-        url = link or (
-            "https://www.tradingview.com" + story_path
-            if story_path.startswith("/")
-            else story_path
-        )
-        if not url or url in seen:
-            continue
-
-        published_raw = item.get("published")
-        try:
-            published = datetime.fromtimestamp(float(published_raw), tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            continue
-
-        if published < cutoff:
-            continue
-
-        seen.add(url)
-        result.append(
-            {
-                "title": title,
-                "url": url,
-                "published_at": published.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                "source": str(item.get("source") or item.get("provider") or "TradingView"),
-            }
-        )
-
-    result.sort(key=lambda x: x["published_at"], reverse=True)
-
-    if result:
-        return result
-
-    return _fetch_xauusd_news_like_ai_analysis()
+    return _google_fallback()
 
 def calculate_var_results(result_D, K_values=None, t=0.95):
     result_D = np.asarray(result_D, dtype=float)
