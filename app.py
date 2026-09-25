@@ -286,19 +286,26 @@ def get_gold_close_series():
     daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
     intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
 
-    # Делаем недельный график непрерывным: Yahoo может возвращать NaN
-    # и разрывы между торговыми сессиями.
+    # Для недельного графика не учитываем выходные и не соединяем
+    # цену через неторгуемые периоды. Пропуски внутри торговой сессии
+    # восстанавливаем только на коротком участке, не затрагивая выходные.
     if not intraday_close.empty:
         intraday_close = intraday_close.copy()
         intraday_close.index = pd.to_datetime(intraday_close.index)
         if getattr(intraday_close.index, "tz", None) is not None:
             intraday_close.index = intraday_close.index.tz_localize(None)
         intraday_close = intraday_close[~intraday_close.index.duplicated(keep="last")]
+        intraday_close = intraday_close.sort_index()
+
+        # Выходные дни полностью исключаем из недельного графика.
+        intraday_close = intraday_close[intraday_close.index.dayofweek < 5]
+
+        # Заполняем только короткие пропуски внутри торговых периодов.
         intraday_close = (
-            intraday_close.sort_index()
+            intraday_close
             .resample("1h")
             .mean()
-            .interpolate(method="time", limit_direction="both")
+            .interpolate(method="time", limit=3)
             .dropna()
         )
 
@@ -1035,14 +1042,6 @@ def build_vm_pdf_report(vm_report):
             )
             ax_six.tick_params(axis="x", labelrotation=0)
 
-        fig.text(
-            0.055,
-            0.018,
-            "Источники: MOEX ISS • Yahoo Finance • TradingView/Google News. "
-            "Новости переведены автоматически; ссылка ведёт на оригинал.",
-            fontsize=6.2,
-            color="#7a838d",
-        )
         # Preserve exact A4 page geometry.
         pdf.savefig(fig)
         plt.close(fig)
