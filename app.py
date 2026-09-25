@@ -780,6 +780,7 @@ def build_vm_pdf_report(vm_report):
 
     with PdfPages(pdf_buffer) as pdf:
         fig = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
+        fig.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.035)
         fig.suptitle(
             "ОТЧЁТ VM",
             x=0.055,
