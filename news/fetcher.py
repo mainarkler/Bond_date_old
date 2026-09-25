@@ -49,7 +49,7 @@ class BaseHTTPNewsProvider:
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = await client.get(url, params=params, headers=headers)
+                response = await client.get(url, params=params, headers=headers, follow_redirects=True)
                 response.raise_for_status()
                 return response.json()
             except (httpx.HTTPError, ValueError) as exc:
@@ -139,13 +139,24 @@ class GoogleNewsRSSProvider(BaseHTTPNewsProvider):
 
     async def fetch(self, query: NewsQuery) -> list[NewsItem]:
         params = {"q": query.query, "hl": (query.language or "en"), "gl": "US", "ceid": "US:en"}
-        async with httpx.AsyncClient(
-                timeout=self.timeout_seconds,
-                follow_redirects=True,
-            ) as client:
-            response = await client.get(self.endpoint, params=params)
-            response.raise_for_status()
-            text = response.text
+        async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True) as client:
+            last_error: Exception | None = None
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    response = await client.get(
+                        self.endpoint,
+                        params=params,
+                        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml, application/xml, text/xml, */*"},
+                    )
+                    response.raise_for_status()
+                    text = response.text
+                    break
+                except (httpx.HTTPError, ValueError) as exc:
+                    last_error = exc
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(min(2 ** attempt, 4))
+            else:
+                raise NewsFetchError(f"google_rss failed after retries: {last_error}")
 
         # Lightweight RSS parse without extra deps
         import re
