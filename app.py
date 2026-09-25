@@ -803,10 +803,8 @@ def build_vm_pdf_report(vm_report):
         kpis = [
             ("ПОСЛЕДНЯЯ ЦЕНА", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
             ("VM", f"{vm_report['VM']:.2f}"),
-            ("МАРЖА ПОЗИЦИИ", safe_format_int_with_sep(vm_report["POSITION_VM"])),
-            ("СУММА ОГРАНИЧЕНИЯ", safe_format_int_with_sep(vm_report["LIMIT_SUM"])),
-        ]
-        x0, w, gap = 0.055, 0.205, 0.018
+            ("МАРЖА ПОЗИЦИИ", safe_format_int_with_sep(vm_report["POSITION_VM"])),        ]
+        x0, w, gap = 0.055, 0.275, 0.018
         for idx, (label, value) in enumerate(kpis):
             x = x0 + idx * (w + gap)
             ax = fig.add_axes([x, 0.825, w, 0.075])
@@ -824,9 +822,7 @@ def build_vm_pdf_report(vm_report):
             ("Расчётная цена последнего клиринга", f"{vm_report['LAST_SETTLE_PRICE']}"),
             ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
             ("Время котировки", vm_report.get("QUOTE_TIME") or "н/д"),
-            ("Multiplier", f"{vm_report['MULTIPLIER']}"),
-            ("VM клиринговая", f"{vm_report.get('VM_CLEARING', vm_report['VM']):.2f}"),
-            ("USD/RUB", f"{vm_report['USD_RUB']}  ({vm_report['USD_RUB_DATE']})"),
+            ("Multiplier", f"{vm_report['MULTIPLIER']}"),            ("USD/RUB", f"{vm_report['USD_RUB']}  ({vm_report['USD_RUB_DATE']})"),
         ]
         ax_data = fig.add_axes([0.055, 0.565, 0.46, 0.22])
         ax_data.axis("off")
@@ -881,7 +877,7 @@ def build_vm_pdf_report(vm_report):
             ax_var.text(0, 0.6, "VaR недоступен.", fontsize=9, color="#9b2c2c", transform=ax_var.transAxes)
 
         # News block with clickable URLs.
-        ax_news = fig.add_axes([0.055, 0.29, 0.89, 0.22])
+        ax_news = fig.add_axes([0.055, 0.36, 0.89, 0.15])
         ax_news.axis("off")
         ax_news.text(0, 1.03, "ВАЖНЫЕ НОВОСТИ XAUUSD", fontsize=12, fontweight="bold", color="#182230", transform=ax_news.transAxes)
         if news_items:
@@ -910,20 +906,20 @@ def build_vm_pdf_report(vm_report):
 
         # Gold charts: clean, restrained, print-friendly.
         if not daily_close.empty:
-            ax_daily = fig.add_axes([0.055, 0.055, 0.425, 0.19])
+            ax_daily = fig.add_axes([0.055, 0.18, 0.89, 0.20])
             ax_daily.plot(daily_close.index, daily_close.values, linewidth=1.5)
             _apply_gold_y_padding(ax_daily, daily_close, intraday=False)
             _style_gold_axis(
-                ax_daily, "Золото — 6 месяцев", "Дата", "Цена за грамм",
+                ax_daily, "Золото — 1 месяц", "Дата", "Цена за грамм",
                 formatter=mdates.DateFormatter("%d.%m.%Y"),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
             )
         if not intraday_close.empty:
-            ax_intraday = fig.add_axes([0.52, 0.055, 0.425, 0.19])
+            ax_intraday = fig.add_axes([0.055, 0.055, 0.89, 0.10])
             ax_intraday.plot(intraday_close.index, intraday_close.values, linewidth=1.5)
             _apply_gold_y_padding(ax_intraday, intraday_close, intraday=True)
             _style_gold_axis(
-                ax_intraday, "Золото — 1 месяц", "Время", "Цена за грамм",
+                ax_intraday, "Золото — 6 месяцев", "Дата", "Цена за грамм",
                 formatter=mdates.DateFormatter("%H:%M"),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
             )
