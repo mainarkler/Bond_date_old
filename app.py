@@ -404,6 +404,50 @@ def _fetch_xauusd_news_like_ai_analysis():
     return prepared
 
 
+def _rank_and_summarize_xauusd_news(items, limit=8):
+    """Keep only material gold-market headlines and collapse near-duplicates."""
+    high = {
+        "fed": 7, "fomc": 7, "rate": 6, "interest rate": 6, "powell": 6,
+        "cpi": 7, "inflation": 6, "pce": 7, "nfp": 7, "payroll": 6,
+        "jobs": 5, "unemployment": 5, "treasury": 5, "yield": 6,
+        "dollar": 5, "dxy": 5, "central bank": 6, "gold reserves": 6,
+        "geopolit": 7, "war": 6, "sanction": 5, "tariff": 5,
+        "china": 4, "russia": 4, "ukraine": 5, "israel": 4,
+        "gold": 2, "xauusd": 4, "precious metal": 3,
+    }
+    low = {"forecast": -1, "technical": -1, "analysis": -1, "outlook": -1, "weekly": -1}
+    ranked = []
+    for item in items:
+        title = str(item.get("title", "")).strip()
+        text_value = f"{title} {item.get('summary', '')}".lower()
+        if not title:
+            continue
+        score = sum(weight for key, weight in high.items() if key in text_value)
+        score += sum(weight for key, weight in low.items() if key in text_value)
+        if "xauusd" in text_value or "gold" in text_value:
+            score += 2
+        if score < 4:
+            continue
+        # A compact, factual summary from the headline; no invented details.
+        summary = title
+        source = str(item.get("source") or "TradingView")
+        ranked.append({**item, "importance": score, "summary": summary, "source": source})
+
+    ranked.sort(key=lambda x: (x["importance"], x.get("published_at", "")), reverse=True)
+
+    selected = []
+    seen_tokens = []
+    for item in ranked:
+        tokens = set(re.findall(r"[a-z0-9]{4,}", item["title"].lower()))
+        if any(len(tokens & prev) >= 3 for prev in seen_tokens):
+            continue
+        selected.append(item)
+        seen_tokens.append(tokens)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_xauusd_tradingview_news():
     """Load XAUUSD news with TradingView as primary source and Google RSS as fallback."""
@@ -3434,18 +3478,25 @@ if st.session_state["active_view"] == "vm":
             key="vm_report_csv_dl",
         )
 
-        st.markdown("#### XAUUSD новости (TradingView)")
-        news_items = vm_report.get("XAUUSD_NEWS", [])
+        st.markdown("#### XAUUSD важные новости")
+        raw_news_items = vm_report.get("XAUUSD_NEWS", [])
+        news_items = _rank_and_summarize_xauusd_news(raw_news_items, limit=8)
         if news_items:
-            st.caption("Период: со вчерашнего дня до последней доступной новости.")
+            st.caption("Показываются только наиболее значимые события за последние 24 часа; близкие по смыслу публикации объединяются.")
             for item in news_items:
                 st.markdown(
-                    f"- **{item.get('published_at', '')}** — [{item.get('title', 'Без заголовка')}]({item.get('url', '')})"
+                    f"**{item.get('published_at', '')} — {item.get('source', 'TradingView')}**  
+"
+                    f"**{item.get('title', 'Без заголовка')}**  
+"
+                    f"{item.get('summary', '')}  
+"
+                    f"[Открыть источник]({item.get('url', '')})"
                 )
         elif vm_report.get("XAUUSD_NEWS_ERROR"):
             st.info(f"Новости XAUUSD временно недоступны: {vm_report['XAUUSD_NEWS_ERROR']}")
         else:
-            st.info("За период со вчерашнего дня новости XAUUSD не найдены.")
+            st.info("За последние 24 часа значимых новостей XAUUSD не найдено.")
 
         var_table_for_mail = build_var_table({"VAR_results": vm_report.get("VAR_RESULTS", {})})
         if not var_table_for_mail.empty:
@@ -3454,9 +3505,12 @@ if st.session_state["active_view"] == "vm":
             var_table_text = f"VaR по данным Yahoo Finance недоступен: {vm_report['VAR_ERROR']}"
         else:
             var_table_text = "Недостаточно дневной истории золота для расчёта VaR."
+        important_mail_news = _rank_and_summarize_xauusd_news(
+            vm_report.get("XAUUSD_NEWS", []), limit=8
+        )
         mail_news_lines = [
             f"- {n.get('published_at', '')}: {n.get('title', '')}"
-            for n in vm_report.get("XAUUSD_NEWS", [])[:10]
+            for n in important_mail_news
         ]
         mail_news_text = "\n".join(mail_news_lines) if mail_news_lines else "Нет доступных новостей за период."
 
