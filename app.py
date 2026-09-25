@@ -247,14 +247,15 @@ def fetch_gold_chart_data():
         ("GC=F", "1y", "1d"),
         ("XAUUSD=X", "1y", "1d"),
     ]
-    # Для недельного графика используем часовые данные: они дают достаточно
-    # точек и позволяют показать динамику цены внутри недели без лишнего шума.
+    # Для суточного графика используем внутридневные данные за один торговый
+    # день, чтобы показать реальную динамику цены без выходных и длинных пауз.
     intraday_candidates = [
-        ("GC=F", "7d", "1h"),
-        ("XAUUSD=X", "7d", "1h"),
-        ("GC=F", "5d", "1h"),
-        ("XAUUSD=X", "5d", "5m"),
-        ("GC=F", "5d", "5m"),
+        ("GC=F", "1d", "5m"),
+        ("XAUUSD=X", "1d", "5m"),
+        ("GC=F", "1d", "15m"),
+        ("XAUUSD=X", "1d", "15m"),
+        ("GC=F", "1d", "1h"),
+        ("XAUUSD=X", "1d", "1h"),
     ]
 
     daily = pd.DataFrame()
@@ -286,9 +287,9 @@ def get_gold_close_series():
     daily_close = convert_ounce_price_to_gram(_normalize_close_series(daily_raw))
     intraday_close = convert_ounce_price_to_gram(_normalize_close_series(intraday_raw))
 
-    # Для недельного графика не учитываем выходные и не соединяем
-    # цену через неторгуемые периоды. Пропуски внутри торговой сессии
-    # восстанавливаем только на коротком участке, не затрагивая выходные.
+    # Для суточного графика не учитываем неторгуемые периоды и не соединяем
+    # цену через длинные паузы внутри суток. Пропуски восстанавливаем только
+    # на коротком участке внутри торговой сессии.
     if not intraday_close.empty:
         intraday_close = intraday_close.copy()
         intraday_close.index = pd.to_datetime(intraday_close.index)
@@ -297,15 +298,17 @@ def get_gold_close_series():
         intraday_close = intraday_close[~intraday_close.index.duplicated(keep="last")]
         intraday_close = intraday_close.sort_index()
 
-        # Выходные дни полностью исключаем из недельного графика.
-        intraday_close = intraday_close[intraday_close.index.dayofweek < 5]
+        # Оставляем только последнюю доступную торговую дату.
+        last_trade_date = intraday_close.index.max().date()
+        intraday_close = intraday_close[intraday_close.index.date == last_trade_date]
 
-        # Заполняем только короткие пропуски внутри торговых периодов.
+        # Приводим точки к 15-минутной сетке и заполняем только короткие
+        # пропуски внутри торговой сессии.
         intraday_close = (
             intraday_close
-            .resample("1h")
+            .resample("15min")
             .mean()
-            .interpolate(method="time", limit=3)
+            .interpolate(method="time", limit=2)
             .dropna()
         )
 
@@ -809,7 +812,7 @@ def build_vm_pdf_report(vm_report):
     with PdfPages(pdf_buffer) as pdf:
         # A4 landscape. Keep the native page size instead of bbox_inches="tight":
         # this prevents the footer and chart labels from shifting outside the page.
-        fig = plt.figure(figsize=(14, 16), facecolor="#ffffff")
+        fig = plt.figure(figsize=(14, 18), facecolor="#ffffff")
         fig.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.035)
 
         fig.suptitle(
@@ -1011,14 +1014,14 @@ def build_vm_pdf_report(vm_report):
             )
 
         # Gold charts: full page width, strictly stacked.
-        # Top = actual 1-week intraday series; bottom = 6-month daily series.
+        # Top = actual 1-day intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
             ax_month = fig.add_axes([0.055, 0.225, 0.89, 0.145])
             ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
                 ax_month,
-                "Золото — 1 неделя",
+                "Золото — 1 день",
                 "",
                 "Цена за грамм",
                 formatter=mdates.DateFormatter("%d.%m"),
