@@ -405,67 +405,97 @@ def _fetch_xauusd_news_like_ai_analysis():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_xauusd_tradingview_news():
-    url = "https://www.tradingview.com/symbols/XAUUSD/news/?exchange=OANDA"
-    response = HTTP_SESSION.get(
-        url,
-        timeout=20,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            )
-        },
-    )
-    response.raise_for_status()
-    html = response.text
-    scripts = re.findall(
-        r'<script[^>]*type="application/ld\\+json"[^>]*>(.*?)</script>',
-        html,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    if not scripts:
-        scripts = re.findall(
-            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-            html,
-            flags=re.DOTALL | re.IGNORECASE,
+    """Fetch XAUUSD headlines from TradingView's news-headlines service.
+
+    The public TradingView page is a dynamic application and its HTML changes
+    frequently, so scraping JSON-LD / Next.js markup is intentionally avoided.
+    """
+    endpoint = "https://news-headlines.tradingview.com/v2/view/headlines/symbol"
+    params = {
+        "symbol": "OANDA:XAUUSD",
+        "client": "web",
+        "streaming": "false",
+        "lang": "en",
+        "limit": "50",
+    }
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/",
+    }
+
+    try:
+        response = HTTP_SESSION.get(
+            endpoint,
+            params=params,
+            headers=headers,
+            timeout=20,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        logger = globals().get("logger")
+        if logger:
+            logger.warning("tradingview_news_failed", extra={"error": str(exc)})
+        return _fetch_xauusd_news_like_ai_analysis()
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return _fetch_xauusd_news_like_ai_analysis()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    result = []
+    seen = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+
+        story_path = str(item.get("storyPath") or "").strip()
+        link = str(item.get("link") or "").strip()
+        url = link or (
+            "https://www.tradingview.com" + story_path
+            if story_path.startswith("/")
+            else story_path
+        )
+        if not url or url in seen:
+            continue
+
+        published_raw = item.get("published")
+        try:
+            published = datetime.fromtimestamp(float(published_raw), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            continue
+
+        if published < cutoff:
+            continue
+
+        seen.add(url)
+        result.append(
+            {
+                "title": title,
+                "url": url,
+                "published_at": published.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "source": str(item.get("source") or item.get("provider") or "TradingView"),
+            }
         )
 
-    parsed_entries = []
-    for block in scripts:
-        try:
-            payload = json.loads(block.strip())
-        except Exception:
-            continue
-        _extract_news_entries(payload, parsed_entries)
-    parsed_entries.extend(_extract_news_from_cards(html))
+    result.sort(key=lambda x: x["published_at"], reverse=True)
 
-    if not parsed_entries:
-        return _fetch_xauusd_news_like_ai_analysis()
+    if result:
+        return result
 
-    unique_news = {}
-    for item in parsed_entries:
-        news_url = item.get("url")
-        if news_url and news_url not in unique_news:
-            unique_news[news_url] = item
-
-    yesterday_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    filtered = []
-    for item in unique_news.values():
-        parsed_dt = _parse_news_datetime(item.get("published_at", ""))
-        if parsed_dt and parsed_dt >= yesterday_start:
-            filtered.append(
-                {
-                    "title": item["title"],
-                    "url": item["url"],
-                    "published_at": parsed_dt.strftime("%Y-%m-%d %H:%M"),
-                }
-            )
-
-    filtered.sort(key=lambda x: x["published_at"], reverse=True)
-    if not filtered:
-        return _fetch_xauusd_news_like_ai_analysis()
-    return filtered
-
+    return _fetch_xauusd_news_like_ai_analysis()
 
 def calculate_var_results(result_D, K_values=None, t=0.95):
     result_D = np.asarray(result_D, dtype=float)
