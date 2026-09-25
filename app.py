@@ -12,8 +12,6 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 import altair as alt
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
@@ -36,6 +34,7 @@ from services.moex_turnover import MoexTurnoverClient
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 from services.keyword_news_block import build_keyword_news_block_sync
+from services.emission_document_analysis import analyse_emission_document
 
 # ---------------------------
 # Streamlit page setup
@@ -73,6 +72,7 @@ if FORCED_ACTIVE_VIEW in {
     "turnover_export",
     "moex_news",
     "company_analysis",
+    "emission_documents",
     "portfolio",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
@@ -144,6 +144,12 @@ if st.session_state["active_view"] == "home":
     st.caption("Новости, инвестиционный сигнал и факторная расшифровка в отдельной плитке.")
     if st.button("Открыть", key="open_company_analysis_tile", use_container_width=True):
         st.session_state["active_view"] = "company_analysis"
+        trigger_rerun()
+
+    st.markdown("### Анализ эмиссионных документов")
+    st.caption("Загрузка PDF/DOCX, OCR сканов и краткое резюме условий выпуска и рисков.")
+    if st.button("Открыть", key="open_emission_documents_tile", use_container_width=True):
+        st.session_state["active_view"] = "emission_documents"
         trigger_rerun()
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
@@ -1021,34 +1027,40 @@ def load_market_wide_history_values(market_kind: str, start_date: str, end_date:
     if not boards:
         boards = ["TQBR"] if market_kind == "shares" else ["TQCB"]
 
+    # The board-wide securities endpoint ignores from/till and returns only the
+    # latest trading day. Iterate over each calendar day in the range using the
+    # `date` param so the full period is covered.
+    date_range = pd.date_range(start=start_date, end=end_date, freq="D")
+    trading_days = [d.strftime("%Y-%m-%d") for d in date_range]
+
     all_rows: list[list[object]] = []
     columns: list[str] = []
     for board in boards:
-        start = 0
-        while True:
-            url = (
-                f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/"
-                f"boards/{board}/securities.json"
-            )
-            response = request_get(
-                url,
-                params={
-                    "from": start_date,
-                    "till": end_date,
-                    "start": start,
-                    "iss.only": "history",
-                    "iss.meta": "off",
-                    "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID,BOARDID",
-                },
-                timeout=200,
-            )
-            payload = response.json().get("history", {})
-            rows = payload.get("data", [])
-            columns = payload.get("columns", columns)
-            if not rows:
-                break
-            all_rows.extend(rows)
-            start += len(rows)
+        for day in trading_days:
+            start = 0
+            while True:
+                url = (
+                    f"https://iss.moex.com/iss/history/engines/stock/markets/{market_kind}/"
+                    f"boards/{board}/securities.json"
+                )
+                response = request_get(
+                    url,
+                    params={
+                        "date": day,
+                        "start": start,
+                        "iss.only": "history",
+                        "iss.meta": "off",
+                        "history.columns": "TRADEDATE,VALUE,NUMTRADES,VOLUME,SHORTNAME,SECID,BOARDID",
+                    },
+                    timeout=200,
+                )
+                payload = response.json().get("history", {})
+                rows = payload.get("data", [])
+                columns = payload.get("columns", columns)
+                if not rows:
+                    break
+                all_rows.extend(rows)
+                start += len(rows)
 
     if not all_rows:
         return pd.DataFrame(columns=["TRADEDATE", "VALUE", "NUMTRADES", "VOLUME", "SECID", "SHORTNAME"])
@@ -3057,6 +3069,8 @@ if st.session_state["active_view"] == "portfolio":
     st.stop()
 
 
+
+
 # ---------------------------
 # Company analysis view
 # ---------------------------
@@ -4442,7 +4456,10 @@ if st.session_state["active_view"] == "market_statistics":
                 combined_df = pd.concat(full_rows, ignore_index=True)
                 if exclude_etf:
                     shortname_series = combined_df.get("SHORTNAME", pd.Series("", index=combined_df.index)).astype(str)
-                    combined_df = combined_df[~shortname_series.str.contains(r"\bETF\b", case=False, na=False)]
+                    etf_mask = shortname_series.str.contains(r"\bETF\b", case=False, na=False)
+                    secid_series = combined_df.get("SECID", pd.Series("", index=combined_df.index)).astype(str)
+                    ru000_mask = secid_series.str.startswith("RU000", na=False)
+                    combined_df = combined_df[~(etf_mask | ru000_mask)]
                     if combined_df.empty:
                         st.error("После исключения ETF данные отсутствуют.")
                         st.stop()
