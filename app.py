@@ -29,6 +29,8 @@ from news.fetcher import NewsFetcher
 from news.models import NewsQuery
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 
 from services.moex_turnover import MoexTurnoverClient
 from services.company_news_analysis import get_company_news_analysis_sync
