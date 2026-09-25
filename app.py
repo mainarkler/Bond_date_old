@@ -851,7 +851,7 @@ def build_vm_pdf_report(vm_report):
         kpis = [
             (
                 "ПОСЛЕДНЯЯ ЦЕНА",
-                f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}",
+                f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.2f}",
             ),
             ("VM", f"{vm_report['VM']:.2f}"),
             ("МАРЖА ПОЗИЦИИ", safe_format_int_with_sep(vm_report["POSITION_VM"])),
@@ -859,7 +859,7 @@ def build_vm_pdf_report(vm_report):
         x0, w, gap = 0.055, 0.275, 0.018
         for idx, (label, value) in enumerate(kpis):
             x = x0 + idx * (w + gap)
-            ax = fig.add_axes([x, 0.805, w, 0.075])
+            ax = fig.add_axes([x, 0.815, w, 0.065])
             ax.set_facecolor("#f4f6f8")
             for spine in ax.spines.values():
                 spine.set_visible(False)
@@ -879,16 +879,16 @@ def build_vm_pdf_report(vm_report):
         # Main data table
         vm_rows = [
             ("Инструмент", f"{vm_report['TRADE_NAME']} / {vm_report['SECID']}"),
-            ("Расчётная цена последнего клиринга", f"{vm_report['LAST_SETTLE_PRICE']}"),
+            ("Расчётная цена последнего клиринга", f"{float(vm_report['LAST_SETTLE_PRICE']):.2f}"),
             (
                 "Последняя цена",
                 f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}",
             ),
             ("Время котировки", vm_report.get("QUOTE_TIME") or "н/д"),
-            ("Multiplier", f"{vm_report['MULTIPLIER']}"),
-            ("USD/RUB", f"{vm_report['USD_RUB']}  ({vm_report['USD_RUB_DATE']})"),
+            ("Multiplier", f"{float(vm_report['MULTIPLIER']):.4f}"),
+            ("USD/RUB", f"{float(vm_report['USD_RUB']):.2f}  ({vm_report['USD_RUB_DATE']})"),
         ]
-        ax_data = fig.add_axes([0.055, 0.565, 0.46, 0.215])
+        ax_data = fig.add_axes([0.055, 0.595, 0.46, 0.195])
         ax_data.axis("off")
         table = ax_data.table(
             cellText=[[a, b] for a, b in vm_rows],
@@ -910,7 +910,7 @@ def build_vm_pdf_report(vm_report):
                 cell.set_facecolor("#ffffff" if row % 2 else "#f7f8fa")
 
         # VaR
-        ax_var = fig.add_axes([0.55, 0.565, 0.395, 0.215])
+        ax_var = fig.add_axes([0.55, 0.595, 0.395, 0.195])
         ax_var.axis("off")
         ax_var.text(
             0,
@@ -1029,7 +1029,7 @@ def build_vm_pdf_report(vm_report):
         # Gold charts: full page width, strictly stacked.
         # Top = actual 1-day intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
-            ax_month = fig.add_axes([0.055, 0.255, 0.89, 0.145])
+            ax_month = fig.add_axes([0.055, 0.245, 0.89, 0.16])
             ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
@@ -1048,7 +1048,7 @@ def build_vm_pdf_report(vm_report):
             ax_month.set_xlabel("")
 
         if not daily_close.empty:
-            ax_six = fig.add_axes([0.055, 0.055, 0.89, 0.145])
+            ax_six = fig.add_axes([0.055, 0.045, 0.89, 0.16])
             ax_six.plot(daily_close.index, daily_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_six, daily_close, intraday=False)
             _style_gold_axis(
