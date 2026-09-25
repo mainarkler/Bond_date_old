@@ -21,4 +21,4 @@ pymupdf
 pytesseract
 Pillow
 tiktoken
-llama-cpp-python
+
