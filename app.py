@@ -247,8 +247,13 @@ def fetch_gold_chart_data():
         ("GC=F", "1y", "1d"),
         ("XAUUSD=X", "1y", "1d"),
     ]
+    # Yahoo Finance does not reliably provide 1-minute data for a full month.
+    # Prefer 1-hour data for a true 1-month chart, then use shorter intraday
+    # ranges only as fallbacks.
     intraday_candidates = [
-        ("GC=F", "1d", "1m"),
+        ("GC=F", "1mo", "1h"),
+        ("XAUUSD=X", "1mo", "1h"),
+        ("GC=F", "5d", "1h"),
         ("XAUUSD=X", "5d", "5m"),
         ("GC=F", "5d", "5m"),
     ]
@@ -779,53 +784,72 @@ def build_vm_pdf_report(vm_report):
     )
 
     with PdfPages(pdf_buffer) as pdf:
+        # A4 landscape. Keep the native page size instead of bbox_inches="tight":
+        # this prevents the footer and chart labels from shifting outside the page.
         fig = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
         fig.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.035)
+
         fig.suptitle(
             "ОТЧЁТ VM",
             x=0.055,
-            y=0.965,
+            y=0.958,
             ha="left",
-            fontsize=22,
+            fontsize=21,
             fontweight="bold",
             color="#182230",
         )
         fig.text(
             0.055,
-            0.925,
+            0.905,
             f"{vm_report['TRADE_NAME']}  •  {vm_report['SECID']}  •  "
             f"Клиринг {vm_report['TRADEDATE']}  •  Количество {vm_report['QUANTITY']}",
-            fontsize=9.5,
+            fontsize=9.2,
             color="#5d6875",
         )
-        fig.text(0.945, 0.965, "VM / RISK", ha="right", fontsize=9, color="#5d6875")
+        fig.text(0.945, 0.958, "VM / RISK", ha="right", fontsize=9, color="#5d6875")
 
         # KPI strip
         kpis = [
-            ("ПОСЛЕДНЯЯ ЦЕНА", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
+            (
+                "ПОСЛЕДНЯЯ ЦЕНА",
+                f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}",
+            ),
             ("VM", f"{vm_report['VM']:.2f}"),
-            ("МАРЖА ПОЗИЦИИ", safe_format_int_with_sep(vm_report["POSITION_VM"])),        ]
+            ("МАРЖА ПОЗИЦИИ", safe_format_int_with_sep(vm_report["POSITION_VM"])),
+        ]
         x0, w, gap = 0.055, 0.275, 0.018
         for idx, (label, value) in enumerate(kpis):
             x = x0 + idx * (w + gap)
-            ax = fig.add_axes([x, 0.825, w, 0.075])
+            ax = fig.add_axes([x, 0.805, w, 0.075])
             ax.set_facecolor("#f4f6f8")
             for spine in ax.spines.values():
                 spine.set_visible(False)
             ax.set_xticks([])
             ax.set_yticks([])
             ax.text(0.04, 0.68, label, fontsize=7.5, color="#6b7480", transform=ax.transAxes)
-            ax.text(0.04, 0.22, value, fontsize=13, fontweight="bold", color="#182230", transform=ax.transAxes)
+            ax.text(
+                0.04,
+                0.22,
+                value,
+                fontsize=13,
+                fontweight="bold",
+                color="#182230",
+                transform=ax.transAxes,
+            )
 
         # Main data table
         vm_rows = [
             ("Инструмент", f"{vm_report['TRADE_NAME']} / {vm_report['SECID']}"),
             ("Расчётная цена последнего клиринга", f"{vm_report['LAST_SETTLE_PRICE']}"),
-            ("Последняя цена", f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}"),
+            (
+                "Последняя цена",
+                f"{vm_report.get('LAST_PRICE') if vm_report.get('LAST_PRICE') is not None else vm_report['TODAY_PRICE']:.4f}",
+            ),
             ("Время котировки", vm_report.get("QUOTE_TIME") or "н/д"),
-            ("Multiplier", f"{vm_report['MULTIPLIER']}"),            ("USD/RUB", f"{vm_report['USD_RUB']}  ({vm_report['USD_RUB_DATE']})"),
+            ("Multiplier", f"{vm_report['MULTIPLIER']}"),
+            ("USD/RUB", f"{vm_report['USD_RUB']}  ({vm_report['USD_RUB_DATE']})"),
         ]
-        ax_data = fig.add_axes([0.055, 0.565, 0.46, 0.22])
+        ax_data = fig.add_axes([0.055, 0.565, 0.46, 0.215])
         ax_data.axis("off")
         table = ax_data.table(
             cellText=[[a, b] for a, b in vm_rows],
@@ -847,20 +871,34 @@ def build_vm_pdf_report(vm_report):
                 cell.set_facecolor("#ffffff" if row % 2 else "#f7f8fa")
 
         # VaR
-        ax_var = fig.add_axes([0.55, 0.565, 0.395, 0.22])
+        ax_var = fig.add_axes([0.55, 0.565, 0.395, 0.215])
         ax_var.axis("off")
-        ax_var.text(0, 1.03, "РИСК / VaR", fontsize=12, fontweight="bold", color="#182230", transform=ax_var.transAxes)
+        ax_var.text(
+            0,
+            1.03,
+            "РИСК / VaR",
+            fontsize=12,
+            fontweight="bold",
+            color="#182230",
+            transform=ax_var.transAxes,
+        )
         var_results = vm_report.get("VAR_RESULTS", {})
         if var_results:
             ax_var.text(
-                0, 0.91,
+                0,
+                0.91,
                 f"Доверительный уровень {vm_report.get('VAR_CONFIDENCE_LEVEL', 0.95):.0%}  •  "
                 f"T {vm_report.get('VAR_T', 0):.4f}  •  Q {vm_report.get('VAR_Q', 0):.6f}",
-                fontsize=8, color="#5d6875", transform=ax_var.transAxes,
+                fontsize=8,
+                color="#5d6875",
+                transform=ax_var.transAxes,
             )
             var_df = build_var_table({"VAR_results": var_results})
             vt = ax_var.table(
-                cellText=[[int(row["Дни"]), f"{float(row['VaR, %']):.4f}%"] for _, row in var_df.iterrows()],
+                cellText=[
+                    [int(row["Дни"]), f"{float(row['VaR, %']):.4f}%"]
+                    for _, row in var_df.iterrows()
+                ],
                 colLabels=["Горизонт", "VaR"],
                 cellLoc="center",
                 colLoc="center",
@@ -875,63 +913,135 @@ def build_vm_pdf_report(vm_report):
                 if row == 0:
                     cell.set_text_props(color="white", weight="bold")
         else:
-            ax_var.text(0, 0.6, "VaR недоступен.", fontsize=9, color="#9b2c2c", transform=ax_var.transAxes)
+            ax_var.text(
+                0,
+                0.6,
+                "VaR недоступен.",
+                fontsize=9,
+                color="#9b2c2c",
+                transform=ax_var.transAxes,
+            )
 
-        # News block with clickable URLs.
-        ax_news = fig.add_axes([0.055, 0.36, 0.89, 0.15])
+        # News: date only | fixed source column | translated title | clickable original.
+        ax_news = fig.add_axes([0.055, 0.405, 0.89, 0.135])
         ax_news.axis("off")
-        ax_news.text(0, 1.03, "ВАЖНЫЕ НОВОСТИ XAUUSD", fontsize=12, fontweight="bold", color="#182230", transform=ax_news.transAxes)
+        ax_news.text(
+            0,
+            1.08,
+            "ВАЖНЫЕ НОВОСТИ XAUUSD",
+            fontsize=12,
+            fontweight="bold",
+            color="#182230",
+            transform=ax_news.transAxes,
+        )
         if news_items:
-            y = 0.86
+            y = 0.82
             for n in news_items:
                 title_ru = n.get("title_ru") or n.get("title") or "Без заголовка"
-                summary_ru = n.get("summary_ru") or ""
-                source = n.get("source") or "Источник"
+                source = str(n.get("source") or "Источник").strip()
+
                 published = n.get("published_at") or ""
-                display = f"{published}  |  {source}  |  {title_ru}"
-                ax_news.text(0, y, display[:170], fontsize=7.6, color="#182230", transform=ax_news.transAxes)
+                dt = pd.to_datetime(published, errors="coerce")
+                date_only = dt.strftime("%d.%m.%Y") if pd.notna(dt) else "н/д"
+
+                # Separate text columns are more stable than padding a proportional font.
+                source_fixed = source[:20]
+                title_max = 112
+                if len(title_ru) > title_max:
+                    title_ru = title_ru[: title_max - 1].rstrip() + "…"
+
+                ax_news.text(
+                    0.00,
+                    y,
+                    date_only,
+                    fontsize=7.1,
+                    color="#182230",
+                    transform=ax_news.transAxes,
+                    family="DejaVu Sans Mono",
+                )
+                ax_news.text(
+                    0.105,
+                    y,
+                    source_fixed,
+                    fontsize=7.1,
+                    color="#182230",
+                    transform=ax_news.transAxes,
+                    family="DejaVu Sans Mono",
+                )
+                ax_news.text(
+                    0.285,
+                    y,
+                    title_ru,
+                    fontsize=7.1,
+                    color="#182230",
+                    transform=ax_news.transAxes,
+                )
                 if n.get("url"):
                     ax_news.text(
-                        0.93, y, "Источник ↗", fontsize=7.2, color="#245a9b",
-                        ha="right", transform=ax_news.transAxes, url=n["url"],
+                        0.985,
+                        y,
+                        "Источник ↗",
+                        fontsize=7.0,
+                        color="#245a9b",
+                        ha="right",
+                        transform=ax_news.transAxes,
+                        url=n["url"],
                     )
-                if summary_ru and summary_ru != title_ru:
-                    ax_news.text(0.012, y - 0.045, summary_ru[:190], fontsize=6.8, color="#697481", transform=ax_news.transAxes)
-                    y -= 0.09
-                else:
-                    y -= 0.075
+                y -= 0.145
                 if y < 0.05:
                     break
         else:
-            ax_news.text(0, 0.75, "Значимых новостей за последние 24 часа не найдено.", fontsize=8, color="#697481", transform=ax_news.transAxes)
+            ax_news.text(
+                0,
+                0.65,
+                "Значимых новостей за последние 24 часа не найдено.",
+                fontsize=8,
+                color="#697481",
+                transform=ax_news.transAxes,
+            )
 
-        # Gold charts: clean, restrained, print-friendly.
-        if not daily_close.empty:
-            ax_daily = fig.add_axes([0.055, 0.18, 0.89, 0.20])
-            ax_daily.plot(daily_close.index, daily_close.values, linewidth=1.5)
-            _apply_gold_y_padding(ax_daily, daily_close, intraday=False)
-            _style_gold_axis(
-                ax_daily, "Золото — 1 месяц", "Дата", "Цена за грамм",
-                formatter=mdates.DateFormatter("%d.%m.%Y"),
-                y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
-            )
+        # Gold charts: full page width, strictly stacked.
+        # Top = actual 1-month intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
-            ax_intraday = fig.add_axes([0.055, 0.055, 0.89, 0.10])
-            ax_intraday.plot(intraday_close.index, intraday_close.values, linewidth=1.5)
-            _apply_gold_y_padding(ax_intraday, intraday_close, intraday=True)
+            ax_month = fig.add_axes([0.055, 0.225, 0.89, 0.145])
+            ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
+            _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
-                ax_intraday, "Золото — 6 месяцев", "Дата", "Цена за грамм",
-                formatter=mdates.DateFormatter("%H:%M"),
+                ax_month,
+                "Золото — 1 месяц",
+                "",
+                "Цена за грамм",
+                formatter=mdates.DateFormatter("%d.%m"),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
             )
+            # The lower chart carries the shared date axis.
+            ax_month.tick_params(axis="x", labelbottom=False)
+            ax_month.set_xlabel("")
+
+        if not daily_close.empty:
+            ax_six = fig.add_axes([0.055, 0.055, 0.89, 0.145])
+            ax_six.plot(daily_close.index, daily_close.values, linewidth=1.35)
+            _apply_gold_y_padding(ax_six, daily_close, intraday=False)
+            _style_gold_axis(
+                ax_six,
+                "Золото — 6 месяцев",
+                "Дата",
+                "Цена за грамм",
+                formatter=mdates.DateFormatter("%d.%m"),
+                y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f} тыс."),
+            )
+            ax_six.tick_params(axis="x", labelrotation=0)
 
         fig.text(
-            0.055, 0.012,
+            0.055,
+            0.018,
             "Источники: MOEX ISS • Yahoo Finance • TradingView/Google News. "
             "Новости переведены автоматически; ссылка ведёт на оригинал.",
-            fontsize=6.5, color="#7a838d",
+            fontsize=6.2,
+            color="#7a838d",
         )
-        pdf.savefig(fig, bbox_inches="tight")
+        # Preserve exact A4 page geometry.
+        pdf.savefig(fig)
         plt.close(fig)
 
     pdf_buffer.seek(0)
