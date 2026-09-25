@@ -34,7 +34,6 @@ from services.moex_turnover import MoexTurnoverClient
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 from services.keyword_news_block import build_keyword_news_block_sync
-from services.emission_document_analysis import analyse_emission_document
 
 # ---------------------------
 # Streamlit page setup
