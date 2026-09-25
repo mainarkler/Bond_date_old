@@ -3543,8 +3543,8 @@ if st.session_state["active_view"] == "vm":
             st.caption("Показываются только значимые события за последние 24 часа. Заголовки переведены на русский, оригинал доступен по ссылке.")
             for item in news_items:
                 st.markdown(
-                    f"**{item.get('published_at', '')} — {item.get('source', 'TradingView')}**  \\n"
-                    f"**{item.get('title_ru') or item.get('title', 'Без заголовка')}**  \\n"
+                    f"**{item.get('published_at', '')} — {item.get('source', 'TradingView')}**  \n"
+                    f"**{item.get('title_ru') or item.get('title', 'Без заголовка')}**  \n"
                     f"{item.get('summary_ru') or item.get('summary', '')}  \\n"
                     f"[Оригинал новости ↗]({item.get('url', '')})"
                 )
