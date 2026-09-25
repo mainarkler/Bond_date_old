@@ -803,7 +803,7 @@ def build_vm_pdf_report(vm_report):
     with PdfPages(pdf_buffer) as pdf:
         # A4 landscape. Keep the native page size instead of bbox_inches="tight":
         # this prevents the footer and chart labels from shifting outside the page.
-        fig = plt.figure(figsize=(17, 10), facecolor="#ffffff")
+        fig = plt.figure(figsize=(19, 9), facecolor="#ffffff")
         fig.subplots_adjust(left=0.04, right=0.96, top=0.96, bottom=0.035)
 
         fig.suptitle(
