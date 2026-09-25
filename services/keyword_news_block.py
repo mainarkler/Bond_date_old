@@ -90,7 +90,7 @@ class RussianFinanceNewsAgent:
         headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"}
 
         try:
-            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=True) as client:
                 response = await client.get(endpoint, params=params, headers=headers)
                 response.raise_for_status()
                 xml = response.text
