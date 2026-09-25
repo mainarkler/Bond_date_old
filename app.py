@@ -990,7 +990,8 @@ def build_vm_pdf_report(vm_report):
                     color="#245a9b",
                     transform=ax_news.transAxes,
                     url=n.get("url") or None,
-                )                y -= 0.145
+                )
+                y -= 0.145
                 if y < 0.05:
                     break
         else:
@@ -1000,7 +1001,8 @@ def build_vm_pdf_report(vm_report):
                 "Значимых новостей за последние 24 часа не найдено.",
                 fontsize=8,
                 color="#697481",
-                transform=ax_news.transAxes,            )
+                transform=ax_news.transAxes,
+            )
 
         # Gold charts: full page width, strictly stacked.
         # Top = actual 1-month intraday series; bottom = 6-month daily series.
