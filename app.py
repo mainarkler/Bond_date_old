@@ -7,6 +7,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -25,7 +26,7 @@ import index_analytics as ia
 from sell_stress_ui.data import ALL_STOCK_INDEX_CODES, fetch_index_membership_by_isin
 from sell_stress_ui.reporting import build_share_batch_html_report
 from email_compose import render_email_compose_section
-from news.fetcher import NewsFetcher
+from news.fetcher import NewsFetcher, fetch_tradingview_news
 from news.models import NewsQuery
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
