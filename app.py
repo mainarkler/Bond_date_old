@@ -859,20 +859,20 @@ def build_vm_pdf_report(vm_report):
         # KPI strip
         kpis = [
             ("Последняя цена", f"{vm_report['BID']:.2f}"),
-            ("VM - VM RUB", f"{vm_report['VM']:.2f}"),
+            ("VM per unit RUB", f"{vm_report['VM']:.2f}"),
             ("VM позиции в руб", safe_format_int_with_sep(vm_report["POSITION_VM"])),
             ("Изменение цены", f"{float(vm_report['LASTTOPREVPRICE']):.2f}%" if vm_report.get('LASTTOPREVPRICE') is not None else "н/д"),
         ]
-        x0, w, gap = 0.055, 0.205, 0.012
+        x0, w, gap = 0.055, 0.205, 0.008
         for idx, (label, value) in enumerate(kpis):
             x = x0 + idx * (w + gap)
-            ax = fig.add_axes([x, 0.82, w, 0.055])
+            ax = fig.add_axes([x, 0.825, w, 0.048])
             ax.set_facecolor("#f4f6f8")
             for spine in ax.spines.values():
                 spine.set_visible(False)
             ax.set_xticks([])
             ax.set_yticks([])
-            ax.text(0.04, 0.68, label, fontsize=6.8, color="#6b7480", transform=ax.transAxes)
+            ax.text(0.04, 0.68, label, fontsize=6.2, color="#6b7480", transform=ax.transAxes)
             ax.text(
                 0.04,
                 0.22,
@@ -898,7 +898,7 @@ def build_vm_pdf_report(vm_report):
             ("Осталось дней", str(days_to_exp) if days_to_exp is not None else "н/д"),
             ("USD/RUB", f"{float(vm_report['USD_RUB']):.2f}  ({vm_report['USD_RUB_DATE']})"),
         ]
-        ax_data = fig.add_axes([0.055, 0.565, 0.46, 0.225])
+        ax_data = fig.add_axes([0.055, 0.575, 0.46, 0.205])
         ax_data.axis("off")
         table = ax_data.table(
             cellText=[[a, b] for a, b in vm_rows],
@@ -919,8 +919,11 @@ def build_vm_pdf_report(vm_report):
             else:
                 cell.set_facecolor("#ffffff" if row % 2 else "#f7f8fa")
 
+        if last_to_prev is not None:
+            change_color = "#9b2c2c" if float(last_to_prev) <= -0.51 else ("#2e7d32" if float(last_to_prev) >= 0.51 else "#8a6d1d")
+            table[(7, 1)].get_text().set_color(change_color)
         # VaR
-        ax_var = fig.add_axes([0.55, 0.565, 0.395, 0.225])
+        ax_var = fig.add_axes([0.55, 0.575, 0.395, 0.205])
         ax_var.axis("off")
         ax_var.text(
             0,
@@ -972,7 +975,7 @@ def build_vm_pdf_report(vm_report):
             )
 
         # News: date only | fixed source column | translated title | clickable original.
-        ax_news = fig.add_axes([0.055, 0.425, 0.89, 0.135])
+        ax_news = fig.add_axes([0.055, 0.425, 0.89, 0.125])
         ax_news.axis("off")
         ax_news.text(
             0,
@@ -1027,15 +1030,17 @@ def build_vm_pdf_report(vm_report):
                     title_ru = title_ru[: title_max - 1].rstrip() + "…"
 
                 # Шрифт новостей увеличен примерно на 2 пт.
-                news_fontsize = 9.1
-                ax_news.add_patch(
-                    plt.Rectangle(
-                        (0.0, y - 0.045), 0.012, 0.075,
-                        transform=ax_news.transAxes,
-                        facecolor=sentiment_bg,
-                        edgecolor=sentiment_fg,
-                        linewidth=0.8,
-                    )
+                news_fontsize = 8.0
+                sentiment_symbol = "↓" if negative_score > positive_score else ("↑" if positive_score > negative_score else "~")
+                sentiment_fg = "#9b2c2c" if negative_score > positive_score else ("#2e7d32" if positive_score > negative_score else "#8a6d1d")
+                ax_news.text(
+                    0.0, y, sentiment_symbol,
+                    fontsize=9.5,
+                    fontweight="bold",
+                    color=sentiment_fg,
+                    transform=ax_news.transAxes,
+                    ha="left",
+                    va="center",
                 )
                 ax_news.text(
                     0.02, y, date_only,
@@ -1075,7 +1080,7 @@ def build_vm_pdf_report(vm_report):
         # Gold charts: full page width, strictly stacked.
         # Top = actual 1-day intraday series; bottom = 6-month daily series.
         if not intraday_close.empty:
-            ax_month = fig.add_axes([0.055, 0.245, 0.89, 0.155])
+            ax_month = fig.add_axes([0.055, 0.245, 0.89, 0.145])
             ax_month.plot(intraday_close.index, intraday_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_month, intraday_close, intraday=True)
             _style_gold_axis(
@@ -1105,7 +1110,7 @@ def build_vm_pdf_report(vm_report):
             ax_month.set_xlabel("Time")
 
         if not daily_close.empty:
-            ax_six = fig.add_axes([0.055, 0.04, 0.89, 0.15])
+            ax_six = fig.add_axes([0.055, 0.055, 0.89, 0.135])
             ax_six.plot(daily_close.index, daily_close.values, linewidth=1.35)
             _apply_gold_y_padding(ax_six, daily_close, intraday=False)
             _style_gold_axis(
