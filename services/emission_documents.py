@@ -231,6 +231,8 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
         ],
         "temperature": 0,
         "max_tokens": int(os.getenv("EMISSION_LLM_MAX_TOKENS", "3500")),
+        "reasoning": {"enabled": False},
+        "response_format": {"type": "json_object"},
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
