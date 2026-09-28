@@ -891,10 +891,8 @@ def build_vm_pdf_report(vm_report):
             ("Последняя цена", f"{float(vm_report['BID']):.2f}"),
             ("Цена закрытия", f"{float(vm_report['PREV_PRICE']):.2f}"),
             ("Время котировки", vm_report.get("QUOTE_TIME") or "н/д"),
-            ("Multiplier", f"{float(vm_report['MULTIPLIER']):.4f}"),
             ("Изменение открытых позиций", safe_format_int_with_sep(vm_report["OICHANGE"]) if vm_report.get("OICHANGE") is not None else "н/д"),
-            ("Изменение цены к предыдущему дню", f"{float(last_to_prev):.2f}%" if last_to_prev is not None else "н/д"),
-            ("Экспирация (LASTDELDATE)", vm_report.get("LASTDELDATE") or "н/д"),
+            ("Дата экспирации", vm_report.get("LASTDELDATE") or "н/д"),
             ("Осталось дней", str(days_to_exp) if days_to_exp is not None else "н/д"),
             ("USD/RUB", f"{float(vm_report['USD_RUB']):.2f}  ({vm_report['USD_RUB_DATE']})"),
         ]
