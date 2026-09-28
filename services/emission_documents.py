@@ -198,7 +198,7 @@ def _json_from_response(text: str) -> dict[str, Any]:
 
 
 def _llm_complete(system_prompt: str, user_prompt: str) -> str:
-    """Call a hosted OpenAI-compatible LLM; no local model is loaded in Streamlit."""
+    """Call Qwen3 through OpenRouter; no local model is loaded in Streamlit."""
     import requests
 
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -215,7 +215,7 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
 
     model = os.getenv(
         "EMISSION_LLM_MODEL",
-        "mistralai/mistral-small-3.1-24b-instruct:free",
+        "qwen/qwen3-4b:free",
     )
     base_url = os.getenv(
         "OPENROUTER_BASE_URL",
@@ -230,15 +230,12 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0,
-        "max_tokens": LOCAL_MAX_NEW_TOKENS,
+        "max_tokens": int(os.getenv("EMISSION_LLM_MAX_TOKENS", "3500")),
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": os.getenv(
-            "OPENROUTER_SITE_URL",
-            "https://github.com/mainarkler/Bond_date_old",
-        ),
+        "HTTP-Referer": "https://github.com/mainarkler/Bond_date_old",
         "X-Title": "Bond Date — Анализ эмиссионных документов",
     }
 
@@ -250,25 +247,27 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"Ошибка соединения с LLM API: {exc}") from exc
+        raise RuntimeError(f"Ошибка соединения с Qwen3 API: {exc}") from exc
 
     if response.status_code >= 400:
         try:
-            detail = response.json().get("error", {}).get("message", response.text)
+            error = response.json().get("error", {})
+            detail = error.get("message") or response.text
         except ValueError:
             detail = response.text
         raise RuntimeError(
-            f"LLM API вернул HTTP {response.status_code}: {detail}"
+            f"Qwen3 API вернул HTTP {response.status_code}: {detail}"
         )
 
     try:
         result = response.json()
-        response_content = result["choices"][0]["message"]["content"]
+        message = result["choices"][0]["message"]
+        response_content = message.get("content", "")
     except (ValueError, KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("LLM API вернул неожиданный формат ответа.") from exc
+        raise RuntimeError("Qwen3 API вернул неожиданный формат ответа.") from exc
 
     if not isinstance(response_content, str) or not response_content.strip():
-        raise RuntimeError("LLM API вернул пустой ответ.")
+        raise RuntimeError("Qwen3 API вернул пустой ответ.")
 
     return response_content.strip()
 
