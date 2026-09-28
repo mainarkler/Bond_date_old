@@ -881,12 +881,12 @@ def build_vm_pdf_report(vm_report):
         days_to_exp = vm_report.get("DAYS_TO_EXPIRATION")
         vm_rows = [
             ("Инструмент", f"{vm_report['TRADE_NAME']} / {vm_report['SECID']}"),
-            ("P_today_settle (BID)", f"{float(vm_report['BID']):.2f}"),
-            ("P_prev_settle (PREVPRICE)", f"{float(vm_report['PREV_PRICE']):.2f}"),
+            ("Последняя цена", f"{float(vm_report['BID']):.2f}"),
+            ("Цена закрытия", f"{float(vm_report['PREV_PRICE']):.2f}"),
             ("Время котировки", vm_report.get("QUOTE_TIME") or "н/д"),
             ("Multiplier", f"{float(vm_report['MULTIPLIER']):.4f}"),
             ("Изменение открытых позиций", safe_format_int_with_sep(vm_report["OICHANGE"]) if vm_report.get("OICHANGE") is not None else "н/д"),
-            ("Изменение цены к PREVPRICE", f"{float(last_to_prev):.4f}%" if last_to_prev is not None else "н/д"),
+            ("Изменение цены к предыдущему дню", f"{float(last_to_prev):.2f}%" if last_to_prev is not None else "н/д"),
             ("Экспирация (LASTDELDATE)", vm_report.get("LASTDELDATE") or "н/д"),
             ("Осталось дней", str(days_to_exp) if days_to_exp is not None else "н/д"),
             ("USD/RUB", f"{float(vm_report['USD_RUB']):.2f}  ({vm_report['USD_RUB_DATE']})"),
@@ -3642,15 +3642,15 @@ if st.session_state["active_view"] == "vm":
         st.markdown(f"**Инструмент:** {vm_report['TRADE_NAME']}")
         st.markdown(f"**SECID:** {vm_report['SECID']}")
         st.markdown(f"**Дата расчёта:** {vm_report['TRADEDATE']}")
-        st.markdown(f"**Цена BID:** {vm_report['BID']:.2f}")
-        st.markdown(f"**PREVPRICE:** {vm_report['PREV_PRICE']:.2f}")
+        st.markdown(f"**Последняя цена:** {vm_report['BID']:.2f}")
+        st.markdown(f"**Цена закрытия:** {vm_report['PREV_PRICE']:.2f}")
         st.markdown(f"**Время котировки:** {vm_report.get('QUOTE_TIME') or 'н/д'}")
         st.markdown(f"**Multiplier:** {vm_report['MULTIPLIER']:.4f}")
-        st.markdown(f"**Вариационная маржа (BID − PREVPRICE):** {vm_report['VM']:.2f}")
+        st.markdown(f"**Вариационная маржа:** {vm_report['VM']:.2f}")
         oi_change = vm_report.get('OICHANGE')
         st.markdown(f"**Изменение открытых позиций:** {safe_format_int_with_sep(oi_change) if oi_change is not None else 'н/д'}")
         last_to_prev = vm_report.get('LASTTOPREVPRICE')
-        st.markdown(f"**Изменение цены контракта к предыдущему дню:** {last_to_prev:.4f}% " if last_to_prev is not None else "**Изменение цены контракта к предыдущему дню:** н/д")
+        st.markdown(f"**Изменение цены контракта к предыдущему дню:** {last_to_prev:.2f}% " if last_to_prev is not None else "**Изменение цены контракта к предыдущему дню:** н/д")
         expiration = vm_report.get('LASTDELDATE') or 'н/д'
         days_left = vm_report.get('DAYS_TO_EXPIRATION')
         days_text = f"{days_left} дн." if days_left is not None else "н/д"
@@ -3748,10 +3748,10 @@ if st.session_state["active_view"] == "vm":
             f"BID: {vm_report['BID']:.2f}\n"
             f"PREVPRICE: {vm_report['PREV_PRICE']:.2f}\n"
             f"Изменение OI: {vm_report.get('OICHANGE') if vm_report.get('OICHANGE') is not None else 'н/д'}\n"
-            f"Изменение цены к PREVPRICE: {vm_report.get('LASTTOPREVPRICE') if vm_report.get('LASTTOPREVPRICE') is not None else 'н/д'}%\n"
+            f"Изменение цены к PREVPRICE: {vm_report.get('LASTTOPREVPRICE'):.2f}%\n" if vm_report.get('LASTTOPREVPRICE') is not None else "Изменение цены к PREVPRICE: н/д\n"
             f"Экспирация: {vm_report.get('LASTDELDATE') or 'н/д'}; осталось дней: {vm_report.get('DAYS_TO_EXPIRATION') if vm_report.get('DAYS_TO_EXPIRATION') is not None else 'н/д'}\n"
             f"Маржа позиции: {safe_format_int_with_sep(vm_report['POSITION_VM'])}\n"
-            f"Сумма ограничения: {safe_format_int_with_sep(vm_report['LIMIT_SUM'])}\n"
+            
             f"USD/RUB: {vm_report['USD_RUB']} на {vm_report['USD_RUB_DATE']}\n\n"
             "Value at Risk (VaR):\n"
             f"{var_table_text}\n\n"
