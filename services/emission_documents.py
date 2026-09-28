@@ -203,6 +203,12 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
 
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
+        try:
+            import streamlit as st
+            api_key = str(st.secrets.get("OPENROUTER_API_KEY", "")).strip()
+        except Exception:
+            api_key = ""
+    if not api_key:
         raise RuntimeError(
             "Не задан OPENROUTER_API_KEY. Добавьте ключ OpenRouter в Streamlit Secrets."
         )
