@@ -19,10 +19,16 @@ function Load-Config {
     $recipients = @($cfg.recipients | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
     if ($recipients.Count -eq 0) { Fail "В конфигурации нет recipients." }
     $timeout = if ($null -ne $cfg.timeout_seconds) { [int]$cfg.timeout_seconds } else { 180 }
+    $baseUrl = if ($cfg.base_url) { [string]$cfg.base_url } else { "https://bonddate.streamlit.app/?action=vm_pdf" }
+    $tradeName = if ($cfg.trade_name) { [string]$cfg.trade_name } else { "gold-12.26" }
+    $quantity = if ($null -ne $cfg.quantity) { [int]$cfg.quantity } else { 3000 }
+    if ($quantity -le 0) { Fail "quantity должен быть больше 0." }
+    $separator = if ($baseUrl.Contains("?")) { "&" } else { "?" }
+    $url = "$baseUrl${separator}trade_name=$([uri]::EscapeDataString($tradeName))&quantity=$quantity"
     return @{
-        url = if ($cfg.url) { [string]$cfg.url } else { "https://bonddate.streamlit.app/?action=vm_pdf" }
+        url = $url
         recipients = $recipients
-        subject = if ($cfg.subject) { [string]$cfg.subject } else { "VM отчет $(Get-Date -Format 'dd.MM.yyyy')" }
+        subject = if ($cfg.subject) { [string]$cfg.subject } else { $tradeName }
         send = [bool]$cfg.send
         timeout_seconds = $timeout
     }
