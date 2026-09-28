@@ -26,3 +26,4 @@ reportlab
 
 transformers>=4.51.0
 torch
+bitsandbytes>=0.45.0
