@@ -2995,7 +2995,8 @@ def _portfolio_security_payloads(secid: str, market: str, board: str = "") -> li
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_portfolio_market_snapshot(isin: str) -> dict:    profile = resolve_portfolio_instrument(isin)
+def fetch_portfolio_market_snapshot(isin: str) -> dict:
+    profile = resolve_portfolio_instrument(isin)
     secid = profile.get("SECID")
     market = profile.get("Рынок")
     board = profile.get("Основной режим", "")
@@ -3494,7 +3495,8 @@ if st.session_state["active_view"] == "calendar":
             amount = parse_number(parts[1]) if len(parts) > 1 else 1.0
             if amount is None or amount <= 0:
                 amount = 1.0
-            if not isin_format_valid(isin) or not isin_checksum_valid(isin):                invalid_isins.append(isin)
+            if not isin_format_valid(isin) or not isin_checksum_valid(isin):
+                invalid_isins.append(isin)
                 continue
             entries.append({"ISIN": isin, "Amount": amount})
 
