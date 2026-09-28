@@ -997,7 +997,8 @@ def build_vm_pdf_report(vm_report):
                 title_ru = n.get("title_ru") or n.get("title") or "Без заголовка"
                 source = str(n.get("source") or "Источник").strip()
 
-                published = n.get("published_at") or ""                dt = pd.to_datetime(published, errors="coerce")
+                published = n.get("published_at") or ""
+                dt = pd.to_datetime(published, errors="coerce")
                 date_only = dt.strftime("%d.%m.%Y") if pd.notna(dt) else "н/д"
 
                 # Separate text columns are more stable than padding a proportional font.
