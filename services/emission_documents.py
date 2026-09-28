@@ -229,7 +229,7 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
     import torch
     tokenizer, model = _get_local_model()
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False, tokenize=True, return_dict=True, return_tensors="pt")
     device = next(model.parameters()).device
     inputs = {key: value.to(device) for key, value in inputs.items()}
     with torch.inference_mode():
