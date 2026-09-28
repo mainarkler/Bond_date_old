@@ -2495,7 +2495,8 @@ def get_bond_schedule(isin: str):
         except Exception:
             pass
 
-    if not maturity_date:        try:
+    if not maturity_date:
+        try:
             url_info_isin = f"https://iss.moex.com/iss/securities/{isin}.json"
             r = request_get(url_info_isin, timeout=10)
             data_info_isin = r.json()
@@ -4128,7 +4129,8 @@ if st.session_state["active_view"] == "sell_stres":
                             continue
                         entries.append({"ISIN": resolved_isin, "Q_MAX": float(q_val)})
                 else:
-                    raw_text = isin_input.strip()                    if raw_text:
+                    raw_text = isin_input.strip()
+                    if raw_text:
                         identifiers = re.split(r"[\s,;]+", raw_text)
                         identifiers = [i.strip().upper() for i in identifiers if i.strip()]
                         for identifier in identifiers:
