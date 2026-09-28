@@ -62,6 +62,8 @@ if "calendar_last_report" not in st.session_state:
 if "portfolio_last_report" not in st.session_state:
     st.session_state["portfolio_last_report"] = None
 
+API_ACTION = st.query_params.get("action", "").strip().lower()
+
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {
     "repo",
@@ -121,7 +123,7 @@ if st.session_state["active_view"] != "home" and not FORCED_ACTIVE_VIEW:
         st.session_state["active_view"] = "home"
         trigger_rerun()
 
-if st.session_state["active_view"] == "home":
+if st.session_state["active_view"] == "home" and API_ACTION != "vm_pdf":
     st.subheader("")
     top_left, top_right = st.columns(2)
     with top_left:
@@ -3601,6 +3603,123 @@ if st.session_state["active_view"] == "calendar":
     st.stop()
 
 # ---------------------------
+# VM PDF automation endpoint
+# ---------------------------
+def build_vm_report_for_pdf(trade_name: str, quantity: int) -> dict:
+    trade_name = str(trade_name or "").strip()
+    quantity = int(quantity)
+    if not trade_name:
+        raise ValueError("Не задан TRADE_NAME")
+    if quantity < 0:
+        raise ValueError("Количество не может быть отрицательным")
+
+    forts_contracts = fetch_forts_securities()
+    vm_data = fetch_vm_data(trade_name, forts_contracts)
+    position_vm = vm_data["VM"] * quantity
+    usd_rub_data = get_usd_rub_cb_today()
+    price_date = datetime.utcnow().strftime("%Y-%m-%d")
+    price_for_limit = vm_data["BID"]
+    limit_sum = (0.05 * price_for_limit * quantity * float(usd_rub_data["usd_rub"])) + max(0, position_vm)
+
+    vm_report = {
+        "TRADE_NAME": vm_data["TRADE_NAME"],
+        "SECID": vm_data["SECID"],
+        "TRADEDATE": vm_data["TRADEDATE"],
+        "PREV_PRICE": vm_data["PREV_PRICE"],
+        "TODAY_PRICE": vm_data["TODAY_PRICE"],
+        "LAST_PRICE": vm_data.get("LAST_PRICE"),
+        "BID": vm_data["BID"],
+        "OICHANGE": vm_data.get("OICHANGE"),
+        "LASTTOPREVPRICE": vm_data.get("LASTTOPREVPRICE"),
+        "LASTDELDATE": vm_data.get("LASTDELDATE"),
+        "DAYS_TO_EXPIRATION": vm_data.get("DAYS_TO_EXPIRATION"),
+        "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
+        "PRICE_DATE": price_date,
+        "MULTIPLIER": vm_data["MULTIPLIER"],
+        "VM": vm_data["VM"],
+        "QUANTITY": quantity,
+        "POSITION_VM": position_vm,
+        "USD_RUB": usd_rub_data["usd_rub"],
+        "USD_RUB_DATE": usd_rub_data["date"],
+        "LIMIT_SUM": limit_sum,
+        "VM_SOURCE": "ISS MOEX",
+        "VAR_SOURCE": "Yahoo Finance",
+        "result_D": [],
+        "VAR_CONFIDENCE_LEVEL": 0.95,
+        "VAR_T": None,
+        "VAR_Q": None,
+        "VAR_K_VALUES": [],
+        "VAR_RESULTS": {},
+    }
+
+    try:
+        var_payload = get_gold_var_payload()
+        vm_report.update({
+            "result_D": var_payload["result_D"],
+            "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
+            "VAR_T": var_payload["T"],
+            "VAR_Q": var_payload["Q"],
+            "VAR_K_VALUES": var_payload["K_values"],
+            "VAR_RESULTS": var_payload["VAR_results"],
+        })
+    except Exception as exc:
+        vm_report["VAR_ERROR"] = str(exc)
+
+    try:
+        vm_report["XAUUSD_NEWS"] = fetch_xauusd_tradingview_news()
+    except Exception as exc:
+        vm_report["XAUUSD_NEWS"] = []
+        vm_report["XAUUSD_NEWS_ERROR"] = str(exc)
+
+    return vm_report
+
+
+if API_ACTION == "vm_pdf":
+    default_trade_name = "gold-12.26"
+    default_quantity = 3000
+    try:
+        default_trade_name = str(st.secrets.get("vm_api_trade_name", default_trade_name))
+        default_quantity = int(st.secrets.get("vm_api_quantity", default_quantity))
+    except Exception:
+        pass
+
+    api_trade_name = st.query_params.get("trade_name", default_trade_name)
+    api_quantity_raw = st.query_params.get("quantity", str(default_quantity))
+    api_token = st.query_params.get("token", "")
+    configured_token = ""
+    try:
+        configured_token = str(st.secrets.get("vm_api_token", "")).strip()
+    except Exception:
+        pass
+
+    if configured_token and api_token != configured_token:
+        st.error("Недействительный API token.")
+        st.stop()
+
+    try:
+        api_quantity = int(api_quantity_raw)
+        api_report = build_vm_report_for_pdf(api_trade_name, api_quantity)
+        api_pdf = build_vm_pdf_report(api_report)
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(api_report["SECID"]))
+        api_filename = f"VM_{safe_name}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+
+        st.title("VM PDF API")
+        st.caption(
+            f"{api_report['TRADE_NAME']} / {api_report['SECID']} • "
+            f"Количество {api_report['QUANTITY']} • {api_report['TRADEDATE']}"
+        )
+        st.download_button(
+            "Скачать VM PDF",
+            data=api_pdf,
+            file_name=api_filename,
+            mime="application/pdf",
+            key="vm_api_pdf_download",
+        )
+    except Exception as exc:
+        st.error(f"Не удалось сформировать VM PDF: {exc}")
+    st.stop()
+
+# ---------------------------
 # VM view
 # ---------------------------
 if st.session_state["active_view"] == "vm":
@@ -3626,62 +3745,7 @@ if st.session_state["active_view"] == "vm":
             st.error("Введите TRADE_NAME.")
         else:
             try:
-                vm_data = fetch_vm_data(trade_name.strip(), st.session_state.get("forts_contracts"))
-                position_vm = vm_data["VM"] * quantity
-                usd_rub_data = get_usd_rub_cb_today()
-                usd_rub = float(usd_rub_data["usd_rub"])
-                price_date = datetime.utcnow().strftime("%Y-%m-%d")
-                price_for_limit = vm_data["BID"]
-                limit_sum = (0.05 * price_for_limit * quantity * usd_rub) + (max(0, position_vm))
-                vm_report = {
-                    "TRADE_NAME": vm_data["TRADE_NAME"],
-                    "SECID": vm_data["SECID"],
-                    "TRADEDATE": vm_data["TRADEDATE"],
-                    "PREV_PRICE": vm_data["PREV_PRICE"],
-                    "TODAY_PRICE": vm_data["TODAY_PRICE"],
-                    "LAST_PRICE": vm_data.get("LAST_PRICE"),
-                    "BID": vm_data["BID"],
-                    "OICHANGE": vm_data.get("OICHANGE"),
-                    "LASTTOPREVPRICE": vm_data.get("LASTTOPREVPRICE"),
-                    "LASTDELDATE": vm_data.get("LASTDELDATE"),
-                    "DAYS_TO_EXPIRATION": vm_data.get("DAYS_TO_EXPIRATION"),
-                    "QUOTE_TIME": vm_data.get("QUOTE_TIME"),
-                    "PRICE_DATE": price_date,
-                    "MULTIPLIER": vm_data["MULTIPLIER"],
-                    "VM": vm_data["VM"],
-                    "QUANTITY": quantity,
-                    "POSITION_VM": position_vm,
-                    "USD_RUB": usd_rub_data["usd_rub"],
-                    "USD_RUB_DATE": usd_rub_data["date"],
-                    "LIMIT_SUM": limit_sum,
-                    "VM_SOURCE": "ISS MOEX",
-                    "VAR_SOURCE": "Yahoo Finance",
-                    "result_D": [],
-                    "VAR_CONFIDENCE_LEVEL": 0.95,
-                    "VAR_T": None,
-                    "VAR_Q": None,
-                    "VAR_K_VALUES": [],
-                    "VAR_RESULTS": {},
-                }
-                try:
-                    var_payload = get_gold_var_payload()
-                    vm_report.update(
-                        {
-                            "result_D": var_payload["result_D"],
-                            "VAR_CONFIDENCE_LEVEL": var_payload["confidence_level"],
-                            "VAR_T": var_payload["T"],
-                            "VAR_Q": var_payload["Q"],
-                            "VAR_K_VALUES": var_payload["K_values"],
-                            "VAR_RESULTS": var_payload["VAR_results"],
-                        }
-                    )
-                except Exception as exc:
-                    vm_report["VAR_ERROR"] = str(exc)
-                try:
-                    vm_report["XAUUSD_NEWS"] = fetch_xauusd_tradingview_news()
-                except Exception as exc:
-                    vm_report["XAUUSD_NEWS"] = []
-                    vm_report["XAUUSD_NEWS_ERROR"] = str(exc)
+                vm_report = build_vm_report_for_pdf(trade_name.strip(), int(quantity))
                 st.session_state["vm_last_report"] = vm_report
             except Exception as exc:
                 st.error(str(exc))
