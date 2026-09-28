@@ -873,13 +873,21 @@ def build_vm_pdf_report(vm_report):
             ax.set_xticks([])
             ax.set_yticks([])
             ax.text(0.04, 0.68, label, fontsize=6.2, color="#6b7480", transform=ax.transAxes)
+            value_color = "#182230"
+            if label == "Изменение цены" and vm_report.get("LASTTOPREVPRICE") is not None:
+                change_value = float(vm_report["LASTTOPREVPRICE"])
+                value_color = (
+                    "#9b2c2c" if change_value <= -0.51
+                    else "#2e7d32" if change_value >= 0.51
+                    else "#8a6d1d"
+                )
             ax.text(
                 0.04,
                 0.22,
                 value,
                 fontsize=11,
                 fontweight="bold",
-                color="#182230",
+                color=value_color,
                 transform=ax.transAxes,
             )
 
@@ -917,9 +925,6 @@ def build_vm_pdf_report(vm_report):
             else:
                 cell.set_facecolor("#ffffff" if row % 2 else "#f7f8fa")
 
-        if last_to_prev is not None:
-            change_color = "#9b2c2c" if float(last_to_prev) <= -0.51 else ("#2e7d32" if float(last_to_prev) >= 0.51 else "#8a6d1d")
-            table[(7, 1)].get_text().set_color(change_color)
         # VaR
         ax_var = fig.add_axes([0.55, 0.575, 0.395, 0.205])
         ax_var.axis("off")
