@@ -34,6 +34,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 from services.moex_turnover import MoexTurnoverClient
+from services.emission_documents import analyze_and_report
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 from services.keyword_news_block import build_keyword_news_block_sync
@@ -497,7 +498,6 @@ def _rank_and_summarize_xauusd_news(items, limit=8):
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_xauusd_tradingview_news():
     """Load XAUUSD news with TradingView as primary source and Google RSS as fallback."""
-
     def _run(coro):
         try:
             return asyncio.run(coro)
@@ -997,8 +997,7 @@ def build_vm_pdf_report(vm_report):
                 title_ru = n.get("title_ru") or n.get("title") or "Без заголовка"
                 source = str(n.get("source") or "Источник").strip()
 
-                published = n.get("published_at") or ""
-                dt = pd.to_datetime(published, errors="coerce")
+                published = n.get("published_at") or ""                dt = pd.to_datetime(published, errors="coerce")
                 date_only = dt.strftime("%d.%m.%Y") if pd.notna(dt) else "н/д"
 
                 # Separate text columns are more stable than padding a proportional font.
@@ -1498,7 +1497,6 @@ def load_turnover_components_via_iss(
     if boards_df.empty:
         empty_daily = pd.DataFrame(columns=["SECID", "TRADEDATE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"])
         return empty_daily, {"TOTAL_regular": 0.0, "TOTAL_SPEQ": 0.0, "TOTAL_NDM": 0.0, "TOTAL_all": 0.0}
-
     boards_df = boards_df[boards_df["is_traded"] == 1].copy()
     regular_boards = boards_df[
         (boards_df["market"].astype(str) == market_kind)
@@ -1997,8 +1995,7 @@ def fetch_vm_data(trade_name: str, forts_rows=None):
     spec_params = {
         "iss.meta": "off",
         "iss.only": "securities,marketdata",
-        "securities.columns": "PREVPRICE,MINSTEP,STEPPRICE,LASTDELDATE",
-        "marketdata.columns": "BID,UPDATETIME,OICHANGE,LASTTOPREVPRICE",
+        "securities.columns": "PREVPRICE,MINSTEP,STEPPRICE,LASTDELDATE",        "marketdata.columns": "BID,UPDATETIME,OICHANGE,LASTTOPREVPRICE",
     }
     spec = request_get(spec_url, timeout=2000, params=spec_params).json()
 
@@ -2497,8 +2494,7 @@ def get_bond_schedule(isin: str):
         except Exception:
             pass
 
-    if not maturity_date:
-        try:
+    if not maturity_date:        try:
             url_info_isin = f"https://iss.moex.com/iss/securities/{isin}.json"
             r = request_get(url_info_isin, timeout=10)
             data_info_isin = r.json()
@@ -2997,8 +2993,7 @@ def _portfolio_security_payloads(secid: str, market: str, board: str = "") -> li
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_portfolio_market_snapshot(isin: str) -> dict:
-    profile = resolve_portfolio_instrument(isin)
+def fetch_portfolio_market_snapshot(isin: str) -> dict:    profile = resolve_portfolio_instrument(isin)
     secid = profile.get("SECID")
     market = profile.get("Рынок")
     board = profile.get("Основной режим", "")
@@ -3497,8 +3492,7 @@ if st.session_state["active_view"] == "calendar":
             amount = parse_number(parts[1]) if len(parts) > 1 else 1.0
             if amount is None or amount <= 0:
                 amount = 1.0
-            if not isin_format_valid(isin) or not isin_checksum_valid(isin):
-                invalid_isins.append(isin)
+            if not isin_format_valid(isin) or not isin_checksum_valid(isin):                invalid_isins.append(isin)
                 continue
             entries.append({"ISIN": isin, "Amount": amount})
 
@@ -3717,6 +3711,142 @@ if API_ACTION == "vm_pdf":
         )
     except Exception as exc:
         st.error(f"Не удалось сформировать VM PDF: {exc}")
+    st.stop()
+
+
+# ---------------------------
+# Emission document analysis view
+# ---------------------------
+if st.session_state["active_view"] == "emission_documents":
+    st.subheader("📄 Анализ эмиссионного документа")
+    st.caption(
+        "Анализируется один PDF или DOCX. Рыночные данные и MOEX не используются. "
+        "Для сканированных PDF автоматически применяется OCR."
+    )
+
+    uploaded = st.file_uploader(
+        "Загрузите эмиссионный документ",
+        type=["pdf", "docx"],
+        accept_multiple_files=False,
+        key="emission_document_uploader",
+    )
+
+    if uploaded is not None:
+        file_bytes = uploaded.getvalue()
+        file_signature = f"{uploaded.name}:{len(file_bytes)}"
+        if st.session_state.get("emission_document_signature") != file_signature:
+            st.session_state["emission_document_signature"] = file_signature
+            st.session_state["emission_document_result"] = None
+            st.session_state["emission_document_pdf"] = None
+
+        if st.button("🔎 Анализировать документ", type="primary", key="emission_document_analyze"):
+            status = st.empty()
+            progress_bar = st.progress(0)
+
+            def update_progress(message):
+                status.info(message)
+
+            try:
+                update_progress("Извлечение текста и проверка документа…")
+                progress_bar.progress(10)
+
+                document, result, report_pdf = analyze_and_report(
+                    file_bytes,
+                    uploaded.name,
+                    progress=update_progress,
+                )
+                progress_bar.progress(100)
+                status.success(
+                    f"Готово: {len(document.pages)} страниц/блоков. "
+                    f"Метод извлечения: "
+                    f"{'OCR' if any(p.method == 'OCR' for p in document.pages) else 'текстовый слой'}."
+                )
+                st.session_state["emission_document_result"] = result
+                st.session_state["emission_document_pdf"] = report_pdf
+                st.session_state["emission_document_data"] = document
+            except Exception as exc:
+                progress_bar.empty()
+                status.empty()
+                st.error(f"Не удалось проанализировать документ: {exc}")
+
+    result = st.session_state.get("emission_document_result")
+    report_pdf = st.session_state.get("emission_document_pdf")
+    document = st.session_state.get("emission_document_data")
+
+    if result:
+        facts = result.get("facts", {})
+        analysis = result.get("analysis", {})
+
+        st.markdown("#### Краткое описание")
+        st.write(analysis.get("summary") or "Не сформировано.")
+
+        st.markdown("#### Основные параметры")
+        parameter_rows = [
+            ("Эмитент", facts.get("issuer")),
+            ("Вид бумаги", facts.get("security_type")),
+            ("Объём выпуска", facts.get("issue_volume")),
+            ("Номинал", facts.get("nominal")),
+            ("Валюта", facts.get("currency")),
+            ("Погашение", facts.get("maturity")),
+            ("Размещение", facts.get("placement_period")),
+            ("Купон", facts.get("coupon")),
+            ("Амортизация", facts.get("amortization")),
+            ("Оферты", facts.get("offers")),
+            ("Досрочное погашение", facts.get("early_redemption")),
+        ]
+        st.dataframe(
+            pd.DataFrame(parameter_rows, columns=["Показатель", "Условие"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        for title, key in [
+            ("Ключевые особенности", "key_features"),
+            ("На что обратить внимание", "attention_points"),
+            ("Риски", "risks"),
+            ("Потенциально неблагоприятные условия для держателя", "holder_unfavorable_terms"),
+            ("Механизмы защиты / потенциально благоприятные условия", "holder_favorable_mechanisms"),
+        ]:
+            st.markdown(f"#### {title}")
+            value = analysis.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    st.markdown(f"- {item}")
+            else:
+                st.write(value or "Не указано.")
+
+        st.markdown("#### Полные существенные условия")
+        detailed = analysis.get("detailed_conditions") or {}
+        for key, title in [
+            ("early_redemption", "Досрочное погашение"),
+            ("offers", "Оферты"),
+            ("default_events", "События дефолта"),
+            ("covenants", "Ковенанты"),
+            ("amortization", "Амортизация"),
+        ]:
+            st.markdown(f"**{title}**")
+            st.write(detailed.get(key) or facts.get(key) or "не указано в документе")
+
+        st.markdown("#### Аналитическое заключение")
+        st.write(analysis.get("analytical_conclusion") or "Не сформировано.")
+
+        if document:
+            ocr_pages = [p for p in document.pages if p.method == "OCR"]
+            if ocr_pages:
+                avg_conf = [p.confidence for p in ocr_pages if p.confidence is not None]
+                confidence_text = f", средняя уверенность OCR: {sum(avg_conf)/len(avg_conf):.1f}%" if avg_conf else ""
+                st.caption(f"OCR применён к страницам: {', '.join(str(p.page) for p in ocr_pages)}{confidence_text}.")
+
+        if report_pdf:
+            base_name = re.sub(r"[^A-Za-zА-Яа-я0-9._-]+", "_", Path(uploaded.name).stem if uploaded else "emission_document")
+            st.download_button(
+                "💾 Скачать подробный PDF-отчёт",
+                data=report_pdf,
+                file_name=f"Анализ_эмиссионного_документа_{base_name}.pdf",
+                mime="application/pdf",
+                key="emission_document_pdf_download",
+            )
+
     st.stop()
 
 # ---------------------------
@@ -3997,8 +4127,7 @@ if st.session_state["active_view"] == "sell_stres":
                             continue
                         entries.append({"ISIN": resolved_isin, "Q_MAX": float(q_val)})
                 else:
-                    raw_text = isin_input.strip()
-                    if raw_text:
+                    raw_text = isin_input.strip()                    if raw_text:
                         identifiers = re.split(r"[\s,;]+", raw_text)
                         identifiers = [i.strip().upper() for i in identifiers if i.strip()]
                         for identifier in identifiers:
