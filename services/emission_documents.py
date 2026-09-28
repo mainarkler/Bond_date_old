@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
 import fitz
 import pytesseract
 from PIL import Image
@@ -36,9 +35,8 @@ from reportlab.platypus import (
 logger = logging.getLogger(__name__)
 
 OCR_LANG = os.getenv("EMISSION_OCR_LANG", "rus+eng")
-LLM_MODEL = os.getenv("OPENAI_DOCUMENT_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-LLM_TIMEOUT = float(os.getenv("OPENAI_DOCUMENT_TIMEOUT_SECONDS", "180"))
+LOCAL_MODEL_ID = os.getenv("EMISSION_LOCAL_MODEL", "Qwen/Qwen3-4B")
+LOCAL_MAX_NEW_TOKENS = int(os.getenv("EMISSION_LOCAL_MAX_NEW_TOKENS", "3000"))
 MAX_CHUNK_CHARS = int(os.getenv("EMISSION_ANALYSIS_CHUNK_CHARS", "14000"))
 
 
@@ -199,28 +197,45 @@ def _json_from_response(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def _llm_complete(system_prompt: str, user_prompt: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("Не задан OPENAI_API_KEY")
-    payload = {
-        "model": LLM_MODEL,
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    with httpx.Client(timeout=LLM_TIMEOUT) as client:
-        response = client.post(
-            f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+_LOCAL_MODEL = None
+_LOCAL_TOKENIZER = None
 
+
+def _get_local_model():
+    """Load the local open model lazily."""
+    global _LOCAL_MODEL, _LOCAL_TOKENIZER
+    if _LOCAL_MODEL is not None and _LOCAL_TOKENIZER is not None:
+        return _LOCAL_TOKENIZER, _LOCAL_MODEL
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as exc:
+        raise RuntimeError("Не установлены torch/transformers для локальной модели.") from exc
+    logger.info("Loading local emission-analysis model: %s", LOCAL_MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_ID)
+    kwargs = {"torch_dtype": "auto"}
+    if torch.cuda.is_available():
+        kwargs["device_map"] = "auto"
+    model = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_ID, **kwargs)
+    if not torch.cuda.is_available():
+        model = model.to("cpu")
+    model.eval()
+    _LOCAL_TOKENIZER, _LOCAL_MODEL = tokenizer, model
+    return tokenizer, model
+
+
+def _llm_complete(system_prompt: str, user_prompt: str) -> str:
+    """Run Qwen locally; no OpenAI API or external LLM endpoint is used."""
+    import torch
+    tokenizer, model = _get_local_model()
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
+    device = next(model.parameters()).device
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+    with torch.inference_mode():
+        outputs = model.generate(**inputs, max_new_tokens=LOCAL_MAX_NEW_TOKENS, do_sample=False)
+    generated = outputs[0][inputs["input_ids"].shape[-1]:]
+    return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 def _merge_extractions(items: list[dict[str, Any]]) -> dict[str, Any]:
     if not items:
