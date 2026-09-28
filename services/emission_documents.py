@@ -244,7 +244,10 @@ def _get_local_model():
             use_4bit = False
 
     try:
-        logger.info("Loading primary local model: %s", mistral_id)
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("Mistral Small 3.1 24B требует GPU для этого локального режима; используем Qwen3.")
+        logger.info("Loading primary local model: %s (4bit=%s)", mistral_id, use_4bit)
         processor, model, kind = _load_model(mistral_id, use_4bit=use_4bit)
     except Exception as exc:
         logger.warning("Mistral unavailable, falling back to %s: %s", qwen_id, exc)
@@ -277,6 +280,8 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
         outputs = model.generate(**inputs, max_new_tokens=LOCAL_MAX_NEW_TOKENS, do_sample=False)
     generated = outputs[0][inputs["input_ids"].shape[-1]:]
     return processor.decode(generated, skip_special_tokens=True).strip()
+
+
 def _merge_extractions(items: list[dict[str, Any]]) -> dict[str, Any]:
     if not items:
         return {}
