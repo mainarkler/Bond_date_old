@@ -849,28 +849,26 @@ def build_vm_pdf_report(vm_report):
 
         # KPI strip
         kpis = [
-            (
-                "BID",
-                f"{vm_report['BID']:.2f}",
-            ),
-            ("VM", f"{vm_report['VM']:.2f}"),
-            ("МАРЖА ПОЗИЦИИ", safe_format_int_with_sep(vm_report["POSITION_VM"])),
+            ("Последняя цена", f"{vm_report['BID']:.2f}"),
+            ("VM - VM RUB", f"{vm_report['VM']:.2f}"),
+            ("VM позиции в руб", safe_format_int_with_sep(vm_report["POSITION_VM"])),
+            ("Изменение цены", f"{float(vm_report['LASTTOPREVPRICE']):.2f}%" if vm_report.get('LASTTOPREVPRICE') is not None else "н/д"),
         ]
-        x0, w, gap = 0.055, 0.275, 0.018
+        x0, w, gap = 0.055, 0.205, 0.012
         for idx, (label, value) in enumerate(kpis):
             x = x0 + idx * (w + gap)
-            ax = fig.add_axes([x, 0.815, w, 0.065])
+            ax = fig.add_axes([x, 0.82, w, 0.055])
             ax.set_facecolor("#f4f6f8")
             for spine in ax.spines.values():
                 spine.set_visible(False)
             ax.set_xticks([])
             ax.set_yticks([])
-            ax.text(0.04, 0.68, label, fontsize=7.5, color="#6b7480", transform=ax.transAxes)
+            ax.text(0.04, 0.68, label, fontsize=6.8, color="#6b7480", transform=ax.transAxes)
             ax.text(
                 0.04,
                 0.22,
                 value,
-                fontsize=13,
+                fontsize=11,
                 fontweight="bold",
                 color="#182230",
                 transform=ax.transAxes,
@@ -988,21 +986,57 @@ def build_vm_pdf_report(vm_report):
 
                 # Separate text columns are more stable than padding a proportional font.
                 source_fixed = source[:20]
+
+                news_text = f"{n.get('title', '')} {n.get('summary', '')} {title_ru}".lower()
+                negative_words = [
+                    "rate hike", "higher rates", "hawkish", "strong dollar", "dollar rises",
+                    "yields rise", "yield rises", "fed raises", "fed hike", "sell gold",
+                    "gold falls", "gold drops", "gold decline", "золото падает", "золото снижается",
+                    "рост доллара", "сильный доллар", "рост доходности", "повышение ставки",
+                    "ястребиный", "продажи золота", "снижение золота",
+                ]
+                positive_words = [
+                    "rate cut", "lower rates", "dovish", "weak dollar", "dollar falls",
+                    "yields fall", "yield falls", "fed cuts", "gold rises", "gold gains",
+                    "gold rally", "золото растет", "золото повышается", "слабый доллар",
+                    "снижение ставки", "голубиный", "рост золота", "рост спроса на золото",
+                ]
+                negative_score = sum(1 for word in negative_words if word in news_text)
+                positive_score = sum(1 for word in positive_words if word in news_text)
+                if negative_score > positive_score:
+                    sentiment_bg = "#fde8e7"
+                    sentiment_fg = "#9b2c2c"
+                elif positive_score > negative_score:
+                    sentiment_bg = "#e8f5e9"
+                    sentiment_fg = "#2e7d32"
+                else:
+                    sentiment_bg = "#fff8db"
+                    sentiment_fg = "#8a6d1d"
+
                 title_max = 112
                 if len(title_ru) > title_max:
                     title_ru = title_ru[: title_max - 1].rstrip() + "…"
 
                 # Шрифт новостей увеличен примерно на 2 пт.
                 news_fontsize = 9.1
+                ax_news.add_patch(
+                    plt.Rectangle(
+                        (0.0, y - 0.045), 0.012, 0.075,
+                        transform=ax_news.transAxes,
+                        facecolor=sentiment_bg,
+                        edgecolor=sentiment_fg,
+                        linewidth=0.8,
+                    )
+                )
                 ax_news.text(
-                    0.00, y, date_only,
+                    0.02, y, date_only,
                     fontsize=news_fontsize,
                     color="#182230",
                     transform=ax_news.transAxes,
                     family="DejaVu Sans Mono",
                 )
                 ax_news.text(
-                    0.105, y, source_fixed,
+                    0.125, y, source_fixed,
                     fontsize=news_fontsize,
                     color="#182230",
                     transform=ax_news.transAxes,
@@ -1010,7 +1044,7 @@ def build_vm_pdf_report(vm_report):
                 )
                 # Сам текст новости является гиперссылкой на оригинал.
                 ax_news.text(
-                    0.285, y, title_ru,
+                    0.305, y, title_ru,
                     fontsize=news_fontsize,
                     color="#245a9b",
                     transform=ax_news.transAxes,
@@ -1038,12 +1072,9 @@ def build_vm_pdf_report(vm_report):
             _style_gold_axis(
                 ax_month,
                 "Gold Intraday (1W) - per gram",
-                "Date / Time",
+                "Time",
                 "Price per gram",
-                formatter=mdates.DateFormatter(
-                    "%H:%M",
-                    tz=__import__("zoneinfo").ZoneInfo("America/New_York"),
-                ),
+                formatter=mdates.DateFormatter("%H:%M"),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f}"),
             )
             # Explicit intraday ticks keep the time axis visible in the PDF.
@@ -1057,12 +1088,12 @@ def build_vm_pdf_report(vm_report):
             )
             ax_month.set_xticks(mdates.date2num(intraday_tick_positions.to_pydatetime()))
             ax_month.set_xticklabels(
-                [ts.strftime("%H:%M") for ts in intraday_tick_positions],
+                [(ts + pd.Timedelta(hours=3)).strftime("%H:%M") for ts in intraday_tick_positions],
                 rotation=0,
                 ha="center",
             )
             ax_month.tick_params(axis="x", labelbottom=True, labelrotation=0, pad=4)
-            ax_month.set_xlabel("Date / Time")
+            ax_month.set_xlabel("Time")
 
         if not daily_close.empty:
             ax_six = fig.add_axes([0.055, 0.04, 0.89, 0.15])
@@ -1071,7 +1102,7 @@ def build_vm_pdf_report(vm_report):
             _style_gold_axis(
                 ax_six,
                 "Gold Daily Close (6M) - per gram",
-                "Date / Time",
+                "Date",
                 "Price per gram",
                 formatter=mdates.DateFormatter("%d.%m"),
                 y_formatter=FuncFormatter(lambda value, _: f"{value / 1000:.1f}"),
@@ -1092,6 +1123,7 @@ def build_vm_pdf_report(vm_report):
                 ha="center",
             )
             ax_six.tick_params(axis="x", labelrotation=0, pad=4)
+            ax_six.set_xlabel("Date")
 
         # Preserve exact A4 page geometry.
         pdf.savefig(fig)
