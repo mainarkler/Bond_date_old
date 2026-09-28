@@ -198,45 +198,85 @@ def _json_from_response(text: str) -> dict[str, Any]:
 
 
 _LOCAL_MODEL = None
-_LOCAL_TOKENIZER = None
+_LOCAL_PROCESSOR = None
+_LOCAL_MODEL_KIND = None
 
 
-def _get_local_model():
-    """Load the local open model lazily."""
-    global _LOCAL_MODEL, _LOCAL_TOKENIZER
-    if _LOCAL_MODEL is not None and _LOCAL_TOKENIZER is not None:
-        return _LOCAL_TOKENIZER, _LOCAL_MODEL
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ImportError as exc:
-        raise RuntimeError("Не установлены torch/transformers для локальной модели.") from exc
-    logger.info("Loading local emission-analysis model: %s", LOCAL_MODEL_ID)
-    tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_ID)
+def _load_model(model_id: str, use_4bit: bool = False):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+
+    processor = None
+    if "Mistral-Small-3.1" in model_id:
+        processor = AutoProcessor.from_pretrained(model_id)
+        kwargs = {"device_map": "auto", "torch_dtype": "auto"}
+        if use_4bit:
+            from transformers import BitsAndBytesConfig
+            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+        model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
+        return processor, model, "mistral"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     kwargs = {"torch_dtype": "auto"}
     if torch.cuda.is_available():
         kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_ID, **kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
     if not torch.cuda.is_available():
         model = model.to("cpu")
     model.eval()
-    _LOCAL_TOKENIZER, _LOCAL_MODEL = tokenizer, model
-    return tokenizer, model
+    return tokenizer, model, "qwen"
+
+
+def _get_local_model():
+    """Load Mistral Small 3.1 first; fall back to Qwen3 if unavailable."""
+    global _LOCAL_MODEL, _LOCAL_PROCESSOR, _LOCAL_MODEL_KIND
+    if _LOCAL_MODEL is not None:
+        return _LOCAL_PROCESSOR, _LOCAL_MODEL, _LOCAL_MODEL_KIND
+
+    mistral_id = os.getenv("EMISSION_MISTRAL_MODEL", "mistralai/Mistral-Small-3.1-24B-Instruct-2503")
+    qwen_id = os.getenv("EMISSION_QWEN_MODEL", "Qwen/Qwen3-4B")
+    use_4bit = os.getenv("EMISSION_MISTRAL_4BIT", "auto").lower() in {"1", "true", "yes", "on"}
+    if os.getenv("EMISSION_MISTRAL_4BIT", "auto").lower() == "auto":
+        try:
+            import torch
+            use_4bit = torch.cuda.is_available()
+        except ImportError:
+            use_4bit = False
+
+    try:
+        logger.info("Loading primary local model: %s", mistral_id)
+        processor, model, kind = _load_model(mistral_id, use_4bit=use_4bit)
+    except Exception as exc:
+        logger.warning("Mistral unavailable, falling back to %s: %s", qwen_id, exc)
+        processor, model, kind = _load_model(qwen_id)
+
+    _LOCAL_PROCESSOR, _LOCAL_MODEL, _LOCAL_MODEL_KIND = processor, model, kind
+    return processor, model, kind
 
 
 def _llm_complete(system_prompt: str, user_prompt: str) -> str:
-    """Run Qwen locally; no OpenAI API or external LLM endpoint is used."""
+    """Run the primary Mistral model locally, with Qwen3 fallback."""
     import torch
-    tokenizer, model = _get_local_model()
+    processor, model, kind = _get_local_model()
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False, tokenize=True, return_dict=True, return_tensors="pt")
+
+    if kind == "mistral":
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=text, return_tensors="pt")
+        device = next(model.parameters()).device
+        inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
+        with torch.inference_mode():
+            outputs = model.generate(**inputs, max_new_tokens=LOCAL_MAX_NEW_TOKENS, do_sample=False)
+        generated = outputs[:, inputs["input_ids"].shape[1]:]
+        return processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
+
+    inputs = processor.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False, tokenize=True, return_dict=True, return_tensors="pt")
     device = next(model.parameters()).device
     inputs = {key: value.to(device) for key, value in inputs.items()}
     with torch.inference_mode():
         outputs = model.generate(**inputs, max_new_tokens=LOCAL_MAX_NEW_TOKENS, do_sample=False)
     generated = outputs[0][inputs["input_ids"].shape[-1]:]
-    return tokenizer.decode(generated, skip_special_tokens=True).strip()
-
+    return processor.decode(generated, skip_special_tokens=True).strip()
 def _merge_extractions(items: list[dict[str, Any]]) -> dict[str, Any]:
     if not items:
         return {}
