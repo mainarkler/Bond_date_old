@@ -841,7 +841,7 @@ def build_vm_pdf_report(vm_report):
             0.055,
             0.905,
             f"{vm_report['TRADE_NAME']}  •  {vm_report['SECID']}  •  "
-            f"Клиринг {vm_report['TRADEDATE']}  •  Количество {vm_report['QUANTITY']}",
+            f"Дата данных {vm_report['TRADEDATE']}  •  Количество {vm_report['QUANTITY']}",
             fontsize=9.2,
             color="#5d6875",
         )
@@ -881,13 +881,13 @@ def build_vm_pdf_report(vm_report):
         days_to_exp = vm_report.get("DAYS_TO_EXPIRATION")
         vm_rows = [
             ("Инструмент", f"{vm_report['TRADE_NAME']} / {vm_report['SECID']}"),
-            ("BID", f"{float(vm_report['BID']):.2f}"),
-            ("PREVPRICE", f"{float(vm_report['PREV_PRICE']):.2f}"),
+            ("P_today_settle (BID)", f"{float(vm_report['BID']):.2f}"),
+            ("P_prev_settle (PREVPRICE)", f"{float(vm_report['PREV_PRICE']):.2f}"),
             ("Время котировки", vm_report.get("QUOTE_TIME") or "н/д"),
             ("Multiplier", f"{float(vm_report['MULTIPLIER']):.4f}"),
             ("Изменение открытых позиций", safe_format_int_with_sep(vm_report["OICHANGE"]) if vm_report.get("OICHANGE") is not None else "н/д"),
             ("Изменение цены к PREVPRICE", f"{float(last_to_prev):.4f}%" if last_to_prev is not None else "н/д"),
-            ("Дата экспирации", vm_report.get("LASTDELDATE") or "н/д"),
+            ("Экспирация (LASTDELDATE)", vm_report.get("LASTDELDATE") or "н/д"),
             ("Осталось дней", str(days_to_exp) if days_to_exp is not None else "н/д"),
             ("USD/RUB", f"{float(vm_report['USD_RUB']):.2f}  ({vm_report['USD_RUB_DATE']})"),
         ]
