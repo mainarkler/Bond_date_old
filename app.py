@@ -797,14 +797,23 @@ def _translate_news_text_ru(text_value: str) -> str:
         return text_value
 
 
+def _sanitize_news_display_text(text_value: str) -> str:
+    """Remove markdown artifacts from source headlines and translations."""
+    text_value = str(text_value or "").strip()
+    text_value = text_value.replace("**", "").replace("__", "").replace("`", "")
+    text_value = text_value.replace("*", "").replace("~", "")
+    text_value = re.sub(r"\s+", " ", text_value)
+    return text_value.strip()
+
+
 def _prepare_xauusd_news_for_display(items, limit=8):
     prepared = _rank_and_summarize_xauusd_news(items, limit=limit)
     result = []
     for item in prepared:
         title = item.get("title", "")
         summary = item.get("summary", "") or title
-        translated_title = _translate_news_text_ru(title)
-        translated_summary = _translate_news_text_ru(summary)
+        translated_title = _sanitize_news_display_text(_translate_news_text_ru(title))
+        translated_summary = _sanitize_news_display_text(_translate_news_text_ru(summary))
         result.append(
             {
                 **item,
