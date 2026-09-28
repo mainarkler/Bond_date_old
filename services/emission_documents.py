@@ -197,90 +197,74 @@ def _json_from_response(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-_LOCAL_MODEL = None
-_LOCAL_PROCESSOR = None
-_LOCAL_MODEL_KIND = None
+def _llm_complete(system_prompt: str, user_prompt: str) -> str:
+    """Call a hosted OpenAI-compatible LLM; no local model is loaded in Streamlit."""
+    import requests
 
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Не задан OPENROUTER_API_KEY. Добавьте ключ OpenRouter в Streamlit Secrets."
+        )
 
-def _load_model(model_id: str, use_4bit: bool = False):
-    import torch
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+    model = os.getenv(
+        "EMISSION_LLM_MODEL",
+        "mistralai/mistral-small-3.1-24b-instruct:free",
+    )
+    base_url = os.getenv(
+        "OPENROUTER_BASE_URL",
+        "https://openrouter.ai/api/v1/chat/completions",
+    )
+    timeout = int(os.getenv("EMISSION_LLM_TIMEOUT", "180"))
 
-    processor = None
-    if "Mistral-Small-3.1" in model_id:
-        processor = AutoProcessor.from_pretrained(model_id)
-        kwargs = {"device_map": "auto", "torch_dtype": "auto"}
-        if use_4bit:
-            from transformers import BitsAndBytesConfig
-            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
-        model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
-        return processor, model, "mistral"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    kwargs = {"torch_dtype": "auto"}
-    if torch.cuda.is_available():
-        kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
-    if not torch.cuda.is_available():
-        model = model.to("cpu")
-    model.eval()
-    return tokenizer, model, "qwen"
-
-
-def _get_local_model():
-    """Load Mistral Small 3.1 first; fall back to Qwen3 if unavailable."""
-    global _LOCAL_MODEL, _LOCAL_PROCESSOR, _LOCAL_MODEL_KIND
-    if _LOCAL_MODEL is not None:
-        return _LOCAL_PROCESSOR, _LOCAL_MODEL, _LOCAL_MODEL_KIND
-
-    mistral_id = os.getenv("EMISSION_MISTRAL_MODEL", "mistralai/Mistral-Small-3.1-24B-Instruct-2503")
-    qwen_id = os.getenv("EMISSION_QWEN_MODEL", "Qwen/Qwen3-4B")
-    use_4bit = os.getenv("EMISSION_MISTRAL_4BIT", "auto").lower() in {"1", "true", "yes", "on"}
-    if os.getenv("EMISSION_MISTRAL_4BIT", "auto").lower() == "auto":
-        try:
-            import torch
-            use_4bit = torch.cuda.is_available()
-        except ImportError:
-            use_4bit = False
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": LOCAL_MAX_NEW_TOKENS,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv(
+            "OPENROUTER_SITE_URL",
+            "https://github.com/mainarkler/Bond_date_old",
+        ),
+        "X-Title": "Bond Date — Анализ эмиссионных документов",
+    }
 
     try:
-        import torch
-        if not torch.cuda.is_available():
-            raise RuntimeError("Mistral Small 3.1 24B требует GPU для этого локального режима; используем Qwen3.")
-        logger.info("Loading primary local model: %s (4bit=%s)", mistral_id, use_4bit)
-        processor, model, kind = _load_model(mistral_id, use_4bit=use_4bit)
-    except Exception as exc:
-        logger.warning("Mistral unavailable, falling back to %s: %s", qwen_id, exc)
-        processor, model, kind = _load_model(qwen_id)
+        response = requests.post(
+            base_url,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Ошибка соединения с LLM API: {exc}") from exc
 
-    _LOCAL_PROCESSOR, _LOCAL_MODEL, _LOCAL_MODEL_KIND = processor, model, kind
-    return processor, model, kind
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("error", {}).get("message", response.text)
+        except ValueError:
+            detail = response.text
+        raise RuntimeError(
+            f"LLM API вернул HTTP {response.status_code}: {detail}"
+        )
 
+    try:
+        result = response.json()
+        response_content = result["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("LLM API вернул неожиданный формат ответа.") from exc
 
-def _llm_complete(system_prompt: str, user_prompt: str) -> str:
-    """Run the primary Mistral model locally, with Qwen3 fallback."""
-    import torch
-    processor, model, kind = _get_local_model()
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    if not isinstance(response_content, str) or not response_content.strip():
+        raise RuntimeError("LLM API вернул пустой ответ.")
 
-    if kind == "mistral":
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = processor(text=text, return_tensors="pt")
-        device = next(model.parameters()).device
-        inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
-        with torch.inference_mode():
-            outputs = model.generate(**inputs, max_new_tokens=LOCAL_MAX_NEW_TOKENS, do_sample=False)
-        generated = outputs[:, inputs["input_ids"].shape[1]:]
-        return processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
-
-    inputs = processor.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False, tokenize=True, return_dict=True, return_tensors="pt")
-    device = next(model.parameters()).device
-    inputs = {key: value.to(device) for key, value in inputs.items()}
-    with torch.inference_mode():
-        outputs = model.generate(**inputs, max_new_tokens=LOCAL_MAX_NEW_TOKENS, do_sample=False)
-    generated = outputs[0][inputs["input_ids"].shape[-1]:]
-    return processor.decode(generated, skip_special_tokens=True).strip()
-
+    return response_content.strip()
 
 def _merge_extractions(items: list[dict[str, Any]]) -> dict[str, Any]:
     if not items:
