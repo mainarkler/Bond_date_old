@@ -20,10 +20,10 @@ python-docx
 pymupdf
 pytesseract
 Pillow
-tiktoken
 
+tiktoken
 reportlab
 
-
-transformers>=4.51.0
-torch
+huggingface_hub>=0.30.0
+llama-cpp-python>=0.3.16,<0.4
+psutil>=6.0.0
