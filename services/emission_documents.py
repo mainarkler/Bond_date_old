@@ -203,31 +203,89 @@ RELEVANT_TERMS = (
 )
 
 
-def _relevant_text(document: DocumentData, max_chars: int = 50000) -> str:
-    """Select likely material pages before sending anything to Qwen."""
-    scored: list[tuple[int, int, str]] = []
+def _keyword_fragments(
+    document: DocumentData,
+    max_chars: int = 24000,
+    window_chars: int = 900,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Deterministically extract only text around material keywords.
+
+    This stage uses no AI. It reduces the amount of text that reaches Qwen and
+    preserves page references for every selected fragment.
+    """
+    hits: list[tuple[int, int, int, str, list[str]]] = []
+
     for page in document.pages:
-        text = page.text.strip()
+        text = re.sub(r"\s+", " ", page.text or "").strip()
         if not text:
             continue
         lower = text.lower()
-        score = sum(lower.count(term) for term in RELEVANT_TERMS)
-        # Keep the first page because it commonly contains issue identity.
-        if page.page == 1:
-            score += 8
-        scored.append((score, page.page, f"[Страница {page.page}]\n{text}"))
+        positions: list[tuple[int, str]] = []
 
-    scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+        for term in RELEVANT_TERMS:
+            start = 0
+            while True:
+                pos = lower.find(term, start)
+                if pos < 0:
+                    break
+                positions.append((pos, term))
+                start = pos + max(1, len(term))
+
+        if not positions:
+            continue
+
+        # Merge nearby keyword hits into larger readable fragments.
+        positions.sort()
+        ranges: list[tuple[int, int, list[str]]] = []
+        for pos, term in positions:
+            left = max(0, pos - window_chars)
+            right = min(len(text), pos + len(term) + window_chars)
+            if ranges and left <= ranges[-1][1] + 250:
+                old_left, old_right, terms = ranges[-1]
+                ranges[-1] = (old_left, max(old_right, right), terms + [term])
+            else:
+                ranges.append((left, right, [term]))
+
+        for left, right, terms in ranges:
+            fragment = text[left:right].strip()
+            score = len(set(terms))
+            if page.page == 1:
+                score += 3
+            hits.append((score, page.page, left, fragment, sorted(set(terms))))
+
+    hits.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+
     selected: list[str] = []
+    selected_meta: list[dict[str, Any]] = []
     total = 0
-    for score, page_no, block in scored:
+    seen: set[tuple[int, str]] = set()
+
+    for score, page_no, _, fragment, terms in hits:
+        key = (page_no, fragment[:180])
+        if key in seen:
+            continue
+        block = f"[Страница {page_no}]\n{fragment}"
         if total + len(block) > max_chars:
             continue
+        seen.add(key)
         selected.append(block)
+        selected_meta.append({
+            "page": page_no,
+            "keywords": terms,
+            "score": score,
+        })
         total += len(block)
 
     selected.sort(key=lambda block: int(re.search(r"\d+", block).group()))
-    return "\n\n".join(selected) if selected else document.text[:max_chars]
+    selected_meta.sort(key=lambda item: item["page"])
+
+    return "\n\n".join(selected), selected_meta
+
+
+def _relevant_text(document: DocumentData, max_chars: int = 24000) -> str:
+    """Compatibility wrapper returning keyword-selected text only."""
+    text, _ = _keyword_fragments(document, max_chars=max_chars)
+    return text or document.text[:max_chars]
 
 
 SYSTEM_PROMPT = """
@@ -312,7 +370,7 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
 
 def analyze_document(document: DocumentData, progress=None) -> dict[str, Any]:
     """Analyze only after OCR/text extraction has completed."""
-    relevant = _relevant_text(document, max_chars=24000)
+    relevant, keyword_hits = _keyword_fragments(document, max_chars=24000)
     if progress:
         progress("Поиск важных частей распознанного текста")
 
