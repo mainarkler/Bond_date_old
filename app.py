@@ -3724,8 +3724,9 @@ if API_ACTION == "vm_pdf":
 if st.session_state["active_view"] == "emission_documents":
     st.subheader("📄 Анализ эмиссионного документа")
     st.caption(
-        "Этап 1 — распознавание текста. Этап 2 — анализ важных частей текста. "
-        "Этап 3 — подробный PDF-отчёт по запросу. Анализируется только один документ."
+        "Этап 1 — распознавание текста. Этап 2 — одна кнопка последовательно "
+        "находит важные части по ключевым словам и запускает AI-анализ. "
+        "Этап 3 — подробный PDF-отчёт. Анализируется только один документ."
     )
 
     uploaded = st.file_uploader(
@@ -3774,13 +3775,13 @@ if st.session_state["active_view"] == "emission_documents":
         with col2:
             analyze_disabled = document is None
             if st.button(
-                "2️⃣ Найти важное и сделать вывод",
+                "2️⃣ Найти важное и проанализировать",
                 key="emission_analyze",
                 disabled=analyze_disabled,
             ):
                 status = st.empty()
                 try:
-                    status.info("Qwen3 анализирует только отобранные важные фрагменты…")
+                    status.info("Шаг 1/2: ищем важные части по ключевым словам — без запуска AI…")
                     result = analyze_document(document, progress=status.info)
                     st.session_state["emission_document_result"] = result
                     st.session_state["emission_document_pdf"] = None
@@ -3844,10 +3845,13 @@ if st.session_state["active_view"] == "emission_documents":
             with st.expander("Показать результаты поиска по ключевым словам", expanded=False):
                 for hit in keyword_hits:
                     keywords = ", ".join(hit.get("keywords", []))
+                    fragment = hit.get("fragment", "").strip()
                     st.markdown(
-                        f"**Страница {hit.get("page")}** · "
+                        f"**Страница {hit.get('page')}** · "
                         f"ключевые слова: `{keywords}`"
                     )
+                    if fragment:
+                        st.caption(fragment)
 
         facts = result.get("facts", {})
         analysis = result.get("analysis", {})
