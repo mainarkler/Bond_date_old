@@ -30,12 +30,12 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 logger = logging.getLogger(__name__)
 
 OCR_LANG = os.getenv("EMISSION_OCR_LANG", "rus+eng")
-GGUF_REPO = os.getenv("EMISSION_GGUF_REPO", "lm-kit/qwen-3-0.6b-instruct-gguf")
+GGUF_REPO = os.getenv("EMISSION_GGUF_REPO", "Qwen/Qwen3-0.6B-GGUF")
 GGUF_FILE = os.getenv("EMISSION_GGUF_FILE", "Qwen3-0.6B-Q4_K_M.gguf")
 LOCAL_MAX_NEW_TOKENS = int(os.getenv("EMISSION_LOCAL_MAX_NEW_TOKENS", "700"))
-LOCAL_CONTEXT_TOKENS = int(os.getenv("EMISSION_LOCAL_CONTEXT_TOKENS", "2048"))
+LOCAL_CONTEXT_TOKENS = int(os.getenv("EMISSION_LOCAL_CONTEXT_TOKENS", "4096"))
 MIN_FREE_RAM_MB = int(os.getenv("EMISSION_MIN_FREE_RAM_MB", "850"))
-ANALYSIS_MAX_CHARS = int(os.getenv("EMISSION_ANALYSIS_MAX_CHARS", "18000"))
+ANALYSIS_MAX_CHARS = int(os.getenv("EMISSION_ANALYSIS_MAX_CHARS", "9000"))
 
 
 @dataclass
@@ -282,3 +282,122 @@ def _get_qwen(progress=None) -> Llama:
 
         _QWEN = model
         return _QWEN
+
+def _empty_analysis(keyword_hits):
+    missing = "не указано в документе"
+    keys = ("issuer","security_type","issue_volume","nominal","currency","maturity",
+            "placement_period","coupon","coupon_periods","amortization","offers",
+            "early_redemption","buyback","security_guarantees","subordination",
+            "covenants","default_events","payment_mechanics","claim_priority",
+            "taxes_legal_notes","fees_expenses","restrictions","risk_factors",
+            "unusual_terms","other_material_terms")
+    return {
+        "keyword_hits": keyword_hits,
+        "facts": {k: missing for k in keys} | {"source_references": []},
+        "analysis": {
+            "summary": missing, "key_features": [], "attention_points": [], "risks": [],
+            "holder_favorable_mechanisms": [], "holder_unfavorable_terms": [],
+            "analytical_conclusion": missing,
+            "detailed_conditions": {k: missing for k in (
+                "early_redemption","offers","default_events","covenants","amortization"
+            )}
+        }
+    }
+
+def _extract_json_object(raw):
+    text = (raw or "").strip()
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise RuntimeError("Qwen3 не вернул JSON-объект.")
+    try:
+        value = json.loads(text[start:end + 1])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Qwen3 вернул некорректный JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("Qwen3 вернул JSON не в виде объекта.")
+    return value
+
+def _normalise_analysis(value, keyword_hits):
+    result = _empty_analysis(keyword_hits)
+    if isinstance(value.get("facts"), dict):
+        result["facts"].update(value["facts"])
+    if isinstance(value.get("analysis"), dict):
+        result["analysis"].update(value["analysis"])
+        detailed = value["analysis"].get("detailed_conditions")
+        if isinstance(detailed, dict):
+            result["analysis"]["detailed_conditions"].update(detailed)
+    for key, val in list(result["facts"].items()):
+        if key == "source_references":
+            if not isinstance(val, list):
+                result["facts"][key] = []
+        elif val is None or (isinstance(val, str) and not val.strip()):
+            result["facts"][key] = "не указано в документе"
+    for key in ("key_features","attention_points","risks",
+                "holder_favorable_mechanisms","holder_unfavorable_terms"):
+        if not isinstance(result["analysis"].get(key), list):
+            result["analysis"][key] = []
+    if not result["analysis"].get("summary"):
+        result["analysis"]["summary"] = "не указано в документе"
+    if not result["analysis"].get("analytical_conclusion"):
+        result["analysis"]["analytical_conclusion"] = "не указано в документе"
+    detailed = result["analysis"].setdefault("detailed_conditions", {})
+    for key in ("early_redemption","offers","default_events","covenants","amortization"):
+        if not detailed.get(key):
+            detailed[key] = result["facts"].get(key, "не указано в документе")
+    return result
+
+def _llm_complete(system_prompt, user_prompt, progress=None):
+    if progress:
+        progress("Шаг 2/2: запускаем Qwen3 через llama.cpp…")
+    llm = _get_qwen(progress=progress)
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt + "\n\n/no_think\nВерни только JSON."},
+            ],
+            max_tokens=LOCAL_MAX_NEW_TOKENS,
+            temperature=0.0,
+            top_p=0.8,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Ошибка генерации Qwen3: {exc}") from exc
+    choices = response.get("choices") or []
+    if not choices:
+        raise RuntimeError("Qwen3 не вернул результат.")
+    content = (choices[0].get("message") or {}).get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("Qwen3 вернул пустой ответ.")
+    if progress:
+        progress("Qwen3 завершил анализ.")
+    return content.strip()
+
+def analyze_document(document, progress=None):
+    if document is None or not document.pages:
+        raise ValueError("Документ не загружен.")
+    if progress:
+        progress("Шаг 1/2: ищем важные фрагменты по ключевым словам…")
+    fragments, keyword_hits = _keyword_fragments(
+        document, max_chars=ANALYSIS_MAX_CHARS, window_chars=650
+    )
+    if not fragments:
+        return _empty_analysis(keyword_hits)
+    if progress:
+        progress(f"Шаг 1/2 завершён: найдено {len(keyword_hits)} фрагментов. Передаём контекст Qwen3…")
+    prompt = (
+        "Анализируй только фрагменты одного документа ниже. Страницы указаны явно. "
+        "Не используй внешние сведения. Не сокращай материальные условия. "
+        "Для досрочного погашения, оферт, дефолтов, ковенант и амортизации "
+        "перечисляй все доступные триггеры, даты, сроки, формулы, цены, суммы, "
+        "порядок заявления, уведомления и исполнения. Не заменяй это общей фразой. "
+        "Если данных нет, пиши «не указано в документе».\n\nФРАГМЕНТЫ:\n" + fragments
+    )
+    raw = _llm_complete(COMBINED_SYSTEM_PROMPT, prompt, progress)
+    return _normalise_analysis(_extract_json_object(raw), keyword_hits)
