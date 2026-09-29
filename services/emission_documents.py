@@ -284,7 +284,7 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
         if torch.cuda.is_available():
             kwargs.update({"dtype": torch.bfloat16, "device_map": "auto"})
         else:
-            kwargs.update({"torch_dtype": torch.float32, "low_cpu_mem_usage": True})
+            kwargs.update({"dtype": torch.float32, "low_cpu_mem_usage": True})
         _QWEN_MODEL = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_ID, **kwargs)
 
     messages = [{"role": "system", "content": system_prompt},
@@ -312,7 +312,7 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
 
 def analyze_document(document: DocumentData, progress=None) -> dict[str, Any]:
     """Analyze only after OCR/text extraction has completed."""
-    relevant = _relevant_text(document)
+    relevant = _relevant_text(document, max_chars=24000)
     if progress:
         progress("Поиск важных частей распознанного текста")
 
