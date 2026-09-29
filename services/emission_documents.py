@@ -17,7 +17,6 @@ import pytesseract
 from huggingface_hub import hf_hub_download
 from PIL import Image
 from docx import Document
-from llama_cpp import Llama
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -228,11 +227,11 @@ COMBINED_SYSTEM_PROMPT = """
 """.strip()
 
 
-_QWEN: Llama | None = None
+_QWEN: object | None = None
 _QWEN_LOAD_LOCK = threading.Lock()
 
 
-def _get_qwen(progress=None) -> Llama:
+def _get_qwen(progress=None):
     global _QWEN
     if _QWEN is not None:
         return _QWEN
@@ -272,6 +271,10 @@ def _get_qwen(progress=None) -> Llama:
         if progress:
             progress("Файл Qwen3 загружен. Инициализируем llama.cpp…")
         try:
+            # Import the native llama.cpp extension only when AI analysis is requested.
+            # This keeps Streamlit startup/health checks independent of the native library.
+            from llama_cpp import Llama
+
             model = Llama(
                 model_path=model_path,
                 n_ctx=LOCAL_CONTEXT_TOKENS,
