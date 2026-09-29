@@ -35,9 +35,9 @@ from reportlab.platypus import (
 logger = logging.getLogger(__name__)
 
 OCR_LANG = os.getenv("EMISSION_OCR_LANG", "rus+eng")
-LOCAL_MODEL_ID = os.getenv("EMISSION_LOCAL_MODEL", "Qwen/Qwen3-4B")
-LOCAL_MAX_NEW_TOKENS = int(os.getenv("EMISSION_LOCAL_MAX_NEW_TOKENS", "3000"))
-LOCAL_CONTEXT_TOKENS = int(os.getenv("EMISSION_LOCAL_CONTEXT_TOKENS", "12000"))
+LOCAL_MODEL_ID = os.getenv("EMISSION_LOCAL_MODEL", "Qwen/Qwen3-0.6B")
+LOCAL_MAX_NEW_TOKENS = int(os.getenv("EMISSION_LOCAL_MAX_NEW_TOKENS", "1400"))
+LOCAL_CONTEXT_TOKENS = int(os.getenv("EMISSION_LOCAL_CONTEXT_TOKENS", "6000"))
 MAX_CHUNK_CHARS = int(os.getenv("EMISSION_ANALYSIS_CHUNK_CHARS", "14000"))
 
 
@@ -282,7 +282,7 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
         )
         kwargs = {"trust_remote_code": True}
         if torch.cuda.is_available():
-            kwargs.update({"torch_dtype": torch.bfloat16, "device_map": "auto"})
+            kwargs.update({"dtype": torch.bfloat16, "device_map": "auto"})
         else:
             kwargs.update({"torch_dtype": torch.float32, "low_cpu_mem_usage": True})
         _QWEN_MODEL = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_ID, **kwargs)
