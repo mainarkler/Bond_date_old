@@ -3834,6 +3834,21 @@ if st.session_state["active_view"] == "emission_documents":
                 st.text(page.text or "Текст не распознан.")
 
     if result:
+        keyword_hits = result.get("keyword_hits", [])
+        if keyword_hits:
+            st.markdown("#### Найденные важные фрагменты")
+            st.caption(
+                f"До AI отобрано {len(keyword_hits)} фрагментов по ключевым словам. "
+                "Qwen3 получает только этот сокращённый набор текста."
+            )
+            with st.expander("Показать результаты поиска по ключевым словам", expanded=False):
+                for hit in keyword_hits:
+                    keywords = ", ".join(hit.get("keywords", []))
+                    st.markdown(
+                        f"**Страница {hit.get("page")}** · "
+                        f"ключевые слова: `{keywords}`"
+                    )
+
         facts = result.get("facts", {})
         analysis = result.get("analysis", {})
 
