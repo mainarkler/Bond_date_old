@@ -25,5 +25,6 @@ tiktoken
 reportlab
 
 huggingface_hub>=0.30.0
-llama-cpp-python>=0.3.16,<0.4
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.35
 psutil>=6.0.0
