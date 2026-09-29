@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 OCR_LANG = os.getenv("EMISSION_OCR_LANG", "rus+eng")
 LOCAL_MODEL_ID = os.getenv("EMISSION_LOCAL_MODEL", "Qwen/Qwen3-4B")
 LOCAL_MAX_NEW_TOKENS = int(os.getenv("EMISSION_LOCAL_MAX_NEW_TOKENS", "3000"))
+LOCAL_CONTEXT_TOKENS = int(os.getenv("EMISSION_LOCAL_CONTEXT_TOKENS", "12000"))
 MAX_CHUNK_CHARS = int(os.getenv("EMISSION_ANALYSIS_CHUNK_CHARS", "14000"))
 
 
@@ -66,52 +67,80 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _preprocess_ocr_image(image: Image.Image) -> Image.Image:
+    gray = image.convert("L")
+    gray = gray.resize((int(gray.width * 1.15), int(gray.height * 1.15)))
+    return gray.point(lambda p: 255 if p > 210 else (0 if p < 115 else p))
+
+
 def _ocr_page(page: fitz.Page) -> tuple[str, float | None]:
-    pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
+    """OCR a scanned PDF page with several Tesseract layouts."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(2.6, 2.6), alpha=False)
     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    data = pytesseract.image_to_data(
-        image,
-        lang=OCR_LANG,
-        config="--psm 6",
-        output_type=pytesseract.Output.DICT,
-    )
-    parts: list[str] = []
-    confidences: list[float] = []
-    for text, conf in zip(data.get("text", []), data.get("conf", [])):
-        token = str(text).strip()
-        if not token:
-            continue
-        parts.append(token)
+    image = _preprocess_ocr_image(image)
+    candidates: list[tuple[str, float | None]] = []
+
+    for psm in (6, 4, 11):
         try:
-            value = float(conf)
-            if value >= 0:
-                confidences.append(value)
-        except (TypeError, ValueError):
-            pass
-    return _clean_text(" ".join(parts)), (
-        round(sum(confidences) / len(confidences), 1) if confidences else None
+            data = pytesseract.image_to_data(
+                image,
+                lang=OCR_LANG,
+                config=f"--oem 1 --psm {psm}",
+                output_type=pytesseract.Output.DICT,
+                timeout=60,
+            )
+        except (pytesseract.TesseractError, RuntimeError) as exc:
+            logger.warning("Tesseract failed, psm=%s: %s", psm, exc)
+            continue
+
+        parts: list[str] = []
+        confidences: list[float] = []
+        for token, conf in zip(data.get("text", []), data.get("conf", [])):
+            token = str(token).strip()
+            if not token:
+                continue
+            parts.append(token)
+            try:
+                value = float(conf)
+                if value >= 0:
+                    confidences.append(value)
+            except (TypeError, ValueError):
+                pass
+
+        text = _clean_text(" ".join(parts))
+        confidence = (
+            round(sum(confidences) / len(confidences), 1)
+            if confidences else None
+        )
+        if text:
+            candidates.append((text, confidence))
+
+    if not candidates:
+        return "", None
+
+    candidates.sort(
+        key=lambda item: (len(re.sub(r"\s+", "", item[0])), item[1] or 0),
+        reverse=True,
     )
+    return candidates[0]
 
 
 def extract_pdf(data: bytes, filename: str) -> DocumentData:
     doc = fitz.open(stream=data, filetype="pdf")
     pages: list[SourcePage] = []
-    for idx, page in enumerate(doc, start=1):
-        text = _clean_text(page.get_text("text"))
-        # A scanned page often has no text layer or only a few OCR-like artifacts.
-        if len(re.sub(r"\s+", "", text)) < 80:
-            try:
+    try:
+        for idx, page in enumerate(doc, start=1):
+            text = _clean_text(page.get_text("text"))
+            if len(re.sub(r"\s+", "", text)) < 80:
                 text, confidence = _ocr_page(page)
                 method = "OCR" if text else "empty"
-            except (pytesseract.TesseractNotFoundError, RuntimeError) as exc:
-                logger.warning("OCR failed on page %s: %s", idx, exc)
-                text, confidence, method = text, None, "text-layer"
-        else:
-            confidence, method = None, "text-layer"
-        pages.append(SourcePage(idx, text, method, confidence))
-    doc.close()
+            else:
+                confidence = None
+                method = "text-layer"
+            pages.append(SourcePage(idx, text, method, confidence))
+    finally:
+        doc.close()
     return DocumentData(filename, "PDF", pages)
-
 
 def extract_docx(data: bytes, filename: str) -> DocumentData:
     with tempfile.NamedTemporaryFile(suffix=".docx") as tmp:
@@ -198,80 +227,50 @@ def _json_from_response(text: str) -> dict[str, Any]:
 
 
 def _llm_complete(system_prompt: str, user_prompt: str) -> str:
-    """Call Qwen3 through OpenRouter; no local model is loaded in Streamlit."""
-    import requests
+    """Run Qwen3 locally. No API key or external LLM is used."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
-        try:
-            import streamlit as st
-            api_key = str(st.secrets.get("OPENROUTER_API_KEY", "")).strip()
-        except Exception:
-            api_key = ""
-    if not api_key:
-        raise RuntimeError(
-            "Не задан OPENROUTER_API_KEY. Добавьте ключ OpenRouter в Streamlit Secrets."
+    global _QWEN_TOKENIZER, _QWEN_MODEL
+    if "_QWEN_TOKENIZER" not in globals():
+        _QWEN_TOKENIZER = None
+        _QWEN_MODEL = None
+
+    if _QWEN_TOKENIZER is None or _QWEN_MODEL is None:
+        logger.info("Loading Qwen3 model: %s", LOCAL_MODEL_ID)
+        _QWEN_TOKENIZER = AutoTokenizer.from_pretrained(
+            LOCAL_MODEL_ID, trust_remote_code=True
         )
+        kwargs = {"trust_remote_code": True}
+        if torch.cuda.is_available():
+            kwargs.update({"torch_dtype": torch.bfloat16, "device_map": "auto"})
+        else:
+            kwargs.update({"torch_dtype": torch.float32, "low_cpu_mem_usage": True})
+        _QWEN_MODEL = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_ID, **kwargs)
 
-    model = os.getenv(
-        "EMISSION_LLM_MODEL",
-        "qwen/qwen3-4b:free",
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    prompt = _QWEN_TOKENIZER.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
-    base_url = os.getenv(
-        "OPENROUTER_BASE_URL",
-        "https://openrouter.ai/api/v1/chat/completions",
+    inputs = _QWEN_TOKENIZER(
+        prompt, return_tensors="pt", truncation=True, max_length=LOCAL_CONTEXT_TOKENS
     )
-    timeout = int(os.getenv("EMISSION_LLM_TIMEOUT", "180"))
+    if torch.cuda.is_available():
+        inputs = {k: v.to(_QWEN_MODEL.device) for k, v in inputs.items()}
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": int(os.getenv("EMISSION_LLM_MAX_TOKENS", "3500")),
-        "reasoning": {"enabled": False},
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/mainarkler/Bond_date_old",
-        "X-Title": "Bond Date — Анализ эмиссионных документов",
-    }
-
-    try:
-        response = requests.post(
-            base_url,
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Ошибка соединения с Qwen3 API: {exc}") from exc
-
-    if response.status_code >= 400:
-        try:
-            error = response.json().get("error", {})
-            detail = error.get("message") or response.text
-        except ValueError:
-            detail = response.text
-        raise RuntimeError(
-            f"Qwen3 API вернул HTTP {response.status_code}: {detail}"
+    with torch.inference_mode():
+        output_ids = _QWEN_MODEL.generate(
+            **inputs,
+            max_new_tokens=LOCAL_MAX_NEW_TOKENS,
+            do_sample=False,
+            pad_token_id=_QWEN_TOKENIZER.eos_token_id,
         )
 
-    try:
-        result = response.json()
-        message = result["choices"][0]["message"]
-        response_content = message.get("content", "")
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("Qwen3 API вернул неожиданный формат ответа.") from exc
-
-    if not isinstance(response_content, str) or not response_content.strip():
-        raise RuntimeError("Qwen3 API вернул пустой ответ.")
-
-    return response_content.strip()
+    generated = output_ids[0][inputs["input_ids"].shape[1]:]
+    return _QWEN_TOKENIZER.decode(generated, skip_special_tokens=True).strip()
 
 def _merge_extractions(items: list[dict[str, Any]]) -> dict[str, Any]:
     if not items:
@@ -481,7 +480,11 @@ def build_pdf_report(document: DocumentData, result: dict[str, Any]) -> bytes:
 def analyze_and_report(data: bytes, filename: str, progress=None) -> tuple[DocumentData, dict[str, Any], bytes]:
     document = extract_document(data, filename)
     if not any(page.text.strip() for page in document.pages):
-        raise ValueError("Не удалось извлечь текст из документа. Проверьте качество скана.")
+        raise ValueError(
+            "Не удалось извлечь текст. OCR не получил распознаваемый текст. "
+            "Проверьте установку Tesseract и языковых пакетов "
+            "tesseract-ocr-rus/tesseract-ocr-eng в Streamlit."
+        )
     result = analyze_document(document, progress=progress)
     report = build_pdf_report(document, result)
     return document, result, report
