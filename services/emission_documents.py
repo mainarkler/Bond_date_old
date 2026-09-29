@@ -401,3 +401,123 @@ def analyze_document(document, progress=None):
     )
     raw = _llm_complete(COMBINED_SYSTEM_PROMPT, prompt, progress)
     return _normalise_analysis(_extract_json_object(raw), keyword_hits)
+
+
+def _pdf_p(text, style):
+    value = str(text if text not in (None, "") else "не указано в документе")
+    value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return Paragraph(value.replace("\n", "<br/>"), style)
+
+def build_analysis_report(document, result):
+    buffer = io.BytesIO()
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle(
+        "EmissionTitle", parent=styles["Title"], fontName="Helvetica-Bold",
+        fontSize=16, leading=20, alignment=TA_CENTER, spaceAfter=12
+    )
+    h2 = ParagraphStyle(
+        "EmissionH2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=11, leading=14, spaceBefore=8, spaceAfter=4
+    )
+    body = ParagraphStyle(
+        "EmissionBody", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=8.5, leading=11, spaceAfter=4
+    )
+
+    pdf = SimpleDocTemplate(
+        buffer, pagesize=A4, rightMargin=12*mm, leftMargin=12*mm,
+        topMargin=12*mm, bottomMargin=12*mm,
+        title="Анализ эмиссионного документа"
+    )
+    story = [
+        _pdf_p("Анализ эмиссионного документа", title),
+        _pdf_p("Документ: " + document.filename, body),
+        _pdf_p(
+            "Источник: только загруженный документ. Рыночные данные и MOEX не используются.",
+            body
+        ),
+    ]
+    facts = result.get("facts", {})
+    analysis = result.get("analysis", {})
+
+    story.append(_pdf_p("1. Краткое описание", h2))
+    story.append(_pdf_p(analysis.get("summary"), body))
+
+    story.append(_pdf_p("2. Основные параметры", h2))
+    labels = [
+        ("Эмитент", "issuer"), ("Вид бумаги", "security_type"),
+        ("Объём выпуска", "issue_volume"), ("Номинал", "nominal"),
+        ("Валюта", "currency"), ("Погашение", "maturity"),
+        ("Размещение", "placement_period"), ("Купон", "coupon"),
+        ("Периоды купона", "coupon_periods"), ("Амортизация", "amortization"),
+        ("Оферты", "offers"), ("Досрочное погашение", "early_redemption"),
+        ("Выкуп", "buyback"), ("Обеспечение/гарантии", "security_guarantees"),
+        ("Субординация", "subordination"), ("Ковенанты", "covenants"),
+        ("События дефолта", "default_events"), ("Платёжный механизм", "payment_mechanics"),
+        ("Очередность требований", "claim_priority"), ("Налоги/правовые примечания", "taxes_legal_notes"),
+        ("Комиссии/расходы", "fees_expenses"), ("Ограничения", "restrictions"),
+        ("Риски из документа", "risk_factors"), ("Прочие существенные условия", "other_material_terms"),
+    ]
+    rows = [[_pdf_p("Показатель", body), _pdf_p("Условие", body)]]
+    for label, key in labels:
+        rows.append([_pdf_p(label, body), _pdf_p(facts.get(key), body)])
+    table = Table(rows, colWidths=[48*mm, 136*mm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.3, colors.grey),
+        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 3),
+        ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 3),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+    ]))
+    story.append(table)
+
+    sections = [
+        ("3. Ключевые особенности", "key_features"),
+        ("4. На что обратить внимание", "attention_points"),
+        ("5. Риски", "risks"),
+        ("6. Потенциально неблагоприятные условия для держателя", "holder_unfavorable_terms"),
+        ("7. Механизмы защиты / потенциально благоприятные условия", "holder_favorable_mechanisms"),
+    ]
+    for heading, key in sections:
+        story.append(_pdf_p(heading, h2))
+        values = analysis.get(key) or []
+        if isinstance(values, list):
+            for item in values or ["не указано в документе"]:
+                story.append(_pdf_p("• " + str(item), body))
+        else:
+            story.append(_pdf_p(values, body))
+
+    story.append(_pdf_p("8. Подробные существенные условия", h2))
+    detailed = analysis.get("detailed_conditions") or {}
+    for label, key in (
+        ("Досрочное погашение", "early_redemption"),
+        ("Оферты", "offers"),
+        ("События дефолта", "default_events"),
+        ("Ковенанты", "covenants"),
+        ("Амортизация", "amortization"),
+    ):
+        story.append(_pdf_p(label, h2))
+        story.append(_pdf_p(detailed.get(key) or facts.get(key), body))
+
+    story.append(_pdf_p("9. Аналитическое заключение", h2))
+    story.append(_pdf_p(analysis.get("analytical_conclusion"), body))
+
+    story.append(_pdf_p("10. Источники по страницам", h2))
+    refs = facts.get("source_references") or []
+    if isinstance(refs, list) and refs:
+        for ref in refs:
+            if isinstance(ref, dict):
+                story.append(_pdf_p(
+                    "Страница " + str(ref.get("page", "не указана")) +
+                    ": " + str(ref.get("topic", "не указано")),
+                    body
+                ))
+    else:
+        for page in document.pages:
+            if page.text.strip():
+                story.append(_pdf_p("Страница " + str(page.page), body))
+
+    pdf.build(story)
+    return buffer.getvalue()
