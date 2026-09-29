@@ -273,6 +273,7 @@ def _keyword_fragments(
             "page": page_no,
             "keywords": terms,
             "score": score,
+            "fragment": fragment,
         })
         total += len(block)
 
