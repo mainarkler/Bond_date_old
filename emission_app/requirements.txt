@@ -1,0 +1,11 @@
+streamlit
+pymupdf
+python-docx
+pytesseract
+Pillow
+reportlab
+huggingface_hub>=0.30.0
+psutil>=6.0.0
+requests
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.35
