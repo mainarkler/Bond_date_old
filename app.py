@@ -34,7 +34,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 from services.moex_turnover import MoexTurnoverClient
-from services.emission_documents import analyze_and_report
+from services.emission_documents import extract_document, analyze_document, build_analysis_report
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
 from services.keyword_news_block import build_keyword_news_block_sync
@@ -3724,8 +3724,8 @@ if API_ACTION == "vm_pdf":
 if st.session_state["active_view"] == "emission_documents":
     st.subheader("📄 Анализ эмиссионного документа")
     st.caption(
-        "Анализируется один PDF или DOCX. Рыночные данные и MOEX не используются. "
-        "Для сканированных PDF автоматически применяется OCR."
+        "Этап 1 — распознавание текста. Этап 2 — анализ важных частей текста. "
+        "Этап 3 — подробный PDF-отчёт по запросу. Анализируется только один документ."
     )
 
     uploaded = st.file_uploader(
@@ -3738,44 +3738,100 @@ if st.session_state["active_view"] == "emission_documents":
     if uploaded is not None:
         file_bytes = uploaded.getvalue()
         file_signature = f"{uploaded.name}:{len(file_bytes)}"
+
         if st.session_state.get("emission_document_signature") != file_signature:
             st.session_state["emission_document_signature"] = file_signature
+            st.session_state["emission_document_data"] = None
             st.session_state["emission_document_result"] = None
             st.session_state["emission_document_pdf"] = None
 
-        if st.button("🔎 Анализировать документ", type="primary", key="emission_document_analyze"):
-            status = st.empty()
-            progress_bar = st.progress(0)
+        col1, col2, col3 = st.columns(3)
 
-            def update_progress(message):
-                status.info(message)
+        with col1:
+            if st.button("1️⃣ Распознать текст", type="primary", key="emission_extract"):
+                status = st.empty()
+                try:
+                    status.info("Извлекаем текст. Для сканированного PDF запускается OCR…")
+                    document = extract_document(file_bytes, uploaded.name)
 
-            try:
-                update_progress("Извлечение текста и проверка документа…")
-                progress_bar.progress(10)
+                    if not any(page.text.strip() for page in document.pages):
+                        raise ValueError(
+                            "OCR не распознал текст. Проверьте качество скана и наличие "
+                            "Tesseract с русским языковым пакетом."
+                        )
 
-                document, result, report_pdf = analyze_and_report(
-                    file_bytes,
-                    uploaded.name,
-                    progress=update_progress,
-                )
-                progress_bar.progress(100)
-                status.success(
-                    f"Готово: {len(document.pages)} страниц/блоков. "
-                    f"Метод извлечения: "
-                    f"{'OCR' if any(p.method == 'OCR' for p in document.pages) else 'текстовый слой'}."
-                )
-                st.session_state["emission_document_result"] = result
-                st.session_state["emission_document_pdf"] = report_pdf
-                st.session_state["emission_document_data"] = document
-            except Exception as exc:
-                progress_bar.empty()
-                status.empty()
-                st.error(f"Не удалось проанализировать документ: {exc}")
+                    st.session_state["emission_document_data"] = document
+                    st.session_state["emission_document_result"] = None
+                    st.session_state["emission_document_pdf"] = None
+                    status.success(
+                        f"Текст получен: {len(document.pages)} страниц/блоков."
+                    )
+                except Exception as exc:
+                    status.error(f"Ошибка распознавания: {exc}")
+
+        document = st.session_state.get("emission_document_data")
+
+        with col2:
+            analyze_disabled = document is None
+            if st.button(
+                "2️⃣ Найти важное и сделать вывод",
+                key="emission_analyze",
+                disabled=analyze_disabled,
+            ):
+                status = st.empty()
+                try:
+                    status.info("Qwen3 анализирует только отобранные важные фрагменты…")
+                    result = analyze_document(document, progress=status.info)
+                    st.session_state["emission_document_result"] = result
+                    st.session_state["emission_document_pdf"] = None
+                    status.success("Анализ завершён.")
+                except Exception as exc:
+                    status.error(f"Ошибка анализа: {exc}")
+
+        result = st.session_state.get("emission_document_result")
+
+        with col3:
+            report_disabled = result is None
+            if st.button(
+                "3️⃣ Сформировать PDF-отчёт",
+                key="emission_build_report",
+                disabled=report_disabled,
+            ):
+                status = st.empty()
+                try:
+                    status.info("Формируем PDF-отчёт без повторного запуска Qwen3…")
+                    report_pdf = build_analysis_report(document, result)
+                    st.session_state["emission_document_pdf"] = report_pdf
+                    status.success("PDF-отчёт сформирован.")
+                except Exception as exc:
+                    status.error(f"Ошибка формирования отчёта: {exc}")
 
     result = st.session_state.get("emission_document_result")
     report_pdf = st.session_state.get("emission_document_pdf")
     document = st.session_state.get("emission_document_data")
+
+    if document:
+        st.markdown("#### Распознанный текст")
+        ocr_pages = [p for p in document.pages if p.method == "OCR"]
+        text_layer_pages = [p for p in document.pages if p.method == "text-layer"]
+
+        if ocr_pages:
+            avg_conf = [p.confidence for p in ocr_pages if p.confidence is not None]
+            confidence_text = (
+                f", средняя уверенность OCR: {sum(avg_conf)/len(avg_conf):.1f}%"
+                if avg_conf else ""
+            )
+            st.caption(
+                f"OCR применён к страницам: "
+                f"{', '.join(str(p.page) for p in ocr_pages)}{confidence_text}."
+            )
+        elif text_layer_pages:
+            st.caption("Использован текстовый слой PDF.")
+
+        with st.expander("Показать текст документа", expanded=False):
+            for page in document.pages:
+                st.markdown(f"**Страница {page.page} — {page.method}**")
+                st.text(page.text or "Текст не распознан.")
 
     if result:
         facts = result.get("facts", {})
@@ -3819,7 +3875,7 @@ if st.session_state["active_view"] == "emission_documents":
             else:
                 st.write(value or "Не указано.")
 
-        st.markdown("#### Полные существенные условия")
+        st.markdown("#### Существенные условия")
         detailed = analysis.get("detailed_conditions") or {}
         for key, title in [
             ("early_redemption", "Досрочное погашение"),
@@ -3834,22 +3890,19 @@ if st.session_state["active_view"] == "emission_documents":
         st.markdown("#### Аналитическое заключение")
         st.write(analysis.get("analytical_conclusion") or "Не сформировано.")
 
-        if document:
-            ocr_pages = [p for p in document.pages if p.method == "OCR"]
-            if ocr_pages:
-                avg_conf = [p.confidence for p in ocr_pages if p.confidence is not None]
-                confidence_text = f", средняя уверенность OCR: {sum(avg_conf)/len(avg_conf):.1f}%" if avg_conf else ""
-                st.caption(f"OCR применён к страницам: {', '.join(str(p.page) for p in ocr_pages)}{confidence_text}.")
-
-        if report_pdf:
-            base_name = re.sub(r"[^A-Za-zА-Яа-я0-9._-]+", "_", Path(uploaded.name).stem if uploaded else "emission_document")
-            st.download_button(
-                "💾 Скачать подробный PDF-отчёт",
-                data=report_pdf,
-                file_name=f"Анализ_эмиссионного_документа_{base_name}.pdf",
-                mime="application/pdf",
-                key="emission_document_pdf_download",
-            )
+    if report_pdf:
+        base_name = re.sub(
+            r"[^A-Za-zА-Яа-я0-9._-]+",
+            "_",
+            Path(uploaded.name).stem if uploaded else "emission_document",
+        )
+        st.download_button(
+            "💾 Скачать подробный PDF-отчёт",
+            data=report_pdf,
+            file_name=f"Анализ_эмиссионного_документа_{base_name}.pdf",
+            mime="application/pdf",
+            key="emission_document_pdf_download",
+        )
 
     st.stop()
 
