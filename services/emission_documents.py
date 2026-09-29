@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 OCR_LANG = os.getenv("EMISSION_OCR_LANG", "rus+eng")
 GGUF_REPO = os.getenv("EMISSION_GGUF_REPO", "Qwen/Qwen3-0.6B-GGUF")
 GGUF_FILE = os.getenv("EMISSION_GGUF_FILE", "Qwen3-0.6B-Q4_K_M.gguf")
+GGUF_REVISION = os.getenv("EMISSION_GGUF_REVISION", "1208e45d782fe18602c5eaf10e5758d5b0f24c03")
 LOCAL_MAX_NEW_TOKENS = int(os.getenv("EMISSION_LOCAL_MAX_NEW_TOKENS", "700"))
 LOCAL_CONTEXT_TOKENS = int(os.getenv("EMISSION_LOCAL_CONTEXT_TOKENS", "4096"))
 MIN_FREE_RAM_MB = int(os.getenv("EMISSION_MIN_FREE_RAM_MB", "850"))
@@ -256,6 +257,7 @@ def _get_qwen(progress=None) -> Llama:
             model_path = hf_hub_download(
                 repo_id=GGUF_REPO,
                 filename=GGUF_FILE,
+                revision=GGUF_REVISION,
                 etag_timeout=10,
             )
         except Exception as exc:
