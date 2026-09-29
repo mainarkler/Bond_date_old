@@ -175,6 +175,7 @@ def extract_document(data: bytes, filename: str) -> DocumentData:
     raise ValueError("Поддерживаются PDF и DOCX. Формат DOC (старый Word) пока не поддерживается.")
 
 
+
 def _chunks(document: DocumentData) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
@@ -193,25 +194,63 @@ def _chunks(document: DocumentData) -> list[str]:
     return chunks or ["Документ не содержит распознаваемого текста."]
 
 
+RELEVANT_TERMS = (
+    "эмитент", "выпуск", "объем", "номинал", "погашен", "срок обращения",
+    "купон", "ставка", "амортиза", "оферт", "досроч", "выкуп", "дефолт",
+    "ковенант", "обеспеч", "гарант", "субординац", "очередност", "налог",
+    "комисси", "расход", "ограничен", "риск", "размещен", "платеж",
+    "дата", "формул", "уведомлен", "требован", "досрочн"
+)
+
+
+def _relevant_text(document: DocumentData, max_chars: int = 50000) -> str:
+    """Select likely material pages before sending anything to Qwen."""
+    scored: list[tuple[int, int, str]] = []
+    for page in document.pages:
+        text = page.text.strip()
+        if not text:
+            continue
+        lower = text.lower()
+        score = sum(lower.count(term) for term in RELEVANT_TERMS)
+        # Keep the first page because it commonly contains issue identity.
+        if page.page == 1:
+            score += 8
+        scored.append((score, page.page, f"[Страница {page.page}]\n{text}"))
+
+    scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    selected: list[str] = []
+    total = 0
+    for score, page_no, block in scored:
+        if total + len(block) > max_chars:
+            continue
+        selected.append(block)
+        total += len(block)
+
+    selected.sort(key=lambda block: int(re.search(r"\d+", block).group()))
+    return "\n\n".join(selected) if selected else document.text[:max_chars]
+
+
 SYSTEM_PROMPT = """
-Ты анализируешь только один эмиссионный документ (проспект, решение о выпуске,
-условия выпуска/размещения или иной документ эмитента). Не используй рыночные
-данные, котировки, MOEX, внешние новости или сведения, которых нет в тексте.
-Извлекай факты буквально и сохраняй страницу-источник.
+Ты анализируешь один эмиссионный документ. Используй только переданный текст.
+Не используй рынок, MOEX, новости или внешние сведения.
 
-Верни JSON с ключами:
-issuer, security_type, issue_volume, nominal, currency, maturity,
-placement_period, coupon, coupon_periods, amortization, offers,
-early_redemption, buyback, security_guarantees, subordination, covenants,
-default_events, payment_mechanics, claim_priority, taxes_legal_notes,
-fees_expenses, restrictions, risk_factors, unusual_terms, other_material_terms,
-source_references.
+Найди и структурируй только существенные условия выпуска. Для каждого факта
+сохраняй номер страницы. Сложные условия не сокращай: перечисляй все
+триггеры, сроки, даты, формулы, порядок уведомления, цену/сумму и процедуру,
+если они есть в тексте. Если данных нет: "не указано в документе".
 
-Для каждого поля указывай подробное содержание, если оно есть. Для сложных
-условий (досрочное погашение, оферта, дефолт, ковенанты, амортизация и т.п.)
-НЕ сокращай перечень: перечисляй все условия, сроки, триггеры, формулы и
-процедуры, которые приведены в документе. Если данных нет, используй "не
-указано в документе". source_references — массив объектов {page, topic}.
+Верни JSON:
+{
+ "issuer": "...", "security_type": "...", "issue_volume": "...",
+ "nominal": "...", "currency": "...", "maturity": "...",
+ "placement_period": "...", "coupon": "...", "coupon_periods": "...",
+ "amortization": "...", "offers": "...", "early_redemption": "...",
+ "buyback": "...", "security_guarantees": "...", "subordination": "...",
+ "covenants": "...", "default_events": "...", "payment_mechanics": "...",
+ "claim_priority": "...", "taxes_legal_notes": "...", "fees_expenses": "...",
+ "restrictions": "...", "risk_factors": "...", "unusual_terms": "...",
+ "other_material_terms": "...", "source_references": [{"page": 1, "topic": "..."}]
+}
 """.strip()
 
 
@@ -248,10 +287,8 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
             kwargs.update({"torch_dtype": torch.float32, "low_cpu_mem_usage": True})
         _QWEN_MODEL = AutoModelForCausalLM.from_pretrained(LOCAL_MODEL_ID, **kwargs)
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    messages = [{"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}]
     prompt = _QWEN_TOKENIZER.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
@@ -272,80 +309,69 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
     generated = output_ids[0][inputs["input_ids"].shape[1]:]
     return _QWEN_TOKENIZER.decode(generated, skip_special_tokens=True).strip()
 
-def _merge_extractions(items: list[dict[str, Any]]) -> dict[str, Any]:
-    if not items:
-        return {}
-    merged: dict[str, Any] = {}
-    for item in items:
-        for key, value in item.items():
-            if value in (None, "", [], "не указано в документе"):
-                merged.setdefault(key, value)
-                continue
-            if isinstance(value, list):
-                existing = merged.setdefault(key, [])
-                if not isinstance(existing, list):
-                    existing = [existing]
-                    merged[key] = existing
-                for element in value:
-                    if element not in existing:
-                        existing.append(element)
-            elif key not in merged or merged[key] in (None, "", "не указано в документе"):
-                merged[key] = value
-            elif isinstance(merged[key], str) and isinstance(value, str) and value not in merged[key]:
-                merged[key] += "\n\n" + value
-    return merged
-
 
 def analyze_document(document: DocumentData, progress=None) -> dict[str, Any]:
-    chunks = _chunks(document)
-    extracted: list[dict[str, Any]] = []
-    for index, chunk in enumerate(chunks, start=1):
-        if progress:
-            progress(f"Извлечение условий: блок {index} из {len(chunks)}")
-        prompt = (
-            "Извлеки из следующего фрагмента только факты эмиссионного документа. "
-            "Сохраняй номера страниц и не делай выводов за пределами текста.\n\n"
-            + chunk
-        )
-        extracted.append(_json_from_response(_llm_complete(SYSTEM_PROMPT, prompt)))
-
-    facts = _merge_extractions(extracted)
+    """Analyze only after OCR/text extraction has completed."""
+    relevant = _relevant_text(document)
     if progress:
-        progress("Формирование итогового аналитического заключения")
+        progress("Поиск важных частей распознанного текста")
+
+    facts = _json_from_response(
+        _llm_complete(
+            SYSTEM_PROMPT,
+            "Распознанный текст. Проанализируй существенные условия:\n\n" + relevant,
+        )
+    )
 
     final_system = """
-Ты готовишь аналитическое резюме одного эмиссионного документа на основе
-извлечённых фактов. Не добавляй рыночные данные и внешние сведения.
-Разделяй факты документа и аналитические комментарии.
+На основе извлечённых фактов одного эмиссионного документа подготовь краткое
+нейтральное резюме. Не добавляй сведения, которых нет в фактах.
 
 Верни JSON:
 {
-  "summary": "краткое описание выпуска",
-  "key_features": [],
-  "attention_points": [],
-  "risks": [],
-  "holder_favorable_mechanisms": [],
-  "holder_unfavorable_terms": [],
-  "analytical_conclusion": "нейтральное описание документа",
-  "detailed_conditions": {
-     "early_redemption": "...полный перечень условий...",
-     "offers": "...полный перечень условий...",
-     "default_events": "...полный перечень условий...",
-     "covenants": "...полный перечень условий...",
-     "amortization": "...полный перечень условий..."
-  }
+ "summary": "...",
+ "key_features": [],
+ "attention_points": [],
+ "risks": [],
+ "holder_favorable_mechanisms": [],
+ "holder_unfavorable_terms": [],
+ "analytical_conclusion": "...",
+ "detailed_conditions": {
+   "early_redemption": "...",
+   "offers": "...",
+   "default_events": "...",
+   "covenants": "...",
+   "amortization": "..."
+ }
 }
-Для detailed_conditions сохраняй полные условия, а не ссылки "см. документ".
 """.strip()
 
+    if progress:
+        progress("Формирование выводов")
     analysis = _json_from_response(
         _llm_complete(
             final_system,
-            "Факты документа:\n" + json.dumps(facts, ensure_ascii=False, indent=2),
+            "Факты документа:\n" + json.dumps(facts, ensure_ascii=False),
         )
     )
-    return {"facts": facts, "analysis": analysis, "chunks": len(chunks)}
+    return {"facts": facts, "analysis": analysis, "selected_text": relevant}
 
+
+def build_analysis_report(document: DocumentData, result: dict[str, Any]) -> bytes:
+    return build_pdf_report(document, result)
+
+
+def analyze_and_report(data: bytes, filename: str, progress=None) -> tuple[DocumentData, dict[str, Any], bytes]:
+    """Backward-compatible combined path; UI should use separate stages."""
+    document = extract_document(data, filename)
+    if not any(page.text.strip() for page in document.pages):
+        raise ValueError(
+            "Не удалось извлечь текст. OCR не получил распознаваемый текст. "
+            "Проверьте установку Tesseract и языковых пакетов "
+            "tesseract-ocr-rus/tesseract-ocr-eng в Streamlit."
+        )
+    result = analyze_document(document, progress=progress)
+    return document, result, build_analysis_report(document, result)
 
 def _font_paths() -> tuple[str, str]:
     candidates = [
