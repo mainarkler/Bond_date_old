@@ -368,52 +368,116 @@ def _llm_complete(system_prompt: str, user_prompt: str) -> str:
     return _QWEN_TOKENIZER.decode(generated, skip_special_tokens=True).strip()
 
 
-def analyze_document(document: DocumentData, progress=None) -> dict[str, Any]:
-    """Analyze only after OCR/text extraction has completed."""
-    relevant, keyword_hits = _keyword_fragments(document, max_chars=24000)
-    if progress:
-        progress("Поиск важных частей распознанного текста")
+def find_keyword_fragments(
+    document: DocumentData,
+    max_chars: int = 24000,
+) -> tuple[str, list[dict[str, Any]]]:
+    """First deterministic stage: find material fragments without loading the LLM."""
+    return _keyword_fragments(document, max_chars=max_chars)
 
-    facts = _json_from_response(
-        _llm_complete(
-            SYSTEM_PROMPT,
-            "Распознанный текст. Проанализируй существенные условия:\n\n" + relevant,
-        )
-    )
 
-    final_system = """
-На основе извлечённых фактов одного эмиссионного документа подготовь краткое
-нейтральное резюме. Не добавляй сведения, которых нет в фактах.
+COMBINED_SYSTEM_PROMPT = """
+Ты анализируешь один эмиссионный документ. Используй только переданный текст.
+Не используй рынок, MOEX, новости или внешние сведения.
 
-Верни JSON:
+Сначала извлеки факты документа, затем на их основе сформируй краткий
+нейтральный анализ. Для каждого факта сохраняй номер страницы.
+
+Критически важно: сложные материальные условия НЕ сокращай. Если в документе
+есть досрочное погашение, оферта, дефолт, ковенант, амортизация или иное
+условие, перечисли все фактические триггеры, даты, сроки, формулы, порядок
+уведомления, цену/сумму, ограничения и процедуру, которые указаны в тексте.
+Не заменяй перечисление фразами вроде "при наступлении условий".
+
+Если данных нет: "не указано в документе".
+
+Верни только JSON:
 {
- "summary": "...",
- "key_features": [],
- "attention_points": [],
- "risks": [],
- "holder_favorable_mechanisms": [],
- "holder_unfavorable_terms": [],
- "analytical_conclusion": "...",
- "detailed_conditions": {
-   "early_redemption": "...",
-   "offers": "...",
-   "default_events": "...",
-   "covenants": "...",
-   "amortization": "..."
- }
+  "facts": {
+    "issuer": "...",
+    "security_type": "...",
+    "issue_volume": "...",
+    "nominal": "...",
+    "currency": "...",
+    "maturity": "...",
+    "placement_period": "...",
+    "coupon": "...",
+    "coupon_periods": "...",
+    "amortization": "...",
+    "offers": "...",
+    "early_redemption": "...",
+    "buyback": "...",
+    "security_guarantees": "...",
+    "subordination": "...",
+    "covenants": "...",
+    "default_events": "...",
+    "payment_mechanics": "...",
+    "claim_priority": "...",
+    "taxes_legal_notes": "...",
+    "fees_expenses": "...",
+    "restrictions": "...",
+    "risk_factors": "...",
+    "unusual_terms": "...",
+    "other_material_terms": "...",
+    "source_references": [{"page": 1, "topic": "..."}]
+  },
+  "analysis": {
+    "summary": "...",
+    "key_features": [],
+    "attention_points": [],
+    "risks": [],
+    "holder_favorable_mechanisms": [],
+    "holder_unfavorable_terms": [],
+    "analytical_conclusion": "...",
+    "detailed_conditions": {
+      "early_redemption": "...",
+      "offers": "...",
+      "default_events": "...",
+      "covenants": "...",
+      "amortization": "..."
+    }
+  }
 }
 """.strip()
 
+
+def analyze_document(document: DocumentData, progress=None) -> dict[str, Any]:
+    """Run keyword filtering first, then one Qwen3 call on selected fragments."""
     if progress:
-        progress("Формирование выводов")
-    analysis = _json_from_response(
+        progress("Шаг 1/2: поиск важных частей по ключевым словам…")
+
+    relevant, keyword_hits = find_keyword_fragments(document, max_chars=24000)
+    if not relevant.strip():
+        raise ValueError(
+            "Не найдены существенные фрагменты по ключевым словам. "
+            "Проверьте качество распознанного текста."
+        )
+
+    if progress:
+        progress(
+            f"Шаг 2/2: Qwen3 анализирует {len(keyword_hits)} отобранных фрагментов…"
+        )
+
+    result = _json_from_response(
         _llm_complete(
-            final_system,
-            "Факты документа:\n" + json.dumps(facts, ensure_ascii=False),
+            COMBINED_SYSTEM_PROMPT,
+            "Отобранные фрагменты распознанного документа:\n\n" + relevant,
         )
     )
-    return {"facts": facts, "analysis": analysis, "selected_text": relevant}
 
+    facts = result.get("facts")
+    analysis = result.get("analysis")
+    if not isinstance(facts, dict):
+        facts = {}
+    if not isinstance(analysis, dict):
+        analysis = {}
+
+    return {
+        "facts": facts,
+        "analysis": analysis,
+        "selected_text": relevant,
+        "keyword_hits": keyword_hits,
+    }
 
 def build_analysis_report(document: DocumentData, result: dict[str, Any]) -> bytes:
     return build_pdf_report(document, result)
