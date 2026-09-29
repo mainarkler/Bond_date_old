@@ -24,3 +24,6 @@ tiktoken
 
 reportlab
 
+
+transformers>=4.51.0
+torch
