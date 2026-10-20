@@ -3445,8 +3445,6 @@ if st.session_state["active_view"] == "turnover_export":
             st.warning("Введите хотя бы один SECID или ISIN.")
         elif date_from > date_to:
             st.error("Дата начала не может быть позже даты окончания.")
-        elif len(identifiers) > 30:
-            st.error("За один запуск можно обработать не более 30 инструментов.")
         else:
             all_frames = []
             errors = []
