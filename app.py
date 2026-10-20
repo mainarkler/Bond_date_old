@@ -3318,6 +3318,170 @@ def dataframe_to_portfolio_excel_bytes(details_df: pd.DataFrame, reports: dict[s
     return output.getvalue()
 
 
+
+# ---------------------------
+# Market statistics view
+# ---------------------------
+if st.session_state["active_view"] == "market_statistics":
+    st.header("📊 Статистика рынка")
+    st.caption("История дневного оборота и количества сделок по выбранной акции или облигации на MOEX.")
+    with st.form("market_statistics_form"):
+        market_kind = st.selectbox("Тип рынка", options=["shares", "bonds"], format_func=lambda x: "Акции" if x == "shares" else "Облигации", key="market_stats_kind")
+        identifier = st.text_input("SECID или ISIN", value=st.session_state.get("market_stats_identifier", "SBER"), key="market_stats_identifier_input")
+        col_from, col_to = st.columns(2)
+        with col_from:
+            date_from = st.date_input("Дата начала", value=(datetime.now().date() - timedelta(days=90)), key="market_stats_from")
+        with col_to:
+            date_to = st.date_input("Дата окончания", value=(datetime.now().date() - timedelta(days=1)), key="market_stats_to")
+        run_stats = st.form_submit_button("Загрузить статистику", use_container_width=True)
+    if run_stats:
+        if not identifier.strip():
+            st.warning("Введите SECID или ISIN.")
+        elif date_from > date_to:
+            st.error("Дата начала не может быть позже даты окончания.")
+        else:
+            try:
+                with st.spinner("Загружаем историю MOEX ISS..."):
+                    profile = resolve_market_security_profile(identifier.strip(), market_kind)
+                    history_df = load_market_history_values(
+                        profile["secid"], market_kind, date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d")
+                    )
+                if history_df.empty:
+                    st.warning("За выбранный период MOEX не вернул историю торгов.")
+                else:
+                    history_df = history_df.copy()
+                    history_df["Оборот, руб."] = pd.to_numeric(history_df["VALUE"], errors="coerce").fillna(0)
+                    st.markdown(f"**{profile['secid']}** — {profile.get('shortname') or profile.get('isin') or identifier}")
+                    total_value = float(history_df["Оборот, руб."].sum())
+                    total_trades = int(pd.to_numeric(history_df["NUMTRADES"], errors="coerce").fillna(0).sum())
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Оборот за период", format_int_with_sep(total_value) + " ₽")
+                    m2.metric("Торговых дней", str(history_df["TRADEDATE"].nunique()))
+                    m3.metric("Количество сделок", format_int_with_sep(total_trades))
+                    chart_df = history_df.set_index("TRADEDATE")[["Оборот, руб."]].sort_index()
+                    st.line_chart(chart_df, use_container_width=True)
+                    display_df = history_df.rename(columns={"TRADEDATE": "Дата", "SECID": "SECID", "SHORTNAME": "Название", "VALUE": "Оборот, руб.", "NUMTRADES": "Количество сделок", "VOLUME": "Объем, шт."})
+                    st.dataframe(display_df, use_container_width=True)
+                    xlsx_bytes = ss.dataframe_to_excel_bytes(display_df, sheet_name="market_stats")
+                    st.download_button("Скачать Excel", data=xlsx_bytes, file_name=f"market_statistics_{profile['secid']}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="market_stats_xlsx")
+                    st.download_button("Скачать CSV", data=display_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"market_statistics_{profile['secid']}.csv", mime="text/csv", key="market_stats_csv")
+            except Exception as exc:
+                st.error(f"Не удалось загрузить статистику MOEX: {exc}")
+    st.stop()
+
+
+# ---------------------------
+# MOEX turnover view
+# ---------------------------
+if st.session_state["active_view"] == "moex_turnover":
+    st.header("📈 MOEX turnover")
+    st.caption("Дневные обороты по категориям regular / SPEQ / NDM по данным MOEX ISS.")
+    with st.form("moex_turnover_form"):
+        market_kind = st.selectbox("Тип рынка", options=["shares", "bonds"], format_func=lambda x: "Акции" if x == "shares" else "Облигации", key="moex_turnover_kind")
+        identifier = st.text_input("SECID", value=st.session_state.get("moex_turnover_identifier", "SBER"), key="moex_turnover_identifier_input")
+        c_from, c_to = st.columns(2)
+        with c_from:
+            date_from = st.date_input("Дата начала", value=(datetime.now().date() - timedelta(days=30)), key="moex_turnover_from")
+        with c_to:
+            date_to = st.date_input("Дата окончания", value=(datetime.now().date() - timedelta(days=1)), key="moex_turnover_to")
+        run_turnover = st.form_submit_button("Рассчитать оборот", use_container_width=True)
+    if run_turnover:
+        if not identifier.strip():
+            st.warning("Введите SECID.")
+        elif date_from > date_to:
+            st.error("Дата начала не может быть позже даты окончания.")
+        else:
+            try:
+                with st.spinner("Запрашиваем данные MOEX ISS..."):
+                    client = MoexTurnoverClient(timeout=30, limit=100)
+                    daily_df = client.fetch_combined_daily(
+                        identifier.strip().upper(), date_from.strftime("%Y-%m-%d"),
+                        date_to.strftime("%Y-%m-%d"), market_kind=market_kind
+                    )
+                if daily_df.empty:
+                    st.warning("MOEX ISS не вернул данные за выбранный период. Проверьте SECID, тип рынка и даты.")
+                else:
+                    daily_df["TRADEDATE"] = pd.to_datetime(daily_df["TRADEDATE"], errors="coerce")
+                    daily_df = daily_df.dropna(subset=["TRADEDATE"]).sort_values("TRADEDATE")
+                    for col in ["REGULAR", "SPEQ", "NDM", "HISTORY_VALUE", "TOTAL_TRADES"]:
+                        if col in daily_df.columns:
+                            daily_df[col] = pd.to_numeric(daily_df[col], errors="coerce").fillna(0.0)
+                    totals = daily_df[["REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]].sum(numeric_only=True)
+                    a, b, c, d = st.columns(4)
+                    a.metric("Regular", format_int_with_sep(totals.get("REGULAR", 0)) + " ₽")
+                    b.metric("SPEQ", format_int_with_sep(totals.get("SPEQ", 0)) + " ₽")
+                    c.metric("NDM", format_int_with_sep(totals.get("NDM", 0)) + " ₽")
+                    d.metric("Итого по категориям", format_int_with_sep(totals.get("TOTAL_TRADES", 0)) + " ₽")
+                    chart_cols = [c for c in ["REGULAR", "SPEQ", "NDM"] if c in daily_df.columns]
+                    if chart_cols:
+                        st.line_chart(daily_df.set_index("TRADEDATE")[chart_cols], use_container_width=True)
+                    st.dataframe(daily_df, use_container_width=True)
+                    st.download_button("Скачать Excel", data=ss.dataframe_to_excel_bytes(daily_df, sheet_name="moex_turnover"), file_name=f"moex_turnover_{identifier.strip().upper()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="moex_turnover_xlsx")
+                    st.download_button("Скачать CSV", data=daily_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"moex_turnover_{identifier.strip().upper()}.csv", mime="text/csv", key="moex_turnover_csv")
+            except Exception as exc:
+                st.error(f"Ошибка загрузки MOEX turnover: {exc}")
+    st.stop()
+
+
+# ---------------------------
+# Turnover export view
+# ---------------------------
+if st.session_state["active_view"] == "turnover_export":
+    st.header("📥 Выгрузка оборотов")
+    st.caption("Сводная выгрузка дневного оборота по нескольким акциям или облигациям в Excel/CSV.")
+    with st.form("turnover_export_form"):
+        market_kind = st.selectbox("Тип рынка", options=["shares", "bonds"], format_func=lambda x: "Акции" if x == "shares" else "Облигации", key="turnover_export_kind")
+        identifiers_text = st.text_area("SECID или ISIN (по одному в строке)", value=st.session_state.get("turnover_export_identifiers", "SBER\nGAZP"), height=130, key="turnover_export_identifiers_input")
+        c_from, c_to = st.columns(2)
+        with c_from:
+            date_from = st.date_input("Дата начала", value=(datetime.now().date() - timedelta(days=30)), key="turnover_export_from")
+        with c_to:
+            date_to = st.date_input("Дата окончания", value=(datetime.now().date() - timedelta(days=1)), key="turnover_export_to")
+        include_ndm = st.checkbox("Включать NDM/SPEQ в разрезе категорий", value=True, key="turnover_export_include_special")
+        run_export = st.form_submit_button("Сформировать выгрузку", use_container_width=True)
+    if run_export:
+        identifiers = list(dict.fromkeys(x.strip().upper() for x in re.split(r"[\s,;]+", identifiers_text) if x.strip()))
+        if not identifiers:
+            st.warning("Введите хотя бы один SECID или ISIN.")
+        elif date_from > date_to:
+            st.error("Дата начала не может быть позже даты окончания.")
+        elif len(identifiers) > 30:
+            st.error("За один запуск можно обработать не более 30 инструментов.")
+        else:
+            all_frames = []
+            errors = []
+            progress = st.progress(0.0)
+            with st.spinner("Загружаем обороты по инструментам..."):
+                for idx, identifier in enumerate(identifiers, start=1):
+                    try:
+                        profile = resolve_market_security_profile(identifier, market_kind)
+                        daily_df, _totals = load_turnover_components_via_iss(
+                            profile["secid"], market_kind, date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d")
+                        )
+                        if daily_df.empty:
+                            errors.append(f"{identifier}: нет данных за период")
+                        else:
+                            daily_df = daily_df.copy()
+                            daily_df.insert(1, "INPUT", identifier)
+                            if not include_ndm:
+                                daily_df = daily_df.drop(columns=["SPEQ", "NDM"], errors="ignore")
+                            all_frames.append(daily_df)
+                    except Exception as exc:
+                        errors.append(f"{identifier}: {exc}")
+                    progress.progress(idx / len(identifiers))
+            if all_frames:
+                export_df = pd.concat(all_frames, ignore_index=True)
+                st.success(f"Подготовлено строк: {len(export_df)}; инструментов с данными: {len(all_frames)}.")
+                st.dataframe(export_df, use_container_width=True)
+                st.download_button("Скачать Excel", data=ss.dataframe_to_excel_bytes(export_df, sheet_name="turnover"), file_name="turnover_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="turnover_export_xlsx")
+                st.download_button("Скачать CSV", data=export_df.to_csv(index=False).encode("utf-8-sig"), file_name="turnover_export.csv", mime="text/csv", key="turnover_export_csv")
+            if errors:
+                st.warning("Часть инструментов не удалось обработать:")
+                for error in errors:
+                    st.write(f"- {error}")
+    st.stop()
+
+
 # ---------------------------
 # Portfolio view
 # ---------------------------
