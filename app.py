@@ -23,7 +23,7 @@ from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
-from sell_stress_ui.data import ALL_STOCK_INDEX_CODES, fetch_index_membership_by_isin
+from sell_stress_ui.data import fetch_index_membership_for_tickers
 from sell_stress_ui.reporting import build_share_batch_html_report
 from email_compose import render_email_compose_section
 from news.fetcher import NewsFetcher, fetch_tradingview_news
@@ -3390,7 +3390,7 @@ if st.session_state["active_view"] == "moex_turnover":
         with c_to:
             date_to = st.date_input("Дата окончания", value=(datetime.now().date() - timedelta(days=1)), key="moex_turnover_to")
         group_by_indices = st.checkbox(
-            "Показывать группировку по рыночным индексам (только акции)",
+            "Группировать акции по индексам IMOEX, MOEXBMI и MOEXBC",
             value=(market_kind == "shares"),
             disabled=(market_kind != "shares"),
             key="moex_turnover_group_indices",
@@ -3486,9 +3486,12 @@ if st.session_state["active_view"] == "moex_turnover":
                 st.dataframe(totals_by_security, use_container_width=True, hide_index=True)
 
                 if group_by_indices and market_kind == "shares":
-                    st.markdown("### Группировка по рыночным индексам")
+                    st.markdown("### Группировка по индексам IMOEX / MOEXBMI / MOEXBC")
                     try:
-                        membership = fetch_index_membership_by_isin(tuple(ALL_STOCK_INDEX_CODES))
+                        # Query only the three requested indices and only match loaded securities.
+                        index_codes = ("IMOEX", "MOEXBMI", "MOEXBC")
+                        tickers = tuple(sorted(details["SECID"].astype(str).str.upper().unique()))
+                        membership = fetch_index_membership_for_tickers(index_codes, tickers)
                         if membership.empty or "ISIN" not in membership.columns:
                             st.info("Составы индексов сейчас недоступны; отображается обычный портфель без группировки.")
                         else:
@@ -3498,11 +3501,14 @@ if st.session_state["active_view"] == "moex_turnover":
                                 membership["Indices"] = ""
                             membership["Indices"] = membership["Indices"].fillna("").astype(str)
                             isin_to_indices = dict(zip(membership["ISIN"], membership["Indices"]))
+                            ticker_to_indices = dict(zip(membership["Ticker"], membership["Indices"]))
                             index_rows = []
                             membership_rows = []
                             for _, row in details.iterrows():
                                 isin_value = str(row.get("ISIN", "") or "").upper().strip()
-                                memberships = [x.strip() for x in isin_to_indices.get(isin_value, "").split(";") if x.strip()]
+                                ticker_value = str(row.get("SECID", "") or "").upper().strip()
+                                indices_value = isin_to_indices.get(isin_value, "") or ticker_to_indices.get(ticker_value, "")
+                                memberships = [x.strip() for x in indices_value.split(";") if x.strip()]
                                 for index_name in memberships:
                                     index_rows.append({
                                         "TRADEDATE": row["TRADEDATE"],
