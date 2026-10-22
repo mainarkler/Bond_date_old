@@ -4930,4 +4930,244 @@ if st.session_state["active_view"] == "moex_news":
 if st.session_state["active_view"] == "index_analytics":
     open_index_analytics_sheet()
     st.stop()
+# ---------------------------
+# REPO duration settings
+# ---------------------------
+st.subheader("⚙️ Настройки длительности РЕПО")
+if "overnight" not in st.session_state:
+    st.session_state["overnight"] = False
+if "extra_days" not in st.session_state:
+    st.session_state["extra_days"] = 2
+
+if st.button("🔄 Очистить форму"):
+    st.session_state["overnight"] = False
+    st.session_state["extra_days"] = 2
+    st.session_state["results"] = None
+    st.session_state["file_loaded"] = False
+    st.session_state["last_file_name"] = None
+    trigger_rerun()
+
+overnight = st.checkbox("Overnight РЕПО", key="overnight")
+extra_days_input = st.number_input(
+    "Дней РЕПО:",
+    min_value=2,
+    max_value=366,
+    step=1,
+    disabled=st.session_state["overnight"],
+    key="extra_days",
+)
+if st.session_state["overnight"]:
+    st.markdown(
+        "<span style='color:gray'>Дополнительные дни отключены при включенном Overnight</span>",
+        unsafe_allow_html=True,
+    )
+days_threshold = 2 if st.session_state["overnight"] else 1 + st.session_state["extra_days"]
+st.write(f"Текущее значение границы выплат: {days_threshold} дн.")
+
+# ---------------------------
+# UI: input tabs
+# ---------------------------
+st.subheader("📤 Загрузка или ввод ISIN")
+tab1, tab2 = st.tabs(["📁 Загрузить файл", "✍️ Ввести вручную"])
+
+with tab1:
+    uploaded_file = st.file_uploader("Загрузите Excel или CSV с колонкой ISIN", type=["xlsx", "xls", "csv"])
+    st.write("Пример шаблона (скачайте и заполните колонку ISIN):")
+    sample_csv = "ISIN\nRU000A0JX0J2\nRU000A0ZZZY1\n"
+    st.download_button("Скачать шаблон CSV", data=sample_csv, file_name="template_isin.csv", mime="text/csv")
+
+with tab2:
+    isin_input = st.text_area("Введите или вставьте ISIN (через Ctrl+V, пробел или запятую)", height=150)
+    if st.button("🔍 Получить данные по введённым ISIN"):
+        raw_text = isin_input.strip()
+        if raw_text:
+            isins = re.split(r"[\s,;]+", raw_text)
+            isins = [i.strip().upper() for i in isins if i.strip()]
+            invalid_format = [i for i in isins if not isin_format_valid(i)]
+            invalid_checksum = [i for i in isins if isin_format_valid(i) and not isin_checksum_valid(i)]
+            if invalid_format:
+                st.warning(
+                    f"Некорректные по формату ISIN будут пропущены: {', '.join(invalid_format[:10])}"
+                    f"{'...' if len(invalid_format) > 10 else ''}"
+                )
+            if invalid_checksum:
+                st.info(
+                    f"ISIN с неверной контрольной суммой (будут пропущены): {', '.join(invalid_checksum[:10])}"
+                    f"{'...' if len(invalid_checksum) > 10 else ''}"
+                )
+            isins = [i for i in isins if isin_format_valid(i) and isin_checksum_valid(i)]
+            if not isins:
+                st.error("Нет валидных ISIN для обработки.")
+            else:
+                with st.spinner("Запрос данных..."):
+                    results = fetch_isins(isins, show_progress=True)
+                st.session_state["results"] = pd.DataFrame(results)
+                st.success("✅ Данные успешно получены!")
+
+# ---------------------------
+# File upload handling
+# ---------------------------
+if uploaded_file:
+    if not st.session_state["file_loaded"] or uploaded_file.name != st.session_state["last_file_name"]:
+        st.session_state["file_loaded"] = True
+        st.session_state["last_file_name"] = uploaded_file.name
+
+        df = safe_read_filelike(uploaded_file)
+        if df.empty:
+            st.error("❌ Не удалось прочитать файл или файл пуст.")
+            st.stop()
+        df.columns = [c.strip().upper() for c in df.columns]
+
+        if "ISIN" not in df.columns:
+            candidates = []
+            for c in df.columns:
+                try:
+                    if df[c].dropna().astype(str).str.match(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$").any():
+                        candidates.append(c)
+                except Exception:
+                    continue
+            if len(candidates) == 1:
+                df.rename(columns={candidates[0]: "ISIN"}, inplace=True)
+                st.info(f"Авто-детект: колонка '{candidates[0]}' использована как ISIN")
+            else:
+                st.error("❌ В файле должна быть колонка 'ISIN' или одна колонка с ISIN-подобными значениями.")
+                st.stop()
+
+        isins = df["ISIN"].dropna().unique().tolist()
+        isins = [str(x).strip().upper() for x in isins if str(x).strip()]
+        invalid_fmt = [i for i in isins if not isin_format_valid(i)]
+        invalid_chk = [i for i in isins if isin_format_valid(i) and not isin_checksum_valid(i)]
+        if invalid_fmt:
+            st.warning(
+                f"Некорректные по формату ISIN пропущены: {', '.join(invalid_fmt[:10])}"
+                f"{'...' if len(invalid_fmt) > 10 else ''}"
+            )
+        if invalid_chk:
+            st.info(
+                f"ISIN с неверной контрольной суммой пропущены: {', '.join(invalid_chk[:10])}"
+                f"{'...' if len(invalid_chk) > 10 else ''}"
+            )
+        isins = [i for i in isins if isin_format_valid(i) and isin_checksum_valid(i)]
+
+        st.write(f"Найдено {len(isins)} валидных уникальных ISIN для обработки.")
+        if isins:
+            with st.spinner("Запрос данных по файлу..."):
+                results = fetch_isins(isins, show_progress=True)
+            st.session_state["results"] = pd.DataFrame(results)
+            st.success("✅ Данные успешно получены из файла!")
+
+# ---------------------------
+# Load emitter reference (optional)
+# ---------------------------
+@st.cache_data(ttl=3600)
+def fetch_emitter_names():
+    url = "https://raw.githubusercontent.com/mainarkler/Bond_date/refs/heads/main/Pifagr_name_with_emitter.csv"
+    try:
+        df_emitters = pd.read_csv(url, dtype=str)
+        df_emitters.columns = [c.strip() for c in df_emitters.columns]
+        return df_emitters
+    except Exception:
+        return pd.DataFrame(columns=["Issuer", "EMITTER_ID"])
+
+
+df_emitters = fetch_emitter_names()
+
+# ---------------------------
+# Styling helper
+# ---------------------------
+def style_df(row):
+    if pd.isna(row.get("Наименование инструмента")) or row.get("Наименование инструмента") in [None, "", "None"]:
+        return ["background-color: DimGray; color: white"] * len(row)
+    today = datetime.today().date()
+    danger_threshold = today + timedelta(days=days_threshold)
+    key_dates = ["Дата погашения", "Дата оферты Put", "Дата оферты Call", "Дата фиксации купона", "Дата купона"]
+    colors = ["" for _ in row]
+    for i, col in enumerate(row.index):
+        if col in key_dates and pd.notnull(row[col]):
+            try:
+                d = pd.to_datetime(row[col]).date()
+                if d <= danger_threshold:
+                    colors[i] = "background-color: Chocolate"
+            except Exception:
+                pass
+    if any(c == "background-color: Chocolate" for c in colors):
+        colors = ["background-color: SandyBrown" if c == "" else c for c in colors]
+    return colors
+
+# ---------------------------
+# Show results (table + export) with filter for orange-highlighted rows
+# ---------------------------
+if st.session_state["results"] is not None:
+    df_res = st.session_state["results"].copy()
+
+    if "Код эмитента" in df_res.columns and not df_emitters.empty:
+        try:
+            df_res = df_res.merge(df_emitters, how="left", left_on="Код эмитента", right_on="EMITTER_ID")
+            df_res["Эмитент"] = df_res.get("Issuer")
+            df_res.drop(columns=["Issuer", "EMITTER_ID"], inplace=True, errors="ignore")
+            cols = df_res.columns.tolist()
+            if "Эмитент" in cols and "Код эмитента" in cols:
+                cols.remove("Эмитент")
+                idx = cols.index("Код эмитента")
+                cols.insert(idx + 1, "Эмитент")
+                df_res = df_res[cols]
+            st.session_state["results"] = df_res
+        except Exception:
+            pass
+    else:
+        st.warning("⚠️ В данных нет колонки 'Код эмитента' — объединение со справочником пропущено.")
+
+    st.markdown(f"**Всего записей:** {len(df_res)}")
+
+    today = datetime.today().date()
+    danger_threshold = today + timedelta(days=days_threshold)
+    key_dates = ["Дата погашения", "Дата оферты Put", "Дата оферты Call", "Дата фиксации купона", "Дата купона"]
+
+    mask_any = pd.Series(False, index=df_res.index)
+    for col in key_dates:
+        if col in df_res.columns:
+            try:
+                s = pd.to_datetime(df_res[col], errors="coerce").dt.date
+                mask_any = mask_any | (s <= danger_threshold)
+            except Exception:
+                pass
+
+    only_orange = st.checkbox("Показать бумаги с отсечкой в периоде", value=False)
+    if only_orange:
+        df_show = df_res[mask_any].copy()
+        st.markdown(f"**Показано записей с отсечкой:** {len(df_show)}")
+        if df_show.empty:
+            st.info("Нет бумаг, попадающих под критерий (отсечки).")
+    else:
+        df_show = df_res
+
+    st.dataframe(df_show.style.apply(style_df, axis=1), use_container_width=True)
+
+    def to_excel_bytes(df: pd.DataFrame):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Данные")
+        return output.getvalue()
+
+    def to_csv_bytes(df: pd.DataFrame):
+        return df.to_csv(index=False).encode("utf-8-sig")
+
+
+    repo_xlsx = to_excel_bytes(df_show)
+    st.download_button(
+        label="💾 Скачать результат (Excel)",
+        data=repo_xlsx,
+        file_name="bond_data.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.download_button(
+        label="💾 Скачать результат (CSV)",
+        data=to_csv_bytes(df_show),
+        file_name="bond_data.csv",
+        mime="text/csv",
+    )
+
+    render_email_compose_section("Отчёт по облигациям", "repo_report", "bond_data.xlsx", repo_xlsx)
+else:
+    st.info("👆 Загрузите файл или введите ISIN-ы вручную.")
 
