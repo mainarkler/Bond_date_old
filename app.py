@@ -3489,7 +3489,7 @@ if st.session_state["active_view"] == "moex_turnover":
                             index_rows = []
                             for _, row in details.iterrows():
                                 isin_value = str(row.get("ISIN", "") or "").upper().strip()
-                                memberships = [x.strip() for x in isin_to_indices.get(isin_value, "").split(",") if x.strip()]
+                                memberships = [x.strip() for x in isin_to_indices.get(isin_value, "").split(";") if x.strip()]
                                 for index_name in memberships:
                                     index_rows.append({
                                         "TRADEDATE": row["TRADEDATE"],
@@ -3618,7 +3618,7 @@ if st.session_state["active_view"] == "turnover_export":
                         st.dataframe(stats_df, use_container_width=True, hide_index=True)
                         st.download_button(
                             "Скачать статистику ликвидности (Excel)",
-                            data=ss.dataframe_to_excel_bytes(stats_df, sheet_name="ADTV_MDT V".replace(" ", "")),
+                            data=ss.dataframe_to_excel_bytes(stats_df, sheet_name="ADTV_MDTV"),
                             file_name="turnover_adtv_mdtv.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key="turnover_export_stats_xlsx",
