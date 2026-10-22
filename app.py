@@ -3391,7 +3391,7 @@ if st.session_state["active_view"] == "moex_turnover":
             date_to = st.date_input("Дата окончания", value=(datetime.now().date() - timedelta(days=1)), key="moex_turnover_to")
         group_by_indices = st.checkbox(
             "Показывать группировку по рыночным индексам (только акции)",
-            value=False,
+            value=(market_kind == "shares"),
             disabled=(market_kind != "shares"),
             key="moex_turnover_group_indices",
         )
@@ -3441,6 +3441,10 @@ if st.session_state["active_view"] == "moex_turnover":
             if all_frames:
                 details = pd.concat(all_frames, ignore_index=True)
                 details = details.drop_duplicates(subset=["SECID", "TRADEDATE"])
+                index_daily = pd.DataFrame(columns=["TRADEDATE", "Индекс", "Оборот, ₽"])
+                index_pivot = pd.DataFrame()
+                index_summary = pd.DataFrame(columns=["Индекс", "Оборот, ₽"])
+                index_membership_detail = pd.DataFrame(columns=["SECID", "ISIN", "Индекс"])
                 details["SECID"] = details["SECID"].astype(str).str.upper()
                 details["Оборот, ₽"] = details[["REGULAR", "SPEQ", "NDM"]].sum(axis=1)
                 portfolio_daily = (
@@ -3487,6 +3491,7 @@ if st.session_state["active_view"] == "moex_turnover":
                             membership["Indices"] = membership.get("Indices", "").fillna("").astype(str)
                             isin_to_indices = dict(zip(membership["ISIN"], membership["Indices"]))
                             index_rows = []
+                            membership_rows = []
                             for _, row in details.iterrows():
                                 isin_value = str(row.get("ISIN", "") or "").upper().strip()
                                 memberships = [x.strip() for x in isin_to_indices.get(isin_value, "").split(";") if x.strip()]
@@ -3497,20 +3502,34 @@ if st.session_state["active_view"] == "moex_turnover":
                                         "Оборот, ₽": float(row["Оборот, ₽"]),
                                         "SECID": row["SECID"],
                                     })
-                            if index_rows:
-                                index_daily = pd.DataFrame(index_rows).groupby(
-                                    ["TRADEDATE", "Индекс"], as_index=False
-                                )["Оборот, ₽"].sum()
-                                index_pivot = index_daily.pivot(
-                                    index="TRADEDATE", columns="Индекс", values="Оборот, ₽"
-                                ).fillna(0.0).sort_index()
-                                st.caption("Инструмент, входящий в несколько индексов, учитывается в обороте каждого соответствующего индекса; суммы по индексам поэтому не являются аддитивными.")
-                                st.line_chart(index_pivot, use_container_width=True)
+                                    membership_rows.append({
+                                        "SECID": row["SECID"],
+                                        "ISIN": isin_value,
+                                        "Название": row.get("SHORTNAME", ""),
+                                        "Индекс": index_name,
+                                    })
+                            if membership_rows:
+                                index_membership_detail = pd.DataFrame(membership_rows).drop_duplicates()
+                                st.markdown("#### Состав выбранного портфеля по индексам")
                                 st.dataframe(
-                                    index_daily.groupby("Индекс", as_index=False)["Оборот, ₽"].sum().sort_values("Оборот, ₽", ascending=False),
+                                    index_membership_detail.sort_values(["Индекс", "SECID"]),
                                     use_container_width=True,
                                     hide_index=True,
                                 )
+                            if index_rows:
+                                index_daily = pd.DataFrame(index_rows).groupby(
+                                    ["TRADEDATE", "Индекс"], as_index=False
+                                )["Оборот, ₽"].sum().sort_values(["TRADEDATE", "Индекс"])
+                                index_pivot = index_daily.pivot(
+                                    index="TRADEDATE", columns="Индекс", values="Оборот, ₽"
+                                ).fillna(0.0).sort_index()
+                                index_summary = index_daily.groupby(
+                                    "Индекс", as_index=False
+                                )["Оборот, ₽"].sum().sort_values("Оборот, ₽", ascending=False)
+                                st.caption("Инструмент, входящий в несколько индексов, учитывается в обороте каждого соответствующего индекса; суммы по индексам поэтому не являются аддитивными.")
+                                st.markdown("#### Динамика оборотов по индексам")
+                                st.line_chart(index_pivot, use_container_width=True)
+                                st.dataframe(index_summary, use_container_width=True, hide_index=True)
                             else:
                                 st.info("Ни один из загруженных инструментов не сопоставлен с индексами акций.")
                     except Exception as exc:
@@ -3521,15 +3540,98 @@ if st.session_state["active_view"] == "moex_turnover":
                 st.markdown("### Дневная детализация")
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
                 safe_ids = "_".join(details["SECID"].drop_duplicates().tolist()[:8])
+                # Multi-sheet workbook: data tables plus an Excel dashboard with native charts.
+                dashboard_metrics = pd.DataFrame([
+                    {"Показатель": "Период с", "Значение": date_from.strftime("%Y-%m-%d")},
+                    {"Показатель": "Период по", "Значение": date_to.strftime("%Y-%m-%d")},
+                    {"Показатель": "Тип рынка", "Значение": "Акции" if market_kind == "shares" else "Облигации"},
+                    {"Показатель": "Инструментов с данными", "Значение": int(details["SECID"].nunique())},
+                    {"Показатель": "Торговых дней", "Значение": traded_days},
+                    {"Показатель": "Совокупный оборот, ₽", "Значение": total_turnover},
+                ])
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    dashboard_metrics.to_excel(writer, sheet_name="Дашборд", index=False, startrow=0)
+                    portfolio_export = portfolio_daily.copy()
+                    portfolio_export["TRADEDATE"] = pd.to_datetime(portfolio_export["TRADEDATE"]).dt.tz_localize(None)
+                    portfolio_export.to_excel(writer, sheet_name="Оборот портфеля", index=False)
+                    individual_export = individual.copy()
+                    individual_export.index.name = "TRADEDATE"
+                    individual_export.reset_index().to_excel(writer, sheet_name="По инструментам", index=False)
+                    totals_by_security.to_excel(writer, sheet_name="Сводка инструментов", index=False)
+                    display_df.to_excel(writer, sheet_name="Исходные данные", index=False)
+                    if not index_daily.empty:
+                        index_daily.to_excel(writer, sheet_name="Оборот по индексам", index=False)
+                    if not index_pivot.empty:
+                        index_pivot_export = index_pivot.copy()
+                        index_pivot_export.index.name = "TRADEDATE"
+                        index_pivot_export.reset_index().to_excel(writer, sheet_name="Индексы по дням", index=False)
+                    if not index_summary.empty:
+                        index_summary.to_excel(writer, sheet_name="Сводка индексов", index=False)
+                    if not index_membership_detail.empty:
+                        index_membership_detail.to_excel(writer, sheet_name="Состав по индексам", index=False)
+
+                    from openpyxl.chart import LineChart, Reference
+                    dashboard_ws = writer.book["Дашборд"]
+                    dashboard_ws.freeze_panes = "A2"
+                    dashboard_ws.column_dimensions["A"].width = 30
+                    dashboard_ws.column_dimensions["B"].width = 24
+
+                    portfolio_ws = writer.book["Оборот портфеля"]
+                    if portfolio_ws.max_row > 1:
+                        chart = LineChart()
+                        chart.title = "Совокупный дневной оборот портфеля"
+                        chart.y_axis.title = "Оборот, ₽"
+                        chart.x_axis.title = "Дата"
+                        chart.height, chart.width = 8, 16
+                        chart.add_data(Reference(portfolio_ws, min_col=2, min_row=1, max_row=portfolio_ws.max_row), titles_from_data=True)
+                        chart.set_categories(Reference(portfolio_ws, min_col=1, min_row=2, max_row=portfolio_ws.max_row))
+                        dashboard_ws.add_chart(chart, "A9")
+
+                    instruments_ws = writer.book["По инструментам"]
+                    if instruments_ws.max_row > 1 and instruments_ws.max_column > 1:
+                        chart = LineChart()
+                        chart.title = "Дневной оборот по инструментам"
+                        chart.y_axis.title = "Оборот, ₽"
+                        chart.x_axis.title = "Дата"
+                        chart.height, chart.width = 8, 16
+                        chart.add_data(Reference(instruments_ws, min_col=2, max_col=min(instruments_ws.max_column, 16), min_row=1, max_row=instruments_ws.max_row), titles_from_data=True)
+                        chart.set_categories(Reference(instruments_ws, min_col=1, min_row=2, max_row=instruments_ws.max_row))
+                        dashboard_ws.add_chart(chart, "A25")
+
+                    if "Индексы по дням" in writer.book.sheetnames:
+                        index_ws = writer.book["Индексы по дням"]
+                        if index_ws.max_row > 1 and index_ws.max_column > 1:
+                            chart = LineChart()
+                            chart.title = "Дневной оборот по рыночным индексам"
+                            chart.y_axis.title = "Оборот, ₽"
+                            chart.x_axis.title = "Дата"
+                            chart.height, chart.width = 8, 16
+                            chart.add_data(Reference(index_ws, min_col=2, max_col=min(index_ws.max_column, 16), min_row=1, max_row=index_ws.max_row), titles_from_data=True)
+                            chart.set_categories(Reference(index_ws, min_col=1, min_row=2, max_row=index_ws.max_row))
+                            dashboard_ws.add_chart(chart, "A41")
+
+                    if "Сводка индексов" in writer.book.sheetnames:
+                        summary_ws = writer.book["Сводка индексов"]
+                        if summary_ws.max_row > 1:
+                            from openpyxl.chart import BarChart
+                            chart2 = BarChart()
+                            chart2.title = "Совокупный оборот по индексам за период"
+                            chart2.y_axis.title = "Оборот, ₽"
+                            chart2.height, chart2.width = 8, 16
+                            chart2.add_data(Reference(summary_ws, min_col=2, min_row=1, max_row=summary_ws.max_row), titles_from_data=True)
+                            chart2.set_categories(Reference(summary_ws, min_col=1, min_row=2, max_row=summary_ws.max_row))
+                            dashboard_ws.add_chart(chart2, "J41")
+
                 st.download_button(
-                    "Скачать Excel",
-                    data=ss.dataframe_to_excel_bytes(display_df, sheet_name="moex_turnover"),
-                    file_name=f"moex_turnover_{safe_ids}.xlsx",
+                    "📊 Скачать Excel-дашборд и все данные",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"moex_turnover_dashboard_{safe_ids}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="moex_turnover_xlsx",
                 )
                 st.download_button(
-                    "Скачать CSV",
+                    "Скачать дневную детализацию (CSV)",
                     data=display_df.to_csv(index=False).encode("utf-8-sig"),
                     file_name=f"moex_turnover_{safe_ids}.csv",
                     mime="text/csv",
