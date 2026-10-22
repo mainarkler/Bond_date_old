@@ -3391,7 +3391,7 @@ if st.session_state["active_view"] == "moex_turnover":
             date_to = st.date_input("Дата окончания", value=(datetime.now().date() - timedelta(days=1)), key="moex_turnover_to")
         group_by_indices = st.checkbox(
             "Показывать группировку по рыночным индексам (только акции)",
-            value=False,
+            value=(market_kind == "shares"),
             disabled=(market_kind != "shares"),
             key="moex_turnover_group_indices",
         )
@@ -3562,6 +3562,10 @@ if st.session_state["active_view"] == "moex_turnover":
                     display_df.to_excel(writer, sheet_name="Исходные данные", index=False)
                     if not index_daily.empty:
                         index_daily.to_excel(writer, sheet_name="Оборот по индексам", index=False)
+                    if not index_pivot.empty:
+                        index_pivot_export = index_pivot.copy()
+                        index_pivot_export.index.name = "TRADEDATE"
+                        index_pivot_export.reset_index().to_excel(writer, sheet_name="Индексы по дням", index=False)
                     if not index_summary.empty:
                         index_summary.to_excel(writer, sheet_name="Сводка индексов", index=False)
                     if not index_membership_detail.empty:
