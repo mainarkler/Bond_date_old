@@ -3595,26 +3595,29 @@ if st.session_state["active_view"] == "moex_turnover":
                         chart.set_categories(Reference(instruments_ws, min_col=1, min_row=2, max_row=instruments_ws.max_row))
                         dashboard_ws.add_chart(chart, "A25")
 
-                    if "Оборот по индексам" in writer.book.sheetnames:
-                        index_ws = writer.book["Оборот по индексам"]
-                        if index_ws.max_row > 1:
+                    if "Индексы по дням" in writer.book.sheetnames:
+                        index_ws = writer.book["Индексы по дням"]
+                        if index_ws.max_row > 1 and index_ws.max_column > 1:
                             chart = LineChart()
                             chart.title = "Дневной оборот по рыночным индексам"
                             chart.y_axis.title = "Оборот, ₽"
                             chart.x_axis.title = "Дата"
                             chart.height, chart.width = 8, 16
-                            chart.add_data(Reference(index_ws, min_col=3, min_row=1, max_row=index_ws.max_row), titles_from_data=True)
+                            chart.add_data(Reference(index_ws, min_col=2, max_col=min(index_ws.max_column, 16), min_row=1, max_row=index_ws.max_row), titles_from_data=True)
                             chart.set_categories(Reference(index_ws, min_col=1, min_row=2, max_row=index_ws.max_row))
-                            # index daily rows are long-form; the chart uses the daily index total table below instead.
-                            if "Сводка индексов" in writer.book.sheetnames:
-                                summary_ws = writer.book["Сводка индексов"]
-                                chart2 = LineChart()
-                                chart2.title = "Совокупный оборот по индексам за период"
-                                chart2.y_axis.title = "Оборот, ₽"
-                                chart2.height, chart2.width = 8, 16
-                                chart2.add_data(Reference(summary_ws, min_col=2, min_row=1, max_row=summary_ws.max_row), titles_from_data=True)
-                                chart2.set_categories(Reference(summary_ws, min_col=1, min_row=2, max_row=summary_ws.max_row))
-                                dashboard_ws.add_chart(chart2, "A41")
+                            dashboard_ws.add_chart(chart, "A41")
+
+                    if "Сводка индексов" in writer.book.sheetnames:
+                        summary_ws = writer.book["Сводка индексов"]
+                        if summary_ws.max_row > 1:
+                            from openpyxl.chart import BarChart
+                            chart2 = BarChart()
+                            chart2.title = "Совокупный оборот по индексам за период"
+                            chart2.y_axis.title = "Оборот, ₽"
+                            chart2.height, chart2.width = 8, 16
+                            chart2.add_data(Reference(summary_ws, min_col=2, min_row=1, max_row=summary_ws.max_row), titles_from_data=True)
+                            chart2.set_categories(Reference(summary_ws, min_col=1, min_row=2, max_row=summary_ws.max_row))
+                            dashboard_ws.add_chart(chart2, "J41")
 
                 st.download_button(
                     "📊 Скачать Excel-дашборд и все данные",
