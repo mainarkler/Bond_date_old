@@ -258,7 +258,12 @@ class MoexTurnoverClient:
 
         combined_df["TOTAL_TRADES"] = combined_df[["REGULAR", "SPEQ", "NDM"]].sum(axis=1)
         combined_df.insert(0, "SECID", secid)
-        return combined_df[["SECID", "TRADEDATE", "HISTORY_VALUE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]]
+        result = combined_df[["SECID", "TRADEDATE", "HISTORY_VALUE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]]
+        if result.empty:
+            return result
+        result["TRADEDATE"] = pd.to_datetime(result["TRADEDATE"], errors="coerce")
+        result = result.dropna(subset=["TRADEDATE"]).sort_values("TRADEDATE").reset_index(drop=True)
+        return result
 
     def get_turnover(
         self, secid: str, start_date: str, end_date: str | None = None, market_kind: str = "shares"
