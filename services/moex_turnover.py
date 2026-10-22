@@ -20,7 +20,22 @@ class MoexTurnoverClient:
         self.timeout = timeout
         self.limit = limit
         self.session = requests.Session()
-        self.session.trust_env = False
+        # Respect deployment proxy/certificate environment variables and retry
+        # transient MOEX ISS failures instead of silently returning empty data.
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=0.6,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET"]),
+            respect_retry_after_header=True,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update(
             {
                 "User-Agent": "python-requests/iss-moex-script",
@@ -29,8 +44,11 @@ class MoexTurnoverClient:
         )
 
     def _get_json(self, url: str, params: dict | None = None) -> dict:
-        response = self.session.get(url, params=params, timeout=self.timeout)
-        response.raise_for_status()
+        try:
+            response = self.session.get(url, params=params, timeout=self.timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Ошибка запроса к MOEX ISS ({url}): {exc}") from exc
         try:
             return response.json()
         except json.JSONDecodeError as exc:
@@ -45,21 +63,39 @@ class MoexTurnoverClient:
         """Get traded boards with markets for categories: regular, SPEQ, NDM."""
         url = f"{BASE_URL}/securities/{secid}/boards.json"
         payload = self._get_json(url, params={"iss.meta": "off"})
-        df = pd.DataFrame(payload["boards"]["data"], columns=payload["boards"]["columns"])
-        df = df[df["is_traded"] == 1].copy()
+        board_payload = payload.get("boards", {})
+        columns = board_payload.get("columns", []) or []
+        rows = board_payload.get("data", []) or []
+        if not rows or not columns:
+            raise RuntimeError(f"MOEX ISS не вернул список торговых режимов для {secid}")
+        df = pd.DataFrame(rows, columns=columns)
+        required = {"market", "boardid"}
+        if not required.issubset(df.columns):
+            raise RuntimeError(
+                f"Неожиданная схема ответа MOEX boards для {secid}: "
+                f"нет колонок {', '.join(sorted(required - set(df.columns)))}"
+            )
+        if "is_traded" in df.columns:
+            traded = pd.to_numeric(df["is_traded"], errors="coerce").fillna(0)
+            df = df[traded > 0].copy()
+        if df.empty:
+            raise RuntimeError(f"Для {secid} MOEX не вернул действующие торговые режимы")
 
-        regular = [
-            (str(row.market), str(row.boardid))
-            for row in df[(df["market"] == market_kind) & (df["boardid"] != "SPEQ")].itertuples()
-        ]
-        speq = [
-            (str(row.market), str(row.boardid))
-            for row in df[df["boardid"] == "SPEQ"].itertuples()
-        ]
-        ndm = [
-            (str(row.market), str(row.boardid))
-            for row in df[df["market"].astype(str).str.contains("ndm", case=False, na=False)].itertuples()
-        ]
+        market_values = df["market"].astype(str).str.lower()
+        board_values = df["boardid"].astype(str).str.upper()
+        regular_mask = (market_values == market_kind.lower()) & (board_values != "SPEQ") & ~market_values.str.contains("ndm")
+        regular = [(str(row.market), str(row.boardid)) for row in df[regular_mask].itertuples()]
+        speq = [(str(row.market), str(row.boardid)) for row in df[board_values == "SPEQ"].itertuples()]
+        ndm = [(str(row.market), str(row.boardid)) for row in df[market_values.str.contains("ndm")].itertuples()]
+
+        # Some securities expose only a main board. Keep that route available
+        # when ISS omits is_traded or uses an unexpected market label.
+        if not regular and market_kind.lower() in market_values.values:
+            regular = [
+                (str(row.market), str(row.boardid))
+                for row in df[market_values == market_kind.lower()].itertuples()
+                if str(row.boardid).upper() != "SPEQ"
+            ]
         return regular, speq, ndm
 
     def get_trades_by_day(
@@ -90,10 +126,13 @@ class MoexTurnoverClient:
                 params["till"] = end_date
 
             payload = self._get_json(url, params=params)
-            data = payload.get("history", {}).get("data", [])
-            columns = payload.get("history", {}).get("columns", [])
+            history = payload.get("history", {})
+            data = history.get("data", []) or []
+            columns = history.get("columns", []) or []
             if not data:
                 break
+            if not columns:
+                raise RuntimeError(f"MOEX ISS вернул строки истории без схемы для {secid}")
 
             df = pd.DataFrame(data, columns=columns)
             if "TRADEDATE" not in df.columns or "VALUE" not in df.columns:
@@ -219,7 +258,12 @@ class MoexTurnoverClient:
 
         combined_df["TOTAL_TRADES"] = combined_df[["REGULAR", "SPEQ", "NDM"]].sum(axis=1)
         combined_df.insert(0, "SECID", secid)
-        return combined_df[["SECID", "TRADEDATE", "HISTORY_VALUE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]]
+        result = combined_df[["SECID", "TRADEDATE", "HISTORY_VALUE", "REGULAR", "SPEQ", "NDM", "TOTAL_TRADES"]]
+        if result.empty:
+            return result
+        result["TRADEDATE"] = pd.to_datetime(result["TRADEDATE"], errors="coerce")
+        result = result.dropna(subset=["TRADEDATE"]).sort_values("TRADEDATE").reset_index(drop=True)
+        return result
 
     def get_turnover(
         self, secid: str, start_date: str, end_date: str | None = None, market_kind: str = "shares"
