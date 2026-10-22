@@ -4744,3 +4744,190 @@ if st.session_state["active_view"] == "sell_stres":
                     download_payload["meta_xlsx"] = ss.dataframe_to_excel_bytes(meta_df, sheet_name="meta")
                     if show_tables:
                         st.session_state["sell_stres_bond_meta_table"] = meta_df
+                    else:
+                        st.session_state["sell_stres_bond_meta_table"] = None
+                else:
+                    st.session_state["sell_stres_bond_meta_table"] = None
+
+                st.session_state["sell_stres_bond_downloads"] = download_payload if download_payload else None
+
+        if st.session_state.get("sell_stres_bond_show_tables") and st.session_state.get(
+            "sell_stres_bond_table_results"
+        ):
+            st.markdown("#### Результаты ΔP (Bond)")
+            for isin, df_delta in st.session_state["sell_stres_bond_table_results"].items():
+                st.markdown(f"**{isin}**")
+                st.dataframe(df_delta, use_container_width=True)
+
+        bond_meta_table = st.session_state.get("sell_stres_bond_meta_table")
+        if bond_meta_table is not None:
+            st.markdown("#### Meta_mod (Bond)")
+            st.dataframe(bond_meta_table, use_container_width=True)
+
+        bond_downloads = st.session_state.get("sell_stres_bond_downloads")
+        if bond_downloads:
+            if "delta_csv" in bond_downloads:
+                st.download_button(
+                    label="💾 Скачать общий ΔP CSV (Bond)",
+                    data=bond_downloads["delta_csv"],
+                    file_name="sell_stres_bond_deltaP_all.csv",
+                    mime="text/csv",
+                    key="bond_delta_csv_dl",
+                )
+                st.download_button(
+                    label="💾 Скачать общий ΔP Excel (Bond)",
+                    data=bond_downloads["delta_xlsx"],
+                    file_name="sell_stres_bond_deltaP_all.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="bond_delta_xlsx_dl",
+                )
+            if "meta_csv" in bond_downloads:
+                st.download_button(
+                    label="💾 Скачать общий Meta_mod CSV (Bond)",
+                    data=bond_downloads["meta_csv"],
+                    file_name="sell_stres_bond_meta_all.csv",
+                    mime="text/csv",
+                    key="bond_meta_csv_dl",
+                )
+                st.download_button(
+                    label="💾 Скачать общий Meta_mod Excel (Bond)",
+                    data=bond_downloads["meta_xlsx"],
+                    file_name="sell_stres_bond_meta_all.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="bond_meta_xlsx_dl",
+                )
+            render_email_compose_section("Sell_stres Bond отчёт", "bond_report", "sell_stres_bond_deltaP_all.xlsx", bond_downloads.get("delta_xlsx") if bond_downloads else None)
+
+    st.stop()
+
+@st.cache_data(ttl=900)
+def load_moex_news(limit: int):
+    return get_news(limit=limit)
+
+
+@st.cache_data(ttl=900)
+def load_moex_news_by_date(date_value: str):
+    return get_news_by_date(date_value)
+
+
+@st.cache_data(ttl=900)
+def load_moex_news_by_isin(isin: str, days: int):
+    return get_news_by_isin(isin, days=days)
+
+
+def render_news_items(news_items: list[dict], empty_message: str) -> None:
+    if not news_items:
+        st.info(empty_message)
+        return
+
+    for item in news_items:
+        item_datetime = item.get("datetime")
+        datetime_label = item_datetime.strftime("%Y-%m-%d %H:%M:%S") if item_datetime else f"{item.get('date', '')} {item.get('time', '')}".strip()
+        event_type = item.get("event_type") or "general"
+        emitter = item.get("emitter") or "—"
+        isins = item.get("related_isins") or []
+        isin = ", ".join(isins) if isins else (item.get("isin") or "—")
+        with st.container(border=True):
+            st.markdown(f"**{item.get('title', 'Без заголовка')}**")
+            body = str(item.get("body") or "").strip()
+            if body:
+                st.markdown(body)
+            meta_left, meta_right = st.columns([2, 3])
+            with meta_left:
+                st.caption(f"{datetime_label} · {item.get('source', 'MOEX')}")
+            with meta_right:
+                st.caption(f"ID: {item.get('id', 'n/a')} · event_type: {event_type}")
+            detail_left, detail_right = st.columns(2)
+            detail_left.caption(f"Эмитент: {emitter}")
+            detail_right.caption(f"ISIN: {isin}")
+            source_link = str(item.get("link") or "").strip()
+            if source_link:
+                st.link_button("Открыть источник", source_link)
+
+
+# ---------------------------
+# MOEX news view
+# ---------------------------
+if st.session_state["active_view"] == "moex_news":
+    st.subheader("📰 Новости MOEX")
+    st.markdown("Поиск событий MOEX ISS `/iss/sitenews.json`: для вкладки ISIN поиск связанных новостей идет по всем другим ISIN того же эмитента, найденным через внутренний `emitent/emitter id`, а в карточке новости показывается полный текст, подтянутый через ID новости.")
+
+    latest_col, date_col, isin_col = st.tabs(["Последние", "По дате", "По ISIN"])
+
+    with latest_col:
+        latest_limit = st.number_input(
+            "Количество новостей", min_value=1, max_value=500, value=20, step=10, key="moex_news_limit"
+        )
+        if st.button("Загрузить последние новости", key="moex_news_load_latest"):
+            try:
+                latest_news = load_moex_news(limit=int(latest_limit))
+            except (NewsServiceError, requests.RequestException) as exc:
+                st.error(f"Не удалось загрузить новости MOEX: {exc}")
+            else:
+                st.success(f"Получено новостей: {len(latest_news)}")
+                render_news_items(latest_news, "Нет новостей для отображения.")
+
+    with date_col:
+        selected_news_date = st.date_input(
+            "Дата публикации",
+            value=datetime.now().date(),
+            key="moex_news_date_filter",
+        )
+        if st.button("Найти новости по дате", key="moex_news_load_by_date"):
+            try:
+                date_news = load_moex_news_by_date(selected_news_date.strftime("%Y-%m-%d"))
+            except (ValueError, NewsServiceError, requests.RequestException) as exc:
+                st.error(f"Не удалось получить новости по дате: {exc}")
+            else:
+                st.success(f"Новостей за {selected_news_date:%Y-%m-%d}: {len(date_news)}")
+                render_news_items(date_news, "За выбранную дату новости не найдены.")
+
+    with isin_col:
+        news_isin = st.text_input(
+            "ISIN",
+            value="RU000A1008P1",
+            placeholder="Например, RU000A1008P1",
+            key="moex_news_isin_input",
+        )
+        related_days = st.number_input(
+            "Глубина related_news, дней", min_value=0, max_value=365, value=7, step=1, key="moex_news_days"
+        )
+        if st.button("Найти новости по ISIN", key="moex_news_load_by_isin"):
+            if not news_isin.strip():
+                st.error("Введите ISIN для поиска новостей.")
+            else:
+                try:
+                    isin_result = load_moex_news_by_isin(news_isin.strip().upper(), int(related_days))
+                except (ValueError, NewsServiceError, requests.RequestException) as exc:
+                    st.error(f"Не удалось получить новости по ISIN: {exc}")
+                else:
+                    metric_col1, metric_col2, metric_col3 = st.columns(3)
+                    metric_col1.metric("Target news", len(isin_result.get("target_news", [])))
+                    metric_col2.metric("Related news", len(isin_result.get("related_news", [])))
+                    metric_col3.metric("Other issuer ISINs", len(isin_result.get("other_isins", [])))
+                    emitter_name = isin_result.get("emitter") or "—"
+                    st.caption(f"Эмитент: {emitter_name}")
+                    other_isins = isin_result.get("other_isins", [])
+                    if other_isins:
+                        st.caption("Другие ISIN этого эмитента: " + ", ".join(other_isins))
+                    st.markdown("#### Target news")
+                    render_news_items(
+                        isin_result.get("target_news", []),
+                        f"Новости с явным упоминанием ISIN {isin_result.get('isin', news_isin)} не найдены.",
+                    )
+                    st.markdown("#### Related news")
+                    render_news_items(
+                        isin_result.get("related_news", []),
+                        "Связанные новости эмитента за выбранный период не найдены.",
+                    )
+
+    st.stop()
+
+
+# ---------------------------
+# Index analytics view
+# ---------------------------
+if st.session_state["active_view"] == "index_analytics":
+    open_index_analytics_sheet()
+    st.stop()
+
