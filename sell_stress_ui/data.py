@@ -249,7 +249,7 @@ def fetch_index_membership_for_tickers(
         return pd.DataFrame(columns=columns)
     combined = pd.concat(frames, ignore_index=True).drop_duplicates()
     combined = combined.groupby("symbol", as_index=False).agg(
-        Indices=("index_code", lambda values: ";".join(sorted(set(str(v).upper() for v in values)))
+        Indices=("index_code", lambda values: ";".join(sorted({str(v).upper() for v in values})))
     )
     combined["ISIN"] = ""
     combined["Ticker"] = combined["symbol"].astype(str).str.upper()
