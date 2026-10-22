@@ -215,6 +215,47 @@ def fetch_index_membership_by_isin(
     return universe[["ISIN", "Ticker", "Indices", "RankScore"]].drop_duplicates(subset=["ISIN"])
 
 
+@lru_cache(maxsize=128)
+def fetch_index_membership_for_tickers(
+    index_codes: tuple[str, ...],
+    tickers: tuple[str, ...],
+) -> pd.DataFrame:
+    """Fetch membership only for requested tickers, avoiding metadata lookups for a full universe."""
+    wanted = {str(t).strip().upper() for t in tickers if str(t).strip()}
+    columns = ["ISIN", "Ticker", "Indices"]
+    if not wanted:
+        return pd.DataFrame(columns=columns)
+
+    frames: list[pd.DataFrame] = []
+    as_of_date = datetime.utcnow().strftime("%Y-%m-%d")
+    for code in index_codes:
+        try:
+            snapshot = _analytics_snapshot_with_fallback(code, as_of_date, lookback_days=7)
+        except requests.HTTPError as exc:
+            # A 403 is an access restriction, not a missing trading date; do not
+            # retry the same blocked endpoint over and over.
+            if getattr(exc.response, "status_code", None) == 403:
+                continue
+            continue
+        except Exception:
+            continue
+        if snapshot.empty:
+            continue
+        matched = snapshot[snapshot["symbol"].astype(str).str.upper().isin(wanted)].copy()
+        if not matched.empty:
+            frames.append(matched[["symbol", "index_code"]])
+
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates()
+    combined = combined.groupby("symbol", as_index=False).agg(
+        Indices=("index_code", lambda values: ";".join(sorted({str(v).upper() for v in values})))
+    )
+    combined["ISIN"] = ""
+    combined["Ticker"] = combined["symbol"].astype(str).str.upper()
+    return combined[["ISIN", "Ticker", "Indices"]]
+
+
 def filter_assets(df: pd.DataFrame, index_filter: str, stock_filter: str) -> pd.DataFrame:
     filtered = df.copy()
     if index_filter and index_filter != "ALL":
