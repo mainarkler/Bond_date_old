@@ -9,9 +9,9 @@ from agent.agent import InvestmentNewsAgent
 from news.deduplicator import NewsDeduplicator
 from news.fetcher import NewsFetcher
 from news.models import NewsQuery
-from news.scorer import NewsRelevanceScorer
 from news_agent_config import settings
 from services.cache_backend import HybridCache, make_analysis_cache_key
+from services.news_relevance_scorer import NewsRelevanceScorer
 from services.query_expander import expand_query
 
 logger = logging.getLogger(__name__)
