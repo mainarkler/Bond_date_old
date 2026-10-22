@@ -3427,8 +3427,14 @@ if st.session_state["active_view"] == "moex_turnover":
                             daily = daily.copy()
                             daily["TRADEDATE"] = pd.to_datetime(daily["TRADEDATE"], errors="coerce")
                             daily = daily.dropna(subset=["TRADEDATE"])
+                            # Normalize a possibly partial ISS response without assuming every
+                            # optional column exists (DataFrame.get may otherwise return a scalar).
                             for col in ["REGULAR", "SPEQ", "NDM", "HISTORY_VALUE", "TOTAL_TRADES"]:
-                                daily[col] = pd.to_numeric(daily.get(col, 0.0), errors="coerce").fillna(0.0)
+                                if col not in daily.columns:
+                                    daily[col] = 0.0
+                                daily[col] = pd.to_numeric(daily[col], errors="coerce").fillna(0.0)
+                            if "SECID" not in daily.columns:
+                                daily["SECID"] = profile["secid"]
                             daily["INPUT"] = identifier
                             daily["ISIN"] = profile.get("isin", "")
                             daily["SHORTNAME"] = profile.get("shortname", "") or profile["secid"]
@@ -3488,7 +3494,9 @@ if st.session_state["active_view"] == "moex_turnover":
                         else:
                             membership = membership.copy()
                             membership["ISIN"] = membership["ISIN"].astype(str).str.upper().str.strip()
-                            membership["Indices"] = membership.get("Indices", "").fillna("").astype(str)
+                            if "Indices" not in membership.columns:
+                                membership["Indices"] = ""
+                            membership["Indices"] = membership["Indices"].fillna("").astype(str)
                             isin_to_indices = dict(zip(membership["ISIN"], membership["Indices"]))
                             index_rows = []
                             membership_rows = []
