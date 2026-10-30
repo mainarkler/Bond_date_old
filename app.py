@@ -4562,7 +4562,7 @@ if st.session_state["active_view"] == "sell_stres":
             isin_q_input = st.text_area(
                 "Введите ISIN или Ticker и Q в процентах (каждая строка: ISIN/Ticker | Q)",
                 height=160,
-                placeholder="RU0009029540 | 10\\nSBER | 5",
+                placeholder="RU0009029540 | 10\nSBER | 5",
                 key="share_isin_q_input",
             )
         else:
