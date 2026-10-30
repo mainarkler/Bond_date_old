@@ -68,46 +68,82 @@ class MoexHTMLFreeFloatScraper:
     Uses headers + session to bypass basic firewall protections.
     """
 
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
-                "Referer": "https://www.moex.com/",
-            }
-        )
+    def __init__(self, request_get: Callable | None = None):
+        self.request_get = request_get or requests.get
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Referer": "https://www.moex.com/",
+        }
 
-    def fetch_index_page(self, url: str = "https://www.moex.com/a844") -> dict[str, float]:
+    def fetch_listing_freefloat(
+        self,
+        url: str = "https://www.moex.com/ru/listing/free-float.aspx",
+        max_pages: int = 30,
+    ) -> dict[str, float]:
         """
-        Extracts Free-Float table from MOEX HTML index page.
+        Загружает официальную таблицу коэффициентов free-float MOEX.
+        Страница выдаёт по 20 строк; pagenumber нумеруется с нуля.
+        Ключ результата — биржевой код (SECID).
         """
-        try:
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            html = response.text
-        except Exception:
-            return {}
-
         from bs4 import BeautifulSoup
 
-        soup = BeautifulSoup(html, "html.parser")
         result: dict[str, float] = {}
+        for page in range(max_pages):
+            try:
+                response = self.request_get(
+                    url,
+                    params={"pagenumber": page},
+                    headers=self.headers,
+                    timeout=15,
+                )
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, "html.parser")
+            except Exception:
+                # Keep already downloaded pages; callers can fall back to ISS.
+                break
 
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cols = [c.text.strip() for c in row.find_all(["td", "th"])]
-                if len(cols) < 5:
+            page_rows = 0
+            for table in soup.find_all("table"):
+                rows = table.find_all("tr")
+                if not rows:
                     continue
-                secid = cols[1] if len(cols) > 1 else None
-                ff_raw = cols[4] if len(cols) > 4 else None
-                if not secid or not ff_raw or "%" not in ff_raw:
+                header_cells = rows[0].find_all(["th", "td"])
+                headers = [
+                    " ".join(cell.get_text(" ", strip=True).lower().split())
+                    for cell in header_cells
+                ]
+                code_idx = next(
+                    (i for i, h in enumerate(headers) if h == "код" or h.endswith(" код")),
+                    None,
+                )
+                ff_idx = next(
+                    (i for i, h in enumerate(headers) if "коэффициент free-float" in h),
+                    None,
+                )
+                if code_idx is None or ff_idx is None:
                     continue
-                try:
-                    result[secid.upper()] = float(ff_raw.replace("%", "").replace(",", ".")) / 100.0
-                except Exception:
-                    continue
+
+                for row in rows[1:]:
+                    cells = row.find_all(["td", "th"])
+                    if len(cells) <= max(code_idx, ff_idx):
+                        continue
+                    secid = cells[code_idx].get_text(" ", strip=True).upper()
+                    raw = cells[ff_idx].get_text(" ", strip=True)
+                    ff = FreeFloatResolverV2._parse(raw)
+                    if secid and ff is not None:
+                        result[secid] = ff
+                        page_rows += 1
+                if page_rows:
+                    break
+
+            if page_rows == 0:
+                break
         return result
+
+    def fetch_index_page(self, url: str = "https://www.moex.com/a844") -> dict[str, float]:
+        """Legacy fallback retained for compatibility."""
+        return self.fetch_listing_freefloat()
 
 
 class MoexISSClient:
@@ -199,6 +235,13 @@ class FreeFloatResolverV2:
             if now - ts < self.ttl:
                 return payload
 
+        # Official MOEX listing table is downloaded once for the whole batch.
+        if self._html_ff_cache is None:
+            self._html_ff_cache = self.html_scraper.fetch_listing_freefloat()
+        listing_value = self._parse(self._html_ff_cache.get(secid_norm))
+        if listing_value is not None:
+            return self._store(secid_norm, listing_value, source="MOEX_LISTING")
+
         # Keep diagnostics local to this security; do not leak errors from
         # a previous ticker into the current ticker's status.
         self.client.last_errors = {}
@@ -214,11 +257,8 @@ class FreeFloatResolverV2:
         if ff is not None:
             return self._store(secid_norm, ff, issuesize, source=source)
 
-        # The MOEX HTML page is identical for every security. Fetch it once per
-        # batch/resolver, not once per missing ticker (which caused 100+ requests).
-        if self._html_ff_cache is None:
-            self._html_ff_cache = self.html_scraper.fetch_index_page()
-        html_value = self._html_ff_cache.get(secid_norm)
+        # Legacy MOEX HTML fallback; the official listing table above is primary.
+        html_value = self.html_scraper.fetch_index_page().get(secid_norm)
         ff = self._parse(html_value)
         if ff is not None:
             return self._store(secid_norm, ff, issuesize, source="MOEX_HTML")
@@ -361,7 +401,10 @@ def resolve_freefloat(request_get: Callable, secid: str) -> tuple[float, str]:
 
 def resolve_freefloat_batch(request_get: Callable, secids: list[str]) -> dict[str, dict]:
     client = MoexISSClient(request_get=request_get)
-    resolver = FreeFloatResolverV2(client=client, html_scraper=MoexHTMLFreeFloatScraper())
+    resolver = FreeFloatResolverV2(
+        client=client,
+        html_scraper=MoexHTMLFreeFloatScraper(request_get=request_get),
+    )
     return resolver.get_many(secids)
 
 
