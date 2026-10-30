@@ -72,6 +72,13 @@ if "portfolio_last_report" not in st.session_state:
 
 API_ACTION = st.query_params.get("action", "").strip().lower()
 
+# Persistent navigation entry: keep Bonds Market Change reachable from every view.
+with st.sidebar:
+    st.markdown("### Разделы")
+    if st.button("📊 Bonds Market Change", key="sidebar_open_bonds_market_change", use_container_width=True):
+        st.session_state["active_view"] = "bonds_market_change"
+        trigger_rerun()
+
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {
     "repo",
