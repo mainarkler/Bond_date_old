@@ -255,6 +255,8 @@ class FreeFloatResolverV2:
 
     def _parse(self, value) -> float | None:
         try:
+            if isinstance(value, str):
+                value = value.strip().replace("%", "").replace(",", ".")
             parsed = float(value)
             if parsed > 1:
                 parsed /= 100.0
