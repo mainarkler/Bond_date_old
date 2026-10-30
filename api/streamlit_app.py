@@ -28,6 +28,17 @@ st.set_page_config(page_title="Эмитенты облигаций", page_icon="
 st.title("📈 Эмитенты облигаций")
 st.caption("Источник данных: PostgreSQL view `public.bond_emitters_market_view`.")
 
+# Navigation is available even when PostgreSQL is offline.
+if "active_page" not in st.session_state:
+    st.session_state["active_page"] = "emitters"
+with st.sidebar:
+    st.markdown("## Навигация")
+    if st.button("📊 Bonds Market Change", key="nav_bonds_market_change", use_container_width=True):
+        st.session_state["active_page"] = "bonds_market_change"
+    if st.button("📈 Эмитенты облигаций", key="nav_emitters", use_container_width=True):
+        st.session_state["active_page"] = "emitters"
+
+
 # -----------------------------------------------------------------------------
 # DB settings (env first, then required defaults)
 # -----------------------------------------------------------------------------
@@ -148,80 +159,92 @@ def render_section(title: str, df: pd.DataFrame, expanded: bool = False) -> None
 
 
 def render_bonds_market_change() -> None:
-    """Render the RU000A1 bond market change report."""
-    st.divider()
+    """Render the standalone RU000A1 bond market report."""
     st.header("📊 Bonds Market Change")
     st.caption(
-        "Торгуемые облигации MOEX с ISIN RU000A1*. "
-        "Оборот считается как сумма дневного VALUE за выбранный период."
+        "Все торгуемые облигации MOEX с ISIN RU000A1*. "
+        "Оборот — сумма дневного VALUE за период; цены — последние доступные CLOSE "
+        "на дату или ранее; дюрация — последнее доступное значение на Data To."
     )
 
-    col_from, col_to = st.columns(2)
-    with col_from:
-        date_from = st.date_input(
-            "Data From", value=date.today() - timedelta(days=30), key="bmc_date_from"
+    with st.form("bmc_report_form"):
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            date_from = st.date_input(
+                "Data From", value=date.today() - timedelta(days=30), key="bmc_date_from"
+            )
+        with date_col2:
+            date_to = st.date_input("Data To", value=date.today(), key="bmc_date_to")
+        submitted = st.form_submit_button(
+            "Загрузить Bonds Market Change", type="primary", use_container_width=True
         )
-    with col_to:
-        date_to = st.date_input("Data To", value=date.today(), key="bmc_date_to")
 
-    if st.button("Загрузить Bonds Market Change", type="primary", key="bmc_load"):
+    if submitted:
         if date_from > date_to:
             st.error("Дата Data From не может быть позже Data To.")
             return
-
         try:
-            with st.spinner("Получаем список облигаций MOEX..."):
+            with st.spinner("Получаем список торгуемых облигаций MOEX..."):
                 bonds = fetch_traded_bonds()
             if bonds.empty:
                 st.warning("MOEX не вернул торгуемые облигации с ISIN RU000A1*.")
+                st.session_state.pop("bmc_report_result", None)
                 return
-
             st.info(f"Найдено облигаций: {len(bonds):,}. Загружаем историю торгов...")
             with st.spinner(
                 f"Загружаем обороты, цены и дюрацию для {len(bonds):,} облигаций. "
                 "Это может занять несколько минут."
             ):
                 result = build_bonds_market_change(bonds, date_from, date_to)
-
-            display = result.rename(
-                columns={
-                    "SECID": "SECID",
-                    "ISIN": "ISIN",
-                    "EMITENT_TITLE": "Emitent Name",
-                    "EMITENT_INN": "INN",
-                    "SHORTNAME": "Название облигации",
-                    "DURATION_DAYS": "Дюрация, дни",
-                    "TURNOVER_RUB": "Оборот, ₽",
-                    "PRICE_FROM": "Цена Data From",
-                    "PRICE_TO": "Цена Data To",
-                }
-            )
-            columns = [
-                "SECID", "ISIN", "Emitent Name", "INN", "Название облигации",
-                "Дюрация, дни", "Оборот, ₽", "Цена Data From", "Цена Data To",
-            ]
-            display = display[[column for column in columns if column in display.columns]]
-            st.success(f"Отчёт сформирован: {len(display):,} облигаций.")
-            st.dataframe(display, use_container_width=True, hide_index=True)
-
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                display.to_excel(writer, index=False, sheet_name="Bonds Market Change")
-            st.download_button(
-                "Скачать Excel",
-                data=output.getvalue(),
-                file_name=f"bonds_market_change_{date_from}_{date_to}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="bmc_download",
-            )
-
-            errors = result.attrs.get("errors", [])
-            if errors:
-                with st.expander(f"Ошибки загрузки ({len(errors)})"):
-                    st.warning("Для облигаций с ошибками исторические показатели оставлены пустыми.")
-                    st.code("\n".join(errors[:100]))
+            st.session_state["bmc_report_result"] = result
+            st.session_state["bmc_report_period"] = (date_from, date_to)
         except Exception as exc:
             st.error(f"Не удалось сформировать Bonds Market Change: {exc}")
+            return
+
+    result = st.session_state.get("bmc_report_result")
+    period = st.session_state.get("bmc_report_period")
+    if result is None:
+        st.info("Выберите период и нажмите «Загрузить Bonds Market Change».")
+        return
+
+    display = result.rename(columns={
+        "EMITENT_TITLE": "Emitent Name", "EMITENT_INN": "INN",
+        "SHORTNAME": "Название облигации", "DURATION_DAYS": "Дюрация, дни",
+        "TURNOVER_RUB": "Оборот, ₽", "PRICE_FROM": "Цена Data From",
+        "PRICE_TO": "Цена Data To",
+    })
+    columns = [
+        "SECID", "ISIN", "Emitent Name", "INN", "Название облигации",
+        "Дюрация, дни", "Оборот, ₽", "Цена Data From", "Цена Data To",
+    ]
+    display = display[[column for column in columns if column in display.columns]]
+    st.success(f"Отчёт сформирован: {len(display):,} облигаций.")
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        display.to_excel(writer, index=False, sheet_name="Bonds Market Change")
+    from_date, to_date = period
+    st.download_button(
+        "Скачать Excel", data=output.getvalue(),
+        file_name=f"bonds_market_change_{from_date}_{to_date}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="bmc_download",
+    )
+    errors = result.attrs.get("errors", [])
+    if errors:
+        with st.expander(f"Ошибки загрузки ({len(errors)})"):
+            st.warning("Для облигаций с ошибками исторические показатели оставлены пустыми.")
+            st.code("\\n".join(errors[:100]))
+
+
+if st.session_state["active_page"] == "bonds_market_change":
+    if st.button("← К эмитентам", key="bmc_back_to_emitters"):
+        st.session_state["active_page"] = "emitters"
+        st.rerun()
+    render_bonds_market_change()
+    st.stop()
 
 
 try:
@@ -262,7 +285,6 @@ try:
         top10_maturity_df = fetch_top10(conn, "last_maturity_date")
         render_section("Топ-10 по дате погашения", top10_maturity_df)
 
-        render_bonds_market_change()
 
 except Exception as exc:
     st.error(f"Ошибка подключения/запроса к PostgreSQL: {exc}")
