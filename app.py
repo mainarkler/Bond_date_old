@@ -77,7 +77,10 @@ with st.sidebar:
     st.markdown("### Разделы")
     if st.button("📊 Bonds Market Change", key="sidebar_open_bonds_market_change", use_container_width=True):
         st.session_state["active_view"] = "bonds_market_change"
-        trigger_rerun()
+        if hasattr(st, "rerun"):
+            st.rerun()
+        else:
+            st.experimental_rerun()
 
 FORCED_ACTIVE_VIEW = os.getenv("FORCE_ACTIVE_VIEW", "").strip().lower()
 if FORCED_ACTIVE_VIEW in {
