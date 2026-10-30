@@ -187,10 +187,8 @@ class MoexISSClient:
         return self._kv(data, "description")
 
     def get_statistics(self, secid: str) -> dict:
-        data = self._get(
-            f"/statistics/engines/stock/markets/shares/securities/{secid}.json?iss.meta=off"
-        )
-        return self._table(data, "securities")
+        """Deprecated: the former statistics route returns HTTP 404."""
+        return {}
 
     def _table(self, data: dict, block: str) -> dict:
         if block not in data:
@@ -255,13 +253,8 @@ class FreeFloatResolverV2:
         # a previous ticker into the current ticker's status.
         self.client.last_errors = {}
         desc = self.client.get_description(secid_norm)
-        stats = self.client.get_statistics(secid_norm)
         ff = self._parse(self._field(desc, "FREE_FLOAT", "FREEFLOAT"))
         source = "ISS_DESCRIPTION" if ff is not None else ""
-        if ff is None:
-            ff = self._parse(self._field(stats, "FREE_FLOAT", "FREEFLOAT"))
-            if ff is not None:
-                source = "ISS_STATISTICS"
         issuesize = self._field(desc, "ISSUESIZE")
         if ff is not None:
             return self._store(secid_norm, ff, issuesize, source=source)
@@ -273,7 +266,7 @@ class FreeFloatResolverV2:
         errors = []
         for path, error in self.client.last_errors.items():
             errors.append(f"{path}: {error}")
-        reason = "; ".join(errors) if errors else "FREE_FLOAT отсутствует в ISS description/statistics и таблице MOEX"
+        reason = "; ".join(errors) if errors else "FREE_FLOAT отсутствует в официальном реестре MOEX и ISS description"
         return self._store(secid_norm, None, issuesize, source="NOT_FOUND", error=reason)
 
     def get_many(self, secids: list[str]) -> dict[str, dict]:
