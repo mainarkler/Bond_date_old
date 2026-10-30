@@ -241,7 +241,7 @@ class FreeFloatResolverV2:
                 continue
             try:
                 result[secid_norm] = self.get(secid_norm)
-            except Exception:
+            except Exception as exc:
                 result[secid_norm] = {
                     "secid": secid_norm,
                     "free_float": None,
