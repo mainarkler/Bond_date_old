@@ -40,6 +40,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 from services.moex_turnover import MoexTurnoverClient
+from services.bonds_market_change import build_bonds_market_change, fetch_traded_bonds
 from services.emission_documents import extract_document, analyze_document, build_analysis_report
 from services.company_news_analysis import get_company_news_analysis_sync
 from services.news_service import NewsServiceError, get_news, get_news_by_date, get_news_by_isin
@@ -85,6 +86,7 @@ if FORCED_ACTIVE_VIEW in {
     "company_analysis",
     "emission_documents",
     "portfolio",
+    "bonds_market_change",
 }:
     st.session_state["active_view"] = FORCED_ACTIVE_VIEW
 
@@ -198,6 +200,12 @@ if st.session_state["active_view"] == "home" and API_ACTION != "vm_pdf":
         st.caption("Расчет оборота по сделкам MOEX ISS trades: regular / SPEQ / NDM.")
         if st.button("Открыть", key="open_moex_turnover", use_container_width=True):
             st.session_state["active_view"] = "moex_turnover"
+            trigger_rerun()
+
+        st.markdown("### Bonds Market Change")
+        st.caption("Изменение рынка торгуемых облигаций MOEX с ISIN RU000A1*.")
+        if st.button("Открыть", key="open_bonds_market_change", use_container_width=True):
+            st.session_state["active_view"] = "bonds_market_change"
             trigger_rerun()
 
         st.markdown("### Статистика рынка")
@@ -3373,6 +3381,75 @@ if st.session_state["active_view"] == "market_statistics":
                     st.download_button("Скачать CSV", data=display_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"market_statistics_{profile['secid']}.csv", mime="text/csv", key="market_stats_csv")
             except Exception as exc:
                 st.error(f"Не удалось загрузить статистику MOEX: {exc}")
+    st.stop()
+
+
+# ---------------------------
+# Bonds Market Change view
+# ---------------------------
+if st.session_state["active_view"] == "bonds_market_change":
+    st.header("📊 Bonds Market Change")
+    st.caption(
+        "Торгуемые облигации MOEX с ISIN RU000A1*. "
+        "Оборот — сумма дневного VALUE за выбранный период; цены — последние "
+        "доступные CLOSE на дату или ранее; дюрация — последнее доступное значение на Data To."
+    )
+    with st.form("bonds_market_change_form"):
+        col_from, col_to = st.columns(2)
+        with col_from:
+            bmc_date_from = st.date_input(
+                "Data From", value=datetime.now().date() - timedelta(days=30), key="bmc_app_date_from"
+            )
+        with col_to:
+            bmc_date_to = st.date_input(
+                "Data To", value=datetime.now().date() - timedelta(days=1), key="bmc_app_date_to"
+            )
+        run_bmc = st.form_submit_button("Загрузить Bonds Market Change", use_container_width=True)
+
+    if run_bmc:
+        if bmc_date_from > bmc_date_to:
+            st.error("Data From не может быть позже Data To.")
+        else:
+            try:
+                with st.spinner("Получаем список торгуемых облигаций MOEX..."):
+                    bmc_bonds = fetch_traded_bonds()
+                if bmc_bonds.empty:
+                    st.warning("MOEX не вернул торгуемые облигации с ISIN RU000A1*.")
+                else:
+                    st.info(f"Найдено облигаций: {len(bmc_bonds):,}. Загружаем историю...")
+                    with st.spinner("Загружаем оборот, цены и дюрацию. Это может занять несколько минут."):
+                        bmc_result = build_bonds_market_change(bmc_bonds, bmc_date_from, bmc_date_to)
+                    bmc_display = bmc_result.rename(columns={
+                        "EMITENT_TITLE": "Emitent Name",
+                        "EMITENT_INN": "INN",
+                        "SHORTNAME": "Название облигации",
+                        "DURATION_DAYS": "Дюрация, дни",
+                        "TURNOVER_RUB": "Оборот, ₽",
+                        "PRICE_FROM": "Цена Data From",
+                        "PRICE_TO": "Цена Data To",
+                    })
+                    bmc_columns = [
+                        "SECID", "ISIN", "Emitent Name", "INN", "Название облигации",
+                        "Дюрация, дни", "Оборот, ₽", "Цена Data From", "Цена Data To",
+                    ]
+                    bmc_display = bmc_display[[col for col in bmc_columns if col in bmc_display.columns]]
+                    st.success(f"Отчёт сформирован: {len(bmc_display):,} облигаций.")
+                    st.dataframe(bmc_display, use_container_width=True, hide_index=True)
+                    bmc_xlsx = ss.dataframe_to_excel_bytes(bmc_display, sheet_name="Bonds Market Change")
+                    st.download_button(
+                        "Скачать Excel",
+                        data=bmc_xlsx,
+                        file_name=f"bonds_market_change_{bmc_date_from}_{bmc_date_to}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="bmc_app_download",
+                    )
+                    bmc_errors = bmc_result.attrs.get("errors", [])
+                    if bmc_errors:
+                        with st.expander(f"Ошибки загрузки ({len(bmc_errors)})"):
+                            st.warning("Для облигаций с ошибками исторические показатели оставлены пустыми.")
+                            st.code("\n".join(bmc_errors[:100]))
+            except Exception as exc:
+                st.error(f"Не удалось сформировать Bonds Market Change: {exc}")
     st.stop()
 
 
