@@ -243,6 +243,8 @@ class FreeFloatResolverV2:
                     "secid": secid_norm,
                     "free_float": None,
                     "issuesize": None,
+                    "source": "ERROR",
+                    "error": f"{type(exc).__name__}: {exc}",
                     "updated_at": time.time(),
                 }
             if idx % 50 == 0:
