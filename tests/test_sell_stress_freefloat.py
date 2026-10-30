@@ -25,6 +25,24 @@ class FakeHTMLScraper:
 
 
 class FreeFloatResolverTests(unittest.TestCase):
+    def test_load_issuesize_from_iss_with_lowercase_column(self):
+        calls = []
+
+        def request_get(url, params=None, timeout=10):
+            calls.append((url, params))
+            return FakeResponse({
+                "securities": {
+                    "columns": ["secid", "issuesize"],
+                    "data": [["TEST", 125000000]],
+                }
+            })
+
+        value = ss.load_issuesize(request_get, "TEST")
+
+        self.assertEqual(value, 125000000.0)
+        self.assertIn("/iss/securities/TEST.json", calls[0][0])
+        self.assertEqual(calls[0][1]["iss.only"], "securities")
+
     def test_uses_description_freefloat_alias_and_decimal_comma(self):
         def request_get(url, timeout=10):
             if "/description" in url:
