@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
-from typing import Any, Callable, Callable
+from typing import Any, Callable, Callable, Callable
 
 import pandas as pd
 import requests
@@ -151,6 +151,7 @@ def _history_for_bond(
 
     return {
         **bond,
+        "HISTORY_ROWS": int(len(history)),
         "TURNOVER_RUB": float(period["VALUE"].fillna(0).sum()),
         "PRICE_FROM": float(price_from) if price_from is not None else None,
         "PRICE_TO": float(price_to) if price_to is not None else None,
@@ -159,15 +160,21 @@ def _history_for_bond(
 
 
 def build_bonds_market_change(
-    bonds: pd.DataFrame, date_from: date, date_to: date, max_workers: int = 8
+    bonds: pd.DataFrame,
+    date_from: date,
+    date_to: date,
+    max_workers: int = 8,
+    progress_callback: Callable[[int, int, str, str | None], None] | None = None,
 ) -> pd.DataFrame:
-    """Enrich bonds with period turnover, boundary prices and last duration."""
+    """Enrich bonds and optionally report per-security progress."""
     if date_from > date_to:
         raise ValueError("Дата начала периода не может быть позже даты окончания.")
 
     records = bonds.to_dict("records")
     results: list[dict[str, Any]] = []
     errors: list[str] = []
+    completed = 0
+    history_rows = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -176,21 +183,40 @@ def build_bonds_market_change(
         }
         for future in as_completed(futures):
             secid = futures[future]
+            error_message = None
             try:
-                results.append(future.result())
+                record = future.result()
+                results.append(record)
+                history_rows += int(record.get("HISTORY_ROWS", 0) or 0)
             except Exception as exc:
-                errors.append(f"{secid}: {type(exc).__name__}: {exc}")
+                error_message = f"{type(exc).__name__}: {exc}"
+                errors.append(f"{secid}: {error_message}")
                 bond = next(item for item in records if item["SECID"] == secid)
                 results.append({
                     **bond,
+                    "HISTORY_ROWS": 0,
                     "TURNOVER_RUB": None,
                     "PRICE_FROM": None,
                     "PRICE_TO": None,
                     "DURATION_DAYS": None,
                 })
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, len(records), str(secid), error_message)
 
     result = pd.DataFrame(results)
     if not result.empty:
         result = result.sort_values(["EMITENT_TITLE", "ISIN"], na_position="last").reset_index(drop=True)
     result.attrs["errors"] = errors
+    history_counts = pd.to_numeric(
+        result.get("HISTORY_ROWS", pd.Series(dtype=int)), errors="coerce"
+    ).fillna(0)
+    result.attrs["stats"] = {
+        "total": len(records),
+        "processed": completed,
+        "errors": len(errors),
+        "with_history": int((history_counts > 0).sum()),
+        "without_history": int((history_counts == 0).sum()),
+        "history_rows": history_rows,
+    }
     return result
