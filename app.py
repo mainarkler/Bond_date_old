@@ -23,7 +23,8 @@ from scipy.stats import norm
 import sell_stress as ss
 import streamlit as st
 import index_analytics as ia
-from sell_stress_ui.data import fetch_index_membership_for_tickers
+from sell_stress_ui.data import fetch_index_membership_for_tickers, load_asset_universe
+from sell_stress_ui.form_config import load_form_config
 from sell_stress_ui.reporting import build_share_batch_html_report
 from email_compose import render_email_compose_section
 from news.fetcher import NewsFetcher, fetch_tradingview_news
@@ -111,7 +112,7 @@ def init_sell_stres_state():
 @st.cache_data(show_spinner=False)
 def get_sell_stress_xml_form_config():
     xml_path = Path(__file__).resolve().parent / "sell_stress_ui" / "schemas" / "sell_stress_form.xml"
-    return load_sell_stress_form_config(xml_path)
+    return load_form_config(xml_path)
 
 
 @st.cache_data(show_spinner=False)
