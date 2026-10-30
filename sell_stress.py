@@ -130,8 +130,14 @@ class MoexHTMLFreeFloatScraper:
                         continue
                     secid = cells[code_idx].get_text(" ", strip=True).upper()
                     raw = cells[ff_idx].get_text(" ", strip=True)
-                    ff = FreeFloatResolverV2._parse(raw)
-                    if secid and ff is not None:
+                    try:
+                        # This MOEX column is explicitly expressed in percent;
+                        # divide unconditionally so that e.g. "1" means 1%, not 100%.
+                        ff_percent = float(raw.replace("%", "").replace(",", ".").strip())
+                        ff = ff_percent / 100.0
+                    except (TypeError, ValueError):
+                        ff = None
+                    if secid and ff is not None and 0 < ff <= 1:
                         result[secid] = ff
                         page_rows += 1
                 if page_rows:
