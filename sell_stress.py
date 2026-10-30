@@ -113,21 +113,31 @@ class MoexHTMLFreeFloatScraper:
 class MoexISSClient:
     """JSON-only ISS helper with retries."""
 
-    def __init__(self, timeout: int = 5, retries: int = 3, pause: float = 0.2):
+    def __init__(
+        self,
+        timeout: int = 10,
+        retries: int = 3,
+        pause: float = 0.2,
+        request_get: Callable | None = None,
+    ):
         self.timeout = timeout
         self.retries = retries
         self.pause = pause
+        self.request_get = request_get or requests.get
+        self.last_errors: dict[str, str] = {}
 
     def _get(self, path: str) -> dict:
         url = f"{BASE_ISS_URL}{path}"
+        last_error = None
         for _ in range(self.retries):
             try:
-                response = requests.get(url, timeout=self.timeout)
+                response = self.request_get(url, timeout=self.timeout)
                 response.raise_for_status()
-                time.sleep(self.pause)
                 return response.json()
-            except Exception:
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
                 time.sleep(self.pause)
+        self.last_errors[path] = last_error or "Неизвестная ошибка ISS"
         return {}
 
     def get_description(self, secid: str) -> dict:
@@ -170,6 +180,16 @@ class FreeFloatResolverV2:
         self.cache: dict[str, tuple[float, dict]] = {}
         self.external_ff_db: dict[str, float] = {}
         self.index_membership: dict[str, list[str]] = {}
+        self._html_ff_cache: dict[str, float] | None = None
+
+    @staticmethod
+    def _field(data: dict, *names: str):
+        normalized = {str(key).replace("_", "").replace("-", "").upper(): value for key, value in data.items()}
+        for name in names:
+            key = name.replace("_", "").replace("-", "").upper()
+            if key in normalized:
+                return normalized[key]
+        return None
 
     def get(self, secid: str) -> dict:
         secid_norm = str(secid).strip().upper()
@@ -181,26 +201,34 @@ class FreeFloatResolverV2:
 
         desc = self.client.get_description(secid_norm)
         stats = self.client.get_statistics(secid_norm)
-        ff = self._parse(desc.get("FREE_FLOAT")) or self._parse(stats.get("FREE_FLOAT"))
-        issuesize = desc.get("ISSUESIZE")
-        if ff is not None:
-            return self._store(secid_norm, ff, issuesize)
-
-        html_ff = self.html_scraper.fetch_index_page()
-        if secid_norm in html_ff:
-            ff = self._parse(html_ff[secid_norm])
+        ff = self._parse(self._field(desc, "FREE_FLOAT", "FREEFLOAT"))
+        source = "ISS_DESCRIPTION" if ff is not None else ""
+        if ff is None:
+            ff = self._parse(self._field(stats, "FREE_FLOAT", "FREEFLOAT"))
             if ff is not None:
-                return self._store(secid_norm, ff, issuesize)
+                source = "ISS_STATISTICS"
+        issuesize = self._field(desc, "ISSUESIZE")
+        if ff is not None:
+            return self._store(secid_norm, ff, issuesize, source=source)
+
+        # The MOEX HTML page is identical for every security. Fetch it once per
+        # batch/resolver, not once per missing ticker (which caused 100+ requests).
+        if self._html_ff_cache is None:
+            self._html_ff_cache = self.html_scraper.fetch_index_page()
+        html_value = self._html_ff_cache.get(secid_norm)
+        ff = self._parse(html_value)
+        if ff is not None:
+            return self._store(secid_norm, ff, issuesize, source="MOEX_HTML")
 
         ff_external = self.external_ff_db.get(secid_norm)
         if ff_external is not None:
-            return self._store(secid_norm, ff_external, issuesize)
+            return self._store(secid_norm, ff_external, issuesize, source="EXTERNAL")
 
-        self._ensure_index_loaded()
-        if secid_norm in self.index_membership.get("IMOEX", []):
-            return self._store(secid_norm, None, issuesize)
-
-        return self._store(secid_norm, None, issuesize)
+        errors = []
+        for path, error in self.client.last_errors.items():
+            errors.append(f"{path}: {error}")
+        reason = "; ".join(errors) if errors else "FREE_FLOAT отсутствует в ISS description/statistics и таблице MOEX"
+        return self._store(secid_norm, None, issuesize, source="NOT_FOUND", error=reason)
 
     def get_many(self, secids: list[str]) -> dict[str, dict]:
         result: dict[str, dict] = {}
@@ -236,11 +264,20 @@ class FreeFloatResolverV2:
         except Exception:
             return None
 
-    def _store(self, secid: str, value: float | None, issuesize=None) -> dict:
+    def _store(
+        self,
+        secid: str,
+        value: float | None,
+        issuesize=None,
+        source: str = "",
+        error: str = "",
+    ) -> dict:
         payload = {
             "secid": secid,
             "free_float": value,
             "issuesize": issuesize,
+            "source": source,
+            "error": error,
             "updated_at": time.time(),
         }
         self.cache[secid] = (time.time(), payload)
@@ -316,7 +353,7 @@ def resolve_freefloat(request_get: Callable, secid: str) -> tuple[float, str]:
 
 
 def resolve_freefloat_batch(request_get: Callable, secids: list[str]) -> dict[str, dict]:
-    client = MoexISSClient()
+    client = MoexISSClient(request_get=request_get)
     resolver = FreeFloatResolverV2(client=client, html_scraper=MoexHTMLFreeFloatScraper())
     return resolver.get_many(secids)
 
