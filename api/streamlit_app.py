@@ -262,8 +262,10 @@ try:
         top10_maturity_df = fetch_top10(conn, "last_maturity_date")
         render_section("Топ-10 по дате погашения", top10_maturity_df)
 
-        render_bonds_market_change()
-
 except Exception as exc:
     st.error(f"Ошибка подключения/запроса к PostgreSQL: {exc}")
     st.info("Проверьте Docker PostgreSQL на 127.0.0.1:5433 и наличие нужных таблиц/представления.")
+
+
+# Independent section: this runs regardless of PostgreSQL availability.
+render_bonds_market_change()
