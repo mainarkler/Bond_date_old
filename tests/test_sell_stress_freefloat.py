@@ -85,6 +85,27 @@ class FreeFloatResolverTests(unittest.TestCase):
         self.assertAlmostEqual(values["AAA"], 0.325)
         self.assertEqual(calls, [0, 1])
 
+    def test_listing_search_form_uses_query_parameter_and_parses_exact_ticker(self):
+        calls = []
+
+        class HtmlResponse:
+            text = """<table><tr><th>№</th><th>Код</th><th>Наименование</th>
+            <th>Коэффициент free-float, %</th></tr>
+            <tr><td>1</td><td>SBER</td><td>Сбербанк</td><td>37,5</td></tr></table>"""
+
+            def raise_for_status(self):
+                return None
+
+        def request_get(url, params=None, headers=None, timeout=20):
+            calls.append(params)
+            return HtmlResponse()
+
+        scraper = ss.MoexHTMLFreeFloatScraper(request_get=request_get)
+        value = scraper.fetch_listing_freefloat_search("SBER")
+
+        self.assertAlmostEqual(value, 0.375)
+        self.assertEqual(calls, [{"query": "SBER", "pagenumber": 0}])
+
     def test_missing_value_contains_diagnostic(self):
         def request_get(url, timeout=10):
             return FakeResponse({})
