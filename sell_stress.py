@@ -237,7 +237,10 @@ class FreeFloatResolverV2:
 
         # Official MOEX listing table is downloaded once for the whole batch.
         if self._html_ff_cache is None:
-            self._html_ff_cache = self.html_scraper.fetch_listing_freefloat()
+            fetch_listing = getattr(
+                self.html_scraper, "fetch_listing_freefloat", self.html_scraper.fetch_index_page
+            )
+            self._html_ff_cache = fetch_listing()
         listing_value = self._parse(self._html_ff_cache.get(secid_norm))
         if listing_value is not None:
             return self._store(secid_norm, listing_value, source="MOEX_LISTING")
@@ -256,12 +259,6 @@ class FreeFloatResolverV2:
         issuesize = self._field(desc, "ISSUESIZE")
         if ff is not None:
             return self._store(secid_norm, ff, issuesize, source=source)
-
-        # Legacy MOEX HTML fallback; the official listing table above is primary.
-        html_value = self.html_scraper.fetch_index_page().get(secid_norm)
-        ff = self._parse(html_value)
-        if ff is not None:
-            return self._store(secid_norm, ff, issuesize, source="MOEX_HTML")
 
         ff_external = self.external_ff_db.get(secid_norm)
         if ff_external is not None:
