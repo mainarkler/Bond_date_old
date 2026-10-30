@@ -7,12 +7,19 @@ Design goals:
 """
 
 import os
+from datetime import date, timedelta
+from io import BytesIO
 from typing import Dict, List, Tuple
 
 import pandas as pd
 import psycopg2
 from psycopg2 import sql
 import streamlit as st
+
+from services.bonds_market_change import (
+    build_bonds_market_change,
+    fetch_traded_bonds,
+)
 
 # -----------------------------------------------------------------------------
 # Streamlit page configuration
@@ -71,13 +78,8 @@ def fetch_emitters(
     sort_option: str,
     limit: int,
 ) -> pd.DataFrame:
-    """Fetch emitters from market view with server-side filter/sort/limit.
-
-    This keeps app fast on large datasets by avoiding full-table fetches.
-    """
+    """Fetch emitters from market view with server-side filter/sort/limit."""
     sort_col, sort_dir = SORT_OPTIONS[sort_option]
-
-    # Build WHERE fragment only when filter is provided (lazy-loading style).
     where_sql = sql.SQL("")
     params: List[object] = []
     if emitter_filter.strip():
@@ -104,15 +106,12 @@ def fetch_emitters(
         sort_dir=sql.SQL(sort_dir),
     )
     params.append(limit)
-
     df = pd.read_sql_query(query.as_string(conn), conn, params=params)
 
-    # Pandas normalization for consistent UI behavior.
     if not df.empty:
         df["bonds_count"] = pd.to_numeric(df["bonds_count"], errors="coerce").fillna(0).astype(int)
         df["first_issue_date"] = pd.to_datetime(df["first_issue_date"], errors="coerce").dt.date
         df["last_maturity_date"] = pd.to_datetime(df["last_maturity_date"], errors="coerce").dt.date
-
     return df
 
 
@@ -131,7 +130,6 @@ def fetch_top10(conn: psycopg2.extensions.connection, order_column: str) -> pd.D
         LIMIT 10
         """
     ).format(view=sql.SQL(VIEW_NAME), order_column=sql.Identifier(order_column))
-
     df = pd.read_sql_query(query.as_string(conn), conn)
     if not df.empty:
         df["bonds_count"] = pd.to_numeric(df["bonds_count"], errors="coerce").fillna(0).astype(int)
@@ -149,6 +147,83 @@ def render_section(title: str, df: pd.DataFrame, expanded: bool = False) -> None
             st.dataframe(df, use_container_width=True)
 
 
+def render_bonds_market_change() -> None:
+    """Render the RU000A1 bond market change report."""
+    st.divider()
+    st.header("📊 Bonds Market Change")
+    st.caption(
+        "Торгуемые облигации MOEX с ISIN RU000A1*. "
+        "Оборот считается как сумма дневного VALUE за выбранный период."
+    )
+
+    col_from, col_to = st.columns(2)
+    with col_from:
+        date_from = st.date_input(
+            "Data From", value=date.today() - timedelta(days=30), key="bmc_date_from"
+        )
+    with col_to:
+        date_to = st.date_input("Data To", value=date.today(), key="bmc_date_to")
+
+    if st.button("Загрузить Bonds Market Change", type="primary", key="bmc_load"):
+        if date_from > date_to:
+            st.error("Дата Data From не может быть позже Data To.")
+            return
+
+        try:
+            with st.spinner("Получаем список облигаций MOEX..."):
+                bonds = fetch_traded_bonds()
+            if bonds.empty:
+                st.warning("MOEX не вернул торгуемые облигации с ISIN RU000A1*.")
+                return
+
+            st.info(f"Найдено облигаций: {len(bonds):,}. Загружаем историю торгов...")
+            with st.spinner(
+                f"Загружаем обороты, цены и дюрацию для {len(bonds):,} облигаций. "
+                "Это может занять несколько минут."
+            ):
+                result = build_bonds_market_change(bonds, date_from, date_to)
+
+            display = result.rename(
+                columns={
+                    "SECID": "SECID",
+                    "ISIN": "ISIN",
+                    "EMITENT_TITLE": "Emitent Name",
+                    "EMITENT_INN": "INN",
+                    "SHORTNAME": "Название облигации",
+                    "DURATION_DAYS": "Дюрация, дни",
+                    "TURNOVER_RUB": "Оборот, ₽",
+                    "PRICE_FROM": "Цена Data From",
+                    "PRICE_TO": "Цена Data To",
+                }
+            )
+            columns = [
+                "SECID", "ISIN", "Emitent Name", "INN", "Название облигации",
+                "Дюрация, дни", "Оборот, ₽", "Цена Data From", "Цена Data To",
+            ]
+            display = display[[column for column in columns if column in display.columns]]
+            st.success(f"Отчёт сформирован: {len(display):,} облигаций.")
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                display.to_excel(writer, index=False, sheet_name="Bonds Market Change")
+            st.download_button(
+                "Скачать Excel",
+                data=output.getvalue(),
+                file_name=f"bonds_market_change_{date_from}_{date_to}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="bmc_download",
+            )
+
+            errors = result.attrs.get("errors", [])
+            if errors:
+                with st.expander(f"Ошибки загрузки ({len(errors)})"):
+                    st.warning("Для облигаций с ошибками исторические показатели оставлены пустыми.")
+                    st.code("\n".join(errors[:100]))
+        except Exception as exc:
+            st.error(f"Не удалось сформировать Bonds Market Change: {exc}")
+
+
 try:
     with get_connection() as conn:
         st.success(f"Подключено: {DB_CONFIG['host']}:{DB_CONFIG['port']} / {DB_CONFIG['dbname']}")
@@ -159,7 +234,6 @@ try:
         if missing:
             st.warning("Отсутствуют обязательные объекты: " + ", ".join(missing))
 
-        # Controls: filter/sort/limit + explicit load button (lazy loading).
         control_col1, control_col2, control_col3 = st.columns([2, 1, 1])
         with control_col1:
             emitter_filter = st.text_input("Фильтр по названию эмитента", value="")
@@ -169,10 +243,6 @@ try:
             row_limit = st.number_input("LIMIT", min_value=10, max_value=50000, value=DEFAULT_LIMIT, step=10)
 
         load_clicked = st.button("Загрузить данные")
-
-        # Lazy loading behavior:
-        # - if a filter is entered -> auto-load filtered data;
-        # - otherwise load only after explicit button click.
         should_load = bool(emitter_filter.strip()) or load_clicked
 
         if not should_load:
@@ -191,6 +261,8 @@ try:
 
         top10_maturity_df = fetch_top10(conn, "last_maturity_date")
         render_section("Топ-10 по дате погашения", top10_maturity_df)
+
+        render_bonds_market_change()
 
 except Exception as exc:
     st.error(f"Ошибка подключения/запроса к PostgreSQL: {exc}")
