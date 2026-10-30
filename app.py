@@ -4706,6 +4706,8 @@ if st.session_state["active_view"] == "sell_stres":
                                 "ISIN": entry["ISIN"],
                                 "SECID": secid,
                                 "FreeFloat": ff_payload.get("free_float"),
+                                "FreeFloatSource": ff_payload.get("source", ""),
+                                "FreeFloatError": ff_payload.get("error", ""),
                             }
                         )
                         if ff_payload.get("free_float") is None:
@@ -4738,6 +4740,12 @@ if st.session_state["active_view"] == "sell_stres":
 
                 if not ff_table_df.empty:
                     st.markdown("#### Таблица free-float (предварительная загрузка)")
+                    ff_ok = int(ff_table_df["FreeFloat"].notna().sum())
+                    ff_missing = int(ff_table_df["FreeFloat"].isna().sum())
+                    st.caption(
+                        f"Free-float найден: {ff_ok} из {len(ff_table_df)}; "
+                        f"не найден: {ff_missing}. Источник и причина ошибки указаны в таблице."
+                    )
                     st.dataframe(ff_table_df, use_container_width=True)
 
                 show_tables = len(entries) == 1 and not use_q_from_list and not share_calculate_all_clicked
