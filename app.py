@@ -3366,9 +3366,27 @@ if st.session_state["active_view"] == "bonds_market_change":
                     st.warning("MOEX не вернул торгуемые облигации с ISIN RU000A1*.")
                     st.session_state.pop("main_bmc_report_result", None)
                 else:
-                    st.info(f"Найдено облигаций: {len(bonds):,}. Загружаем историю торгов...")
-                    with st.spinner("Загружаем обороты, цены и дюрацию. Это может занять несколько минут."):
-                        result = build_bonds_market_change(bonds, date_from, date_to)
+                    total_bonds = len(bonds)
+                    st.info(f"Найдено облигаций: {total_bonds:,}. Загружаем историю торгов...")
+                    progress = st.progress(0.0, text="Подготовка выгрузки...")
+                    progress_status = st.empty()
+
+                    def update_bmc_progress(completed, total, secid, error):
+                        fraction = completed / total if total else 1.0
+                        progress.progress(
+                            fraction,
+                            text=f"Обработано {completed:,} из {total:,} облигаций ({fraction:.0%})",
+                        )
+                        status_text = f"Последняя бумага: {secid}"
+                        if error:
+                            status_text += f" — ошибка: {error}"
+                        progress_status.caption(status_text)
+
+                    result = build_bonds_market_change(
+                        bonds, date_from, date_to, progress_callback=update_bmc_progress
+                    )
+                    progress.progress(1.0, text="Выгрузка завершена")
+                    progress_status.empty()
                     st.session_state["main_bmc_report_result"] = result
                     st.session_state["main_bmc_report_period"] = (date_from, date_to)
             except Exception as exc:
@@ -3390,6 +3408,17 @@ if st.session_state["active_view"] == "bonds_market_change":
             "Дюрация, дни", "Оборот, ₽", "Цена Data From", "Цена Data To",
         ]
         display = display[[column for column in columns if column in display.columns]]
+        stats = result.attrs.get("stats", {})
+        total_turnover = pd.to_numeric(result.get("TURNOVER_RUB"), errors="coerce").sum()
+        stat_cols = st.columns(5)
+        stat_cols[0].metric("Найдено бумаг", f"{stats.get('total', len(result)):,}")
+        stat_cols[1].metric("Обработано", f"{stats.get('processed', len(result)):,}")
+        stat_cols[2].metric("С ошибками", f"{stats.get('errors', len(result.attrs.get('errors', []))):,}")
+        stat_cols[3].metric("Есть история", f"{stats.get('with_history', 0):,}")
+        stat_cols[4].metric("Нет истории", f"{stats.get('without_history', 0):,}")
+        turnover_col, rows_col = st.columns(2)
+        turnover_col.metric("Суммарный оборот", f"{total_turnover:,.2f} ₽")
+        rows_col.metric("Строк истории получено", f"{stats.get('history_rows', 0):,}")
         st.success(f"Отчёт сформирован: {len(display):,} облигаций.")
         st.dataframe(display, use_container_width=True, hide_index=True)
 
