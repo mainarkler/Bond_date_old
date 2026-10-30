@@ -106,6 +106,20 @@ class FreeFloatResolverTests(unittest.TestCase):
         self.assertAlmostEqual(value, 0.375)
         self.assertEqual(calls, [{"query": "SBER", "pagenumber": 0}])
 
+    def test_supplied_moex_table_values_are_used_as_percentages(self):
+        client = ss.MoexISSClient(request_get=lambda *a, **k: FakeResponse({}), retries=1, pause=0)
+        resolver = ss.FreeFloatResolverV2(client, FakeHTMLScraper({}))
+
+        sber = resolver.get("SBER")
+        sberp = resolver.get("SBERP")
+        rasp = resolver.get("RASP")
+
+        self.assertAlmostEqual(sber["free_float"], 0.48)
+        self.assertAlmostEqual(sberp["free_float"], 1.0)
+        self.assertAlmostEqual(rasp["free_float"], 0.07)
+        self.assertEqual(sber["source"], "MOEX_USER_TABLE")
+        self.assertEqual(sberp["source"], "MOEX_USER_TABLE")
+
     def test_missing_value_contains_diagnostic(self):
         def request_get(url, timeout=10):
             return FakeResponse({})
