@@ -20,6 +20,31 @@ FREE_FLOAT_POINT_STEP_PCT = 0.0000001
 
 _ISSUESIZE_CACHE: dict[str, float] = {}
 
+# Free-float snapshot supplied from the MOEX listing table by the user.
+# Values are stored as percentages and converted to fractions at lookup time.
+MOEX_FREE_FLOAT_PERCENT: dict[str, float] = {
+    "RASP": 7, "MAGN": 20, "ROSN": 11, "PIKK": 2, "VTBR": 20,
+    "TRMK": 8, "LSRG": 15, "MVID": 20, "AFKS": 29, "HYDR": 15,
+    "BSPB": 21, "MRKP": 24, "OGKB": 15, "AFLT": 25, "AKRN": 5,
+    "CHMF": 23, "GAZP": 47, "GMKN": 33, "ABIO": 18, "KMAZ": 5,
+    "LKOH": 59, "MSNG": 15, "MSRS": 11, "MTSS": 41, "NLMK": 21,
+    "NVTK": 21, "UPRO": 16, "ELFV": 18, "PLZL": 22, "RTKM": 29,
+    "RTKMP": 69, "APTK": 17, "TATN": 49, "TATNP": 79, "SBER": 48,
+    "SBERP": 100, "SNGS": 25, "SNGSP": 73, "SVAV": 20, "BELU": 24,
+    "TGKA": 17, "TGKN": 16, "TRNFP": 58, "VSMO": 6, "MRKV": 20,
+    "MRKC": 25, "MRKZ": 30, "UGLD": 11, "MRKU": 15, "FEES": 16,
+    "MTLRP": 57, "MTLR": 44, "AQUA": 20, "RAGR": 20, "SELG": 25,
+    "ALRS": 34, "PHOR": 29, "MOEX": 61, "CBOM": 22, "MBNK": 12,
+    "IRAO": 32, "RUAL": 18, "SFIN": 8, "FLOT": 16, "RNFT": 26,
+    "ENPG": 19, "T": 51, "VKCO": 20, "ETLN": 21, "SMLT": 33,
+    "MDMG": 27, "OZON": 26, "SGZH": 8, "LEAS": 4, "GEMC": 27,
+    "RENI": 32, "POSI": 27, "WUSH": 40, "SOFL": 19, "ASTR": 17,
+    "HNFG": 12, "SVCB": 17, "DIAS": 16, "DELI": 9, "YDEX": 26,
+    "IVAT": 11, "VSEH": 13, "PRMD": 9, "HEAD": 53, "DATA": 25,
+    "X5": 29, "OZPH": 20, "CNRU": 40, "FIXR": 17, "DOMRF": 10,
+    "GLRX": 16, "BAZA": 17, "BTBR": 12,
+}
+
 
 class PaginationLimitError(RuntimeError):
     """Raised when MOEX pagination appears stuck or unexpectedly large."""
@@ -284,6 +309,16 @@ class FreeFloatResolverV2:
             ts, payload = self.cache[secid_norm]
             if now - ts < self.ttl:
                 return payload
+
+        # Prefer the explicitly supplied MOEX listing-table snapshot.
+        # It covers the supplied share universe and avoids fragile HTML parsing.
+        table_percent = MOEX_FREE_FLOAT_PERCENT.get(secid_norm)
+        if table_percent is not None:
+            return self._store(
+                secid_norm,
+                float(table_percent) / 100.0,
+                source="MOEX_USER_TABLE",
+            )
 
         # First use the same search field as the MOEX page
         # (free-float-search-input; query=<ticker>). This avoids relying on
