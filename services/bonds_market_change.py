@@ -216,7 +216,7 @@ def build_bonds_market_change(
         "processed": completed,
         "errors": len(errors),
         "with_history": int((history_counts > 0).sum()),
-        "without_history": int((history_counts == 0).sum()),
+        "without_history": max(0, len(records) - len(errors) - int((history_counts > 0).sum())),
         "history_rows": history_rows,
     }
     return result
