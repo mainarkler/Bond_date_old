@@ -56,7 +56,34 @@ class FreeFloatResolverTests(unittest.TestCase):
         self.assertAlmostEqual(result["AAA"]["free_float"], 0.25)
         self.assertAlmostEqual(result["BBB"]["free_float"], 0.4)
         self.assertEqual(scraper.calls, 1)
-        self.assertEqual(result["AAA"]["source"], "MOEX_HTML")
+        self.assertEqual(result["AAA"]["source"], "MOEX_LISTING")
+
+    def test_official_listing_table_parses_percent_and_paginates(self):
+        calls = []
+
+        class HtmlResponse:
+            def __init__(self, text):
+                self.text = text
+
+            def raise_for_status(self):
+                return None
+
+        def request_get(url, params=None, headers=None, timeout=15):
+            page = params["pagenumber"]
+            calls.append(page)
+            if page == 0:
+                html = """<table><tr><th>№</th><th>Код</th><th>Наименование</th>
+                <th>Коэффициент free-float, %</th></tr>
+                <tr><td>1</td><td>AAA</td><td>Issuer A</td><td>32,5</td></tr></table>"""
+            else:
+                html = "<html><body>no more rows</body></html>"
+            return HtmlResponse(html)
+
+        scraper = ss.MoexHTMLFreeFloatScraper(request_get=request_get)
+        values = scraper.fetch_listing_freefloat()
+
+        self.assertAlmostEqual(values["AAA"], 0.325)
+        self.assertEqual(calls, [0, 1])
 
     def test_missing_value_contains_diagnostic(self):
         def request_get(url, timeout=10):
