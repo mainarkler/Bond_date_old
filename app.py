@@ -4554,13 +4554,15 @@ if st.session_state["active_view"] == "sell_stres":
         st.markdown("### Share")
         st.markdown("#### Пакетный режим")
         use_q_from_list = st.checkbox(
-            "Вводить Q для каждого ISIN/Ticker (формат: ISIN/Ticker | Q)", value=False, key="share_q_per_isin"
+            "Задать Q отдельно для каждого ISIN/Ticker (% от free-float капитализации; формат: ISIN/Ticker | Q)",
+            value=False,
+            key="share_q_per_isin",
         )
         if use_q_from_list:
             isin_q_input = st.text_area(
-                "Введите ISIN или Ticker и Q (каждая строка: ISIN/Ticker | Q)",
+                "Введите ISIN или Ticker и Q в процентах (каждая строка: ISIN/Ticker | Q)",
                 height=160,
-                placeholder="RU0009029540 | 33000000000\nSBER | 25000000000",
+                placeholder="RU0009029540 | 10\\nSBER | 5",
                 key="share_isin_q_input",
             )
         else:
