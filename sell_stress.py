@@ -259,19 +259,26 @@ def build_q_vector(
     if q_max > 100:
         raise ValueError("Q не может быть больше 100% free-float")
 
+    if q_points < 2:
+        raise ValueError("Количество точек Q должно быть не меньше 2")
+    if q_points > MAX_Q_POINTS_PER_SECURITY:
+        raise ValueError(
+            f"Слишком много точек Q ({q_points}). "
+            f"Лимит: {MAX_Q_POINTS_PER_SECURITY}."
+        )
+
+    # Both modes are bounded by q_points. The previous linear implementation
+    # used a fixed 1e-7 step and could allocate tens of millions of values
+    # before checking MAX_Q_POINTS_PER_SECURITY.
+    q_min = min(FREE_FLOAT_POINT_STEP_PCT, q_max)
     if mode == "linear":
-        q_vector = np.arange(FREE_FLOAT_POINT_STEP_PCT, q_max + q_step, q_step, dtype=np.float64)
+        q_vector = np.linspace(q_min, q_max, num=q_points, dtype=np.float64)
     elif mode == "log":
-        q = np.logspace(np.log10(FREE_FLOAT_POINT_STEP_PCT), np.log10(q_max), q_points)
-        q_vector = np.unique(np.round(q, 3))
+        # Do not round: rounding to 3 decimals collapsed small positive Q
+        # values to zero and introduced duplicate points.
+        q_vector = np.geomspace(q_min, q_max, num=q_points, dtype=np.float64)
     else:
         raise ValueError("Режим Q должен быть 'linear' или 'log'")
-
-    if len(q_vector) > MAX_Q_POINTS_PER_SECURITY:
-        raise ValueError(
-            f"Слишком длинный вектор Q ({len(q_vector)} точек). "
-            f"Уменьшите Q или выберите log-режим (лимит {MAX_Q_POINTS_PER_SECURITY})."
-        )
 
     return q_vector
 
