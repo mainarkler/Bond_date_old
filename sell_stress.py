@@ -199,6 +199,9 @@ class FreeFloatResolverV2:
             if now - ts < self.ttl:
                 return payload
 
+        # Keep diagnostics local to this security; do not leak errors from
+        # a previous ticker into the current ticker's status.
+        self.client.last_errors = {}
         desc = self.client.get_description(secid_norm)
         stats = self.client.get_statistics(secid_norm)
         ff = self._parse(self._field(desc, "FREE_FLOAT", "FREEFLOAT"))
