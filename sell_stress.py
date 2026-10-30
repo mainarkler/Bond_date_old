@@ -464,32 +464,18 @@ def load_issuesize(request_get: Callable, secid: str) -> float:
     if secid_norm in _ISSUESIZE_CACHE:
         return _ISSUESIZE_CACHE[secid_norm]
 
-    # ISS is the source of truth for issue size. Request the securities block
-    # explicitly and match the column name case-insensitively (ISS commonly
-    # returns lowercase field names such as "issuesize").
+    # Preserve the original working MOEX ISS request: the securities block
+    # is returned by default; do not restrict it with iss.only.
     url = f"https://iss.moex.com/iss/securities/{secid_norm}.json"
-    response = request_get(
-        url,
-        params={"iss.only": "securities", "iss.meta": "off"},
-        timeout=200,
-    )
-    if hasattr(response, "raise_for_status"):
-        response.raise_for_status()
+    response = request_get(url, params={"iss.meta": "off"}, timeout=200)
     payload = response.json()
     securities = payload.get("securities", {})
     rows = securities.get("data", [])
     cols = securities.get("columns", [])
-    issue_size_idx = next(
-        (idx for idx, col in enumerate(cols) if str(col).strip().upper() == "ISSUESIZE"),
-        None,
-    )
-    if not rows or issue_size_idx is None:
-        raise ValueError(
-            f"Не удалось получить ISSUESIZE из ISS для {secid_norm}; "
-            f"доступные поля: {', '.join(map(str, cols))}"
-        )
+    if not rows or "ISSUESIZE" not in cols:
+        raise ValueError(f"Не удалось получить ISSUESIZE из ISS для {secid_norm}")
 
-    issuesize = pd.to_numeric(rows[0][issue_size_idx], errors="coerce")
+    issuesize = pd.to_numeric(rows[0][cols.index("ISSUESIZE")], errors="coerce")
     if not np.isfinite(issuesize) or float(issuesize) <= 0:
         raise ValueError(f"Некорректный ISSUESIZE из ISS для {secid_norm}: {issuesize}")
 
