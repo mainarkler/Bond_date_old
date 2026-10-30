@@ -147,6 +147,52 @@ class MoexHTMLFreeFloatScraper:
                 break
         return result
 
+    def fetch_listing_freefloat_search(self, secid: str) -> float | None:
+        """
+        Uses the MOEX listing page's own free-float-search-input form.
+        The form submits its search term as the 'query' URL parameter.
+        """
+        from bs4 import BeautifulSoup
+
+        response = self.request_get(
+            "https://www.moex.com/ru/listing/free-float.aspx",
+            params={"query": str(secid).strip(), "pagenumber": 0},
+            headers=self.headers,
+            timeout=20,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            header_idx = None
+            code_idx = ff_idx = None
+            for ridx, row in enumerate(rows):
+                cells = row.find_all(["th", "td"])
+                labels = [" ".join(c.get_text(" ", strip=True).lower().split()) for c in cells]
+                cidx = next((i for i, h in enumerate(labels) if h == "код" or h.endswith(" код")), None)
+                fidx = next((i for i, h in enumerate(labels) if "free-float" in h and ("коэффициент" in h or "%" in h)), None)
+                if cidx is not None and fidx is not None:
+                    header_idx, code_idx, ff_idx = ridx, cidx, fidx
+                    break
+            if header_idx is None:
+                continue
+
+            for row in rows[header_idx + 1:]:
+                cells = row.find_all(["td", "th"])
+                if len(cells) <= max(code_idx, ff_idx):
+                    continue
+                code = cells[code_idx].get_text(" ", strip=True).upper()
+                if code != str(secid).strip().upper():
+                    continue
+                raw = cells[ff_idx].get_text(" ", strip=True).replace("%", "").replace(",", ".").strip()
+                try:
+                    value = float(raw) / 100.0
+                except (TypeError, ValueError):
+                    return None
+                return value if 0 < value <= 1 else None
+        return None
+
     def fetch_index_page(self, url: str = "https://www.moex.com/a844") -> dict[str, float]:
         """Legacy fallback retained for compatibility."""
         return self.fetch_listing_freefloat()
@@ -211,7 +257,7 @@ class MoexISSClient:
 
 
 class FreeFloatResolverV2:
-    """Multi-source resolver: ISS description -> ISS statistics -> HTML fallback."""
+    """Resolve free-float via MOEX listing search, listing table, then ISS description."""
 
     def __init__(self, client: MoexISSClient, html_scraper: MoexHTMLFreeFloatScraper, ttl: int = 86400):
         self.client = client
@@ -239,11 +285,26 @@ class FreeFloatResolverV2:
             if now - ts < self.ttl:
                 return payload
 
-        # Official MOEX listing table is downloaded once for the whole batch.
+        # First use the same search field as the MOEX page
+        # (free-float-search-input; query=<ticker>). This avoids relying on
+        # a fragile scrape of the entire paginated listing table.
+        search_method = getattr(self.html_scraper, "fetch_listing_freefloat_search", None)
+        if callable(search_method):
+            try:
+                listing_value = self._parse(search_method(secid_norm))
+            except Exception as exc:
+                listing_value = None
+                search_error = f"MOEX listing search: {type(exc).__name__}: {exc}"
+            else:
+                search_error = ""
+            if listing_value is not None:
+                return self._store(secid_norm, listing_value, source="MOEX_LISTING_SEARCH")
+
+        # Fallback: download and cache the complete official listing.
         if self._html_ff_cache is None:
-            fetch_listing = getattr(
-                self.html_scraper, "fetch_listing_freefloat", self.html_scraper.fetch_index_page
-            )
+            fetch_listing = getattr(self.html_scraper, "fetch_listing_freefloat", None)
+            if not callable(fetch_listing):
+                fetch_listing = getattr(self.html_scraper, "fetch_index_page")
             self._html_ff_cache = fetch_listing()
         listing_value = self._parse(self._html_ff_cache.get(secid_norm))
         if listing_value is not None:
