@@ -7,6 +7,7 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 
 BASE_SHARE_HISTORY_URL = "https://iss.moex.com/iss/history/engines/stock/markets/shares/securities"
