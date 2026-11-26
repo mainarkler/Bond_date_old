@@ -10,6 +10,7 @@ import os
 from typing import Dict, Iterable, List
 
 import psycopg2
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 from psycopg2.extras import execute_batch
 
