@@ -1,24 +1,31 @@
-"""Process-wide TLS configuration for Python Requests used by MOEX ISS loaders.
+"""Process-wide Requests configuration for MOEX ISS.
 
-Requests verifies TLS certificates by default. If the runtime is behind a TLS-
-inspecting proxy, set MOEX_CA_BUNDLE to the PEM file containing that proxy's
-root/intermediate CA certificate(s). The custom CA is appended to certifi's
-public roots; certificate verification is never disabled.
+MOEX_SSL_VERIFY defaults to false as a temporary compatibility workaround for
+networks that replace MOEX's TLS certificate with a private/self-signed CA.
+Set MOEX_SSL_VERIFY=true to restore normal certificate validation and use the
+configured certifi/custom CA bundle.
 """
 from __future__ import annotations
 
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _configure_requests_ca() -> None:
     try:
         import certifi
         import requests.adapters
+        import requests.sessions
     except ImportError:
-        # Requests/certifi are application dependencies; don't prevent unrelated
-        # tooling from starting if this optional startup hook runs without them.
         return
 
     custom_ca = (
@@ -35,28 +42,38 @@ def _configure_requests_ca() -> None:
                 "MOEX TLS: CA bundle not found. Check MOEX_CA_BUNDLE: "
                 f"{custom_path}"
             )
-        # Preserve public Web PKI roots while adding the private CA used by a
-        # corporate proxy/network gateway.
         combined = Path(tempfile.gettempdir()) / (
             f"bond_date_requests_ca_{os.getpid()}.pem"
         )
         combined.write_bytes(
             certifi_bundle.read_bytes()
-            + b"\n"
+            + b"\\n"
             + custom_path.read_bytes()
-            + b"\n"
+            + b"\\n"
         )
         ca_path = str(combined)
     else:
-        # Explicitly pin Requests to certifi's maintained Mozilla CA bundle.
         ca_path = str(certifi_bundle)
 
-    # This also covers Sessions with trust_env=False (e.g. news_service.py),
-    # for which REQUESTS_CA_BUNDLE environment overrides are otherwise ignored.
     requests.adapters.DEFAULT_CA_BUNDLE_PATH = ca_path
-    # Sessions with trust_env=True must also use the combined bundle; otherwise
-    # Requests would replace it with the raw REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE.
     os.environ["REQUESTS_CA_BUNDLE"] = ca_path
+
+    # Apply one consistent policy to every requests.get/post/Session call in
+    # the repository, rather than relying on each MOEX loader to pass verify.
+    if getattr(requests.sessions.Session.request, "_moex_tls_policy", False):
+        return
+
+    original_request = requests.sessions.Session.request
+
+    def request_with_moex_tls(self, method, url, *args, **kwargs):
+        hostname = (urlparse(str(url)).hostname or "").lower()
+        if hostname == "iss.moex.com":
+            # Explicit override is available for deployments with a trusted CA.
+            kwargs["verify"] = _env_bool("MOEX_SSL_VERIFY", default=False)
+        return original_request(self, method, url, *args, **kwargs)
+
+    request_with_moex_tls._moex_tls_policy = True
+    requests.sessions.Session.request = request_with_moex_tls
 
 
 _configure_requests_ca()

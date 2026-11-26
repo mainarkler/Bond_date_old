@@ -133,27 +133,29 @@ python -m compileall app.py sell_stress_ui
 
 ## MOEX ISS TLS / SSL configuration
 
-All Python processes started with the repository on `sys.path` load
-`sitecustomize.py` automatically. It pins Requests to the maintained
-`certifi` CA bundle and keeps certificate verification enabled for MOEX ISS
-loaders (index analytics, securities, bonds, turnover, FORTS, history and news).
+All Requests-based calls to `https://iss.moex.com` are covered centrally by
+`sitecustomize.py`, including index analytics, securities, bonds, turnover,
+FORTS, history and news. No individual loader needs to pass a TLS flag.
 
-If the application runs behind a corporate HTTPS-inspection proxy, the proxy's
-root CA must be trusted by the runtime. Obtain its PEM certificate from the
-network administrator and configure this environment variable in Streamlit
-secrets / deployment settings:
+For compatibility with networks that inject a self-signed certificate,
+`MOEX_SSL_VERIFY` defaults to `false` for the `iss.moex.com` host only.
+This disables server-certificate verification and is an insecure temporary
+workaround: use it only on a trusted network. To restore normal TLS validation,
+set:
+
+```text
+MOEX_SSL_VERIFY=true
+```
+
+When certificate verification is enabled and the runtime is behind a corporate
+HTTPS-inspection proxy, obtain its root CA in PEM format from the network
+administrator and configure:
 
 ```text
 MOEX_CA_BUNDLE=/absolute/path/to/corporate-root-ca.pem
+MOEX_SSL_VERIFY=true
 ```
 
-The configured PEM is added to the certifi public CA bundle. Do not set
-`verify=False` and do not disable TLS verification. After changing the
-environment variable, restart the Streamlit process. For local verification:
-
-```bash
-python -c "import requests.adapters; print(requests.adapters.DEFAULT_CA_BUNDLE_PATH)"
-```
-
-The printed path should point to certifi's bundle, or to the generated combined
-bundle when `MOEX_CA_BUNDLE` is configured.
+The private CA is appended to certifi's public CA bundle. Restart the Streamlit
+process after changing environment variables. Never use this workaround for
+hosts other than MOEX ISS.
