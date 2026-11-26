@@ -54,6 +54,9 @@ def _configure_requests_ca() -> None:
     # This also covers Sessions with trust_env=False (e.g. news_service.py),
     # for which REQUESTS_CA_BUNDLE environment overrides are otherwise ignored.
     requests.adapters.DEFAULT_CA_BUNDLE_PATH = ca_path
+    # Sessions with trust_env=True must also use the combined bundle; otherwise
+    # Requests would replace it with the raw REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE.
+    os.environ["REQUESTS_CA_BUNDLE"] = ca_path
 
 
 _configure_requests_ca()
