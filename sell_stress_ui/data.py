@@ -171,6 +171,80 @@ def _lookup_security_meta(symbol: str) -> tuple[str, str]:
     return isin, name
 
 
+
+@lru_cache(maxsize=512)
+def fetch_index_membership_for_isin(
+    isin: str,
+    index_codes: tuple[str, ...] = ALL_STOCK_INDEX_CODES,
+) -> pd.DataFrame:
+    """Find all current stock indices containing the security identified by ISIN."""
+    target_isin = str(isin).strip().upper()
+    columns = ["ISIN", "Ticker", "Index code", "Weight"]
+    if len(target_isin) != 12:
+        raise ValueError("ISIN должен содержать 12 символов.")
+
+    # Resolve ISIN to MOEX ticker/SECID using the ISS securities search.
+    js = _request_get(
+        "https://iss.moex.com/iss/securities.json",
+        params={"q": target_isin, "iss.meta": "off"},
+        timeout=30,
+    ).json()
+    securities = _to_df(js.get("securities", {}))
+    if securities.empty:
+        return pd.DataFrame(columns=columns)
+
+    isin_col = "isin" if "isin" in securities.columns else "ISIN" if "ISIN" in securities.columns else None
+    secid_col = "secid" if "secid" in securities.columns else "SECID" if "SECID" in securities.columns else None
+    if not isin_col or not secid_col:
+        return pd.DataFrame(columns=columns)
+
+    matches = securities[
+        securities[isin_col].astype(str).str.strip().str.upper() == target_isin
+    ]
+    if matches.empty:
+        return pd.DataFrame(columns=columns)
+
+    tickers = sorted({
+        str(value).strip().upper()
+        for value in matches[secid_col].dropna().tolist()
+        if str(value).strip()
+    })
+    if not tickers:
+        return pd.DataFrame(columns=columns)
+
+    as_of_date = datetime.utcnow().strftime("%Y-%m-%d")
+    rows: list[dict] = []
+    for code in index_codes:
+        try:
+            snapshot = _analytics_snapshot_with_fallback(
+                code, as_of_date, lookback_days=14
+            )
+        except Exception:
+            # One unavailable index must not prevent checking the rest.
+            continue
+        if snapshot.empty:
+            continue
+
+        matched = snapshot[
+            snapshot["symbol"].astype(str).str.upper().isin(tickers)
+        ]
+        for item in matched.itertuples(index=False):
+            rows.append({
+                "ISIN": target_isin,
+                "Ticker": str(item.symbol).upper(),
+                "Index code": str(item.index_code).upper(),
+                "Weight": item.weight,
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.DataFrame(rows, columns=columns)
+        .drop_duplicates(subset=["ISIN", "Ticker", "Index code"])
+        .sort_values(["Index code", "Ticker"])
+        .reset_index(drop=True)
+    )
+
 def load_asset_universe(index_codes: Iterable[str] = ("IMOEX", "RTS")) -> pd.DataFrame:
     """Build share universe from live MOEX index composition (no local placeholder)."""
     as_of_date = datetime.utcnow().strftime("%Y-%m-%d")
