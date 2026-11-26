@@ -399,21 +399,44 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
             detail_view = detail_view[
                 ["Requested date", "Snapshot date", "ISIN", "Ticker", "Index name", "Index code", "Weight"]
             ]
-            summary_view = detail_view.groupby(["ISIN", "Ticker"], as_index=False).agg(
-                **{
-                    "Index count": ("Index code", "nunique"),
-                    "Index codes": ("Index code", lambda values: ", ".join(sorted(set(values)))),
-                    "Index names": ("Index name", lambda values: "; ".join(dict.fromkeys(values))),
-                    "Snapshot dates": ("Snapshot date", lambda values: ", ".join(sorted({str(v) for v in values}))),
-                }
-            ).sort_values(["Index count", "ISIN"], ascending=[False, True])
-            st.success(
-                f"Найдено включений в индексы: {len(detail_view)}; "
-                f"ISIN с найденными вхождениями: {summary_view['ISIN'].nunique()}."
-            )
-            st.markdown("**Подробная таблица: ISIN × индекс**")
-            st.dataframe(detail_view, use_container_width=True, hide_index=True)
-            st.markdown("**Сводка по каждому ISIN**")
+            if detail_view.empty:
+                summary_view = pd.DataFrame(columns=[
+                    "ISIN", "Ticker", "Index count", "Index codes", "Index names", "Snapshot dates"
+                ])
+            else:
+                summary_view = detail_view.groupby(["ISIN", "Ticker"], as_index=False).agg(
+                    **{
+                        "Index count": ("Index code", "nunique"),
+                        "Index codes": ("Index code", lambda values: ", ".join(sorted(set(values)))),
+                        "Index names": ("Index name", lambda values: "; ".join(dict.fromkeys(values))),
+                        "Snapshot dates": ("Snapshot date", lambda values: ", ".join(sorted({str(v) for v in values}))),
+                    }
+                )
+            requested_isins = historical_detail.attrs.get("requested_isins", [])
+            requested_frame = pd.DataFrame({"ISIN": requested_isins})
+            summary_view = requested_frame.merge(summary_view, on="ISIN", how="left")
+            for column, default in [
+                ("Ticker", ""), ("Index count", 0), ("Index codes", ""),
+                ("Index names", ""), ("Snapshot dates", ""),
+            ]:
+                if column not in summary_view.columns:
+                    summary_view[column] = default
+                summary_view[column] = summary_view[column].fillna(default)
+            summary_view["Index count"] = summary_view["Index count"].astype(int)
+            summary_view = summary_view[
+                ["ISIN", "Ticker", "Index count", "Index codes", "Index names", "Snapshot dates"]
+            ].sort_values(["Index count", "ISIN"], ascending=[False, True])
+
+            if detail_view.empty:
+                st.info("На выбранную дату в проверенных составах индексов совпадений не найдено.")
+            else:
+                st.success(
+                    f"Найдено включений в индексы: {len(detail_view)}; "
+                    f"ISIN с найденными вхождениями: {(summary_view['Index count'] > 0).sum()}."
+                )
+                st.markdown("**Подробная таблица: ISIN × индекс**")
+                st.dataframe(detail_view, use_container_width=True, hide_index=True)
+            st.markdown("**Сводка по каждому введённому ISIN**")
             st.dataframe(summary_view, use_container_width=True, hide_index=True)
 
             excel_buffer = BytesIO()
@@ -429,11 +452,6 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="historical_index_membership_xlsx",
             )
-        else:
-            summary_view = pd.DataFrame(columns=[
-                "ISIN", "Ticker", "Index count", "Index codes", "Index names", "Snapshot dates"
-            ])
-            st.info("На выбранную дату в проверенных составах индексов совпадений не найдено.")
         if historical_failed_indices:
             st.warning(
                 "Не удалось проверить часть индексов: " + ", ".join(historical_failed_indices)
