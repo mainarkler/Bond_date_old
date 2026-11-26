@@ -364,7 +364,7 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         )
 
     if historical_submitted:
-        raw_tokens = re.split(r"[\\s,;]+", historical_isins_raw.strip().upper())
+        raw_tokens = re.split(r"[\s,;]+", historical_isins_raw.strip().upper())
         historical_isins = list(dict.fromkeys(token for token in raw_tokens if token))
         invalid_isins = [value for value in historical_isins if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value)]
         st.session_state["historical_index_membership_detail"] = None
