@@ -351,3 +351,101 @@ def filter_assets(df: pd.DataFrame, index_filter: str, stock_filter: str) -> pd.
             ]
 
     return filtered.sort_values("symbol").reset_index(drop=True)
+
+
+def fetch_historical_index_memberships_for_isins(
+    isins: Iterable[str],
+    as_of_date: str,
+    index_codes: tuple[str, ...] = ALL_STOCK_INDEX_CODES,
+) -> pd.DataFrame:
+    """Find requested ISINs in every configured index at or before a date.
+
+    If an index has no snapshot on the requested date, walk back up to 14
+    calendar days and report the actual snapshot date used for that index.
+    """
+    requested_isins = sorted({
+        str(value).strip().upper()
+        for value in isins
+        if str(value).strip()
+    })
+    columns = ["Requested date", "Snapshot date", "ISIN", "Ticker", "Index code", "Weight"]
+    if not requested_isins:
+        raise ValueError("Укажите хотя бы один ISIN.")
+    target_date = pd.to_datetime(as_of_date, errors="coerce")
+    if pd.isna(target_date):
+        raise ValueError("Некорректная дата состава индексов.")
+    target_date = target_date.normalize()
+
+    isin_to_tickers: dict[str, set[str]] = {}
+    failed_isins: list[str] = []
+    for target_isin in requested_isins:
+        if len(target_isin) != 12:
+            failed_isins.append(target_isin)
+            continue
+        try:
+            js = _request_get(
+                "https://iss.moex.com/iss/securities.json",
+                params={"q": target_isin, "iss.meta": "off"},
+                timeout=30,
+            ).json()
+            securities = _to_df(js.get("securities", {}))
+            if securities.empty:
+                isin_to_tickers[target_isin] = set()
+                continue
+            isin_col = "isin" if "isin" in securities.columns else "ISIN" if "ISIN" in securities.columns else None
+            secid_col = "secid" if "secid" in securities.columns else "SECID" if "SECID" in securities.columns else None
+            if not isin_col or not secid_col:
+                isin_to_tickers[target_isin] = set()
+                continue
+            exact = securities[
+                securities[isin_col].astype(str).str.strip().str.upper() == target_isin
+            ]
+            isin_to_tickers[target_isin] = {
+                str(v).strip().upper()
+                for v in exact[secid_col].dropna().tolist()
+                if str(v).strip()
+            }
+        except Exception:
+            failed_isins.append(target_isin)
+            isin_to_tickers[target_isin] = set()
+
+    rows: list[dict] = []
+    failed_indices: list[str] = []
+    for code in index_codes:
+        snapshot = pd.DataFrame()
+        snapshot_date = None
+        try:
+            for shift in range(15):
+                candidate = target_date - pd.Timedelta(days=shift)
+                snapshot = _analytics_snapshot(str(code), candidate.strftime("%Y-%m-%d"))
+                if not snapshot.empty:
+                    snapshot_date = candidate.date()
+                    break
+        except Exception:
+            failed_indices.append(str(code).upper())
+            continue
+        if snapshot.empty:
+            continue
+        for target_isin, tickers in isin_to_tickers.items():
+            if not tickers:
+                continue
+            matched = snapshot[snapshot["symbol"].astype(str).str.upper().isin(tickers)]
+            for item in matched.itertuples(index=False):
+                rows.append({
+                    "Requested date": target_date.date(),
+                    "Snapshot date": snapshot_date,
+                    "ISIN": target_isin,
+                    "Ticker": str(item.symbol).upper(),
+                    "Index code": str(code).upper(),
+                    "Weight": item.weight,
+                })
+
+    result = pd.DataFrame(rows, columns=columns)
+    if not result.empty:
+        result = result.drop_duplicates(
+            subset=["ISIN", "Ticker", "Index code"], keep="last"
+        ).sort_values(["ISIN", "Index code", "Ticker"]).reset_index(drop=True)
+    result.attrs["failed_indices"] = failed_indices
+    result.attrs["failed_isins"] = failed_isins
+    result.attrs["requested_isins"] = requested_isins
+    return result
