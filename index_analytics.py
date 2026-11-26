@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import re
 from typing import Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -356,9 +357,11 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
         )
 
     if search_isin_submitted:
+        st.session_state["index_isin_membership_result"] = None
+        st.session_state["index_isin_membership_query"] = isin_query
         if not isin_query:
             st.warning("Введите ISIN для поиска.")
-        elif not __import__("re").fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", isin_query):
+        elif not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", isin_query):
             st.error("Проверьте формат ISIN: ожидается 12 символов.")
         else:
             with st.spinner("Проверяем состав всех индексов MOEX..."):
