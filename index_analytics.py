@@ -1,8 +1,12 @@
 from datetime import datetime, timedelta
+import re
 from typing import Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
+
+from sell_stress_ui.data import fetch_index_membership_for_isin
+from sell_stress_ui.reporting import INDEX_CATALOG
 
 
 INDEX_ANALYTICS_HELP_TEXT = ""
@@ -335,6 +339,77 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
 
     st.subheader("🧾 Состав индекса")
     st.markdown(INDEX_ANALYTICS_HELP_TEXT)
+
+    st.markdown("#### Поиск всех индексов по ISIN")
+    st.caption(
+        "Проверяется актуальный состав основного, отраслевых и тематических "
+        "индексов акций MOEX. Для каждого найденного индекса показывается вес бумаги."
+    )
+    with st.form("index_membership_by_isin_form"):
+        isin_query = st.text_input(
+            "Введите ISIN бумаги",
+            placeholder="Например, RU0009029540",
+            key="index_membership_isin_input",
+        ).strip().upper()
+        search_isin_submitted = st.form_submit_button(
+            "Найти все индексы",
+            use_container_width=True,
+        )
+
+    if search_isin_submitted:
+        st.session_state["index_isin_membership_result"] = None
+        st.session_state["index_isin_membership_query"] = isin_query
+        if not isin_query:
+            st.warning("Введите ISIN для поиска.")
+        elif not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", isin_query):
+            st.error("Проверьте формат ISIN: ожидается 12 символов.")
+        else:
+            with st.spinner("Проверяем состав всех индексов MOEX..."):
+                try:
+                    membership = fetch_index_membership_for_isin(isin_query)
+                    st.session_state["index_isin_membership_result"] = membership
+                    st.session_state["index_isin_membership_query"] = isin_query
+                except Exception as exc:
+                    st.session_state["index_isin_membership_result"] = None
+                    st.error(f"Ошибка поиска индексов по ISIN: {exc}")
+
+    membership_result = st.session_state.get("index_isin_membership_result")
+    searched_isin = st.session_state.get("index_isin_membership_query", "")
+    if membership_result is not None:
+        failed_indices = membership_result.attrs.get("failed_indices", [])
+        if membership_result.empty:
+            if failed_indices:
+                st.warning(
+                    "Не удалось проверить часть индексов: "
+                    + ", ".join(failed_indices)
+                    + ". Отсутствие бумаги в индексах пока нельзя подтвердить."
+                )
+            else:
+                st.info(f"Бумага {searched_isin} не найдена в проверенных составах индексов MOEX.")
+        else:
+            index_names = {item["code"]: item["name"] for item in INDEX_CATALOG}
+            membership_view = membership_result.copy()
+            membership_view.insert(
+                1,
+                "Index name",
+                membership_view["Index code"].map(index_names).fillna(membership_view["Index code"]),
+            )
+            st.success(
+                f"ISIN {searched_isin}: найдено индексов — "
+                f"{membership_view['Index code'].nunique()}."
+            )
+            st.dataframe(membership_view, use_container_width=True, hide_index=True)
+            if failed_indices:
+                st.warning("Не удалось проверить индексы: " + ", ".join(failed_indices))
+            st.download_button(
+                "💾 Скачать список индексов (CSV)",
+                data=membership_view.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"moex_indices_{searched_isin}.csv",
+                mime="text/csv",
+                key="index_isin_membership_csv",
+            )
+
+    st.divider()
 
     idx_col1, idx_col2 = st.columns([1.4, 1])
     with idx_col1:

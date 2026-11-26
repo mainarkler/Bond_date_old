@@ -131,6 +131,13 @@ python -m compileall app.py sell_stress_ui
 - HTML report includes filters by index, ticker, and ISIN.
 - Batch report ranks ISINs by index inclusion across the full MOEX stock-index catalog (main/sector/thematic), using MOEX index analytics endpoint and ticker -> ISIN resolution via `.../markets/shares/securities/{ticker}`.
 
+## ISIN lookup across MOEX stock indices
+
+The `🧾 Состав индекса` view includes a separate ISIN search. It resolves the
+security through MOEX ISS, checks the current composition of the configured
+main, sector and thematic stock-index catalog, and shows every matching index
+with its code and security weight. The result can be exported to CSV.
+
 ## MOEX ISS TLS / SSL configuration
 
 All Requests-based calls to `https://iss.moex.com` are covered centrally by
