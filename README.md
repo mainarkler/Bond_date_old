@@ -166,3 +166,18 @@ MOEX_SSL_VERIFY=true
 The private CA is appended to certifi's public CA bundle. Restart the Streamlit
 process after changing environment variables. Never use this workaround for
 hosts other than MOEX ISS.
+
+
+## Historical index membership export by ISIN
+
+The `🧾 Состав индекса` view includes a separate historical batch export:
+enter multiple ISINs and select a date to retrieve their membership across
+the configured MOEX stock-index catalog. The UI displays a detailed
+ISIN/index table and an aggregate row for every submitted ISIN, including
+securities with no matches. Excel export contains two worksheets:
+`Состав индексов` and `Сводка по ISIN`.
+
+When a composition is unavailable on the requested calendar date, the loader
+checks up to 14 preceding calendar days and includes the snapshot date used
+for each index in the output. Failed index/security lookups are reported so
+partial results are not mistaken for a complete scan.
