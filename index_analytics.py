@@ -376,8 +376,16 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
     membership_result = st.session_state.get("index_isin_membership_result")
     searched_isin = st.session_state.get("index_isin_membership_query", "")
     if membership_result is not None:
+        failed_indices = membership_result.attrs.get("failed_indices", [])
         if membership_result.empty:
-            st.info(f"Бумага {searched_isin} не найдена в проверенных составах индексов MOEX.")
+            if failed_indices:
+                st.warning(
+                    "Не удалось проверить часть индексов: "
+                    + ", ".join(failed_indices)
+                    + ". Отсутствие бумаги в индексах пока нельзя подтвердить."
+                )
+            else:
+                st.info(f"Бумага {searched_isin} не найдена в проверенных составах индексов MOEX.")
         else:
             index_names = {item["code"]: item["name"] for item in INDEX_CATALOG}
             membership_view = membership_result.copy()
@@ -391,6 +399,8 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
                 f"{membership_view['Index code'].nunique()}."
             )
             st.dataframe(membership_view, use_container_width=True, hide_index=True)
+            if failed_indices:
+                st.warning("Не удалось проверить индексы: " + ", ".join(failed_indices))
             st.download_button(
                 "💾 Скачать список индексов (CSV)",
                 data=membership_view.to_csv(index=False).encode("utf-8-sig"),
