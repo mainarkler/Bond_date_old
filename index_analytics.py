@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta
+from io import BytesIO
 import re
 from typing import Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
 
-from sell_stress_ui.data import fetch_index_membership_for_isin
+from sell_stress_ui.data import fetch_historical_index_memberships_for_isins, fetch_index_membership_for_isin
 from sell_stress_ui.reporting import INDEX_CATALOG
 
 
@@ -339,6 +340,130 @@ def render_index_analytics_view(request_get, dataframe_to_excel_bytes):
 
     st.subheader("🧾 Состав индекса")
     st.markdown(INDEX_ANALYTICS_HELP_TEXT)
+
+    st.markdown("#### Историческая выгрузка составов индексов по нескольким ISIN")
+    st.caption(
+        "Введите один или несколько ISIN и выберите дату. В Excel будут отдельные листы "
+        "с детализацией по индексам и со сводкой по каждому ISIN."
+    )
+    with st.form("historical_index_membership_export_form"):
+        historical_isins_raw = st.text_area(
+            "ISIN (по одному на строку, также можно разделять запятыми или точкой с запятой)",
+            placeholder="RU0009029540\nRU000A0JX0J2",
+            height=110,
+            key="historical_index_membership_isins",
+        )
+        historical_as_of = st.date_input(
+            "Дата состава индексов",
+            value=datetime.today().date(),
+            key="historical_index_membership_date",
+        )
+        historical_submitted = st.form_submit_button(
+            "Загрузить составы индексов",
+            use_container_width=True,
+        )
+
+    if historical_submitted:
+        raw_tokens = re.split(r"[\s,;]+", historical_isins_raw.strip().upper())
+        historical_isins = list(dict.fromkeys(token for token in raw_tokens if token))
+        invalid_isins = [value for value in historical_isins if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value)]
+        st.session_state["historical_index_membership_detail"] = None
+        if not historical_isins:
+            st.warning("Введите хотя бы один ISIN.")
+        elif invalid_isins:
+            st.error("Проверьте формат ISIN (12 символов): " + ", ".join(invalid_isins))
+        else:
+            with st.spinner("Загружаем исторические составы индексов MOEX..."):
+                try:
+                    detail = fetch_historical_index_memberships_for_isins(
+                        historical_isins,
+                        historical_as_of.strftime("%Y-%m-%d"),
+                    )
+                    st.session_state["historical_index_membership_detail"] = detail
+                    st.session_state["historical_index_membership_date_value"] = historical_as_of
+                except Exception as exc:
+                    st.error(f"Ошибка загрузки исторических составов: {exc}")
+
+    historical_detail = st.session_state.get("historical_index_membership_detail")
+    if historical_detail is not None:
+        historical_failed_indices = historical_detail.attrs.get("failed_indices", [])
+        historical_failed_isins = historical_detail.attrs.get("failed_isins", [])
+        index_names = {item["code"]: item["name"] for item in INDEX_CATALOG}
+        detail_view = historical_detail.copy()
+        if not detail_view.empty:
+            detail_view.insert(
+                5,
+                "Index name",
+                detail_view["Index code"].map(index_names).fillna(detail_view["Index code"]),
+            )
+            detail_view = detail_view[
+                ["Requested date", "Snapshot date", "ISIN", "Ticker", "Index name", "Index code", "Weight"]
+            ]
+
+        if detail_view.empty:
+            summary_view = pd.DataFrame(columns=[
+                "ISIN", "Ticker", "Index count", "Index codes", "Index names", "Snapshot dates"
+            ])
+            st.info("На выбранную дату в проверенных составах индексов совпадений не найдено.")
+        else:
+            summary_view = detail_view.groupby(["ISIN", "Ticker"], as_index=False).agg(
+                **{
+                    "Index count": ("Index code", "nunique"),
+                    "Index codes": ("Index code", lambda values: ", ".join(sorted(set(values)))),
+                    "Index names": ("Index name", lambda values: "; ".join(dict.fromkeys(values))),
+                    "Snapshot dates": ("Snapshot date", lambda values: ", ".join(sorted({str(v) for v in values}))),
+                }
+            )
+            st.success(
+                f"Найдено включений в индексы: {len(detail_view)}; "
+                f"ISIN с найденными вхождениями: {summary_view['ISIN'].nunique()}."
+            )
+            st.markdown("**Подробная таблица: ISIN × индекс**")
+            st.dataframe(detail_view, use_container_width=True, hide_index=True)
+
+        requested_isins = historical_detail.attrs.get("requested_isins", [])
+        requested_frame = pd.DataFrame({"ISIN": requested_isins})
+        summary_view = requested_frame.merge(summary_view, on="ISIN", how="left")
+        for column, default in [
+            ("Ticker", ""), ("Index count", 0), ("Index codes", ""),
+            ("Index names", ""), ("Snapshot dates", ""),
+        ]:
+            if column not in summary_view.columns:
+                summary_view[column] = default
+            summary_view[column] = summary_view[column].fillna(default)
+        summary_view["Index count"] = summary_view["Index count"].astype(int)
+        summary_view = summary_view[
+            ["ISIN", "Ticker", "Index count", "Index codes", "Index names", "Snapshot dates"]
+        ].sort_values(["Index count", "ISIN"], ascending=[False, True])
+
+        st.markdown("**Сводка по каждому введённому ISIN**")
+        st.dataframe(summary_view, use_container_width=True, hide_index=True)
+
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            detail_view.to_excel(writer, sheet_name="Состав индексов", index=False)
+            summary_view.to_excel(writer, sheet_name="Сводка по ISIN", index=False)
+        export_date = st.session_state.get("historical_index_membership_date_value")
+        export_date_str = export_date.strftime("%Y%m%d") if export_date else "date"
+        st.download_button(
+            "💾 Скачать Excel (2 листа)",
+            data=excel_buffer.getvalue(),
+            file_name=f"moex_index_membership_{export_date_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="historical_index_membership_xlsx",
+        )
+        if historical_failed_indices:
+            st.warning(
+                "Не удалось проверить часть индексов: " + ", ".join(historical_failed_indices)
+                + ". Результат может быть неполным."
+            )
+        if historical_failed_isins:
+            st.warning(
+                "Не удалось разрешить часть ISIN через MOEX ISS: "
+                + ", ".join(historical_failed_isins)
+            )
+
+    st.divider()
 
     st.markdown("#### Поиск всех индексов по ISIN")
     st.caption(
