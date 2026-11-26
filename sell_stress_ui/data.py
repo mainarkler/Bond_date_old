@@ -214,6 +214,7 @@ def fetch_index_membership_for_isin(
 
     as_of_date = datetime.utcnow().strftime("%Y-%m-%d")
     rows: list[dict] = []
+    failed_indices: list[str] = []
     for code in index_codes:
         try:
             snapshot = _analytics_snapshot_with_fallback(
@@ -221,6 +222,7 @@ def fetch_index_membership_for_isin(
             )
         except Exception:
             # One unavailable index must not prevent checking the rest.
+            failed_indices.append(str(code).upper())
             continue
         if snapshot.empty:
             continue
@@ -237,13 +239,16 @@ def fetch_index_membership_for_isin(
             })
 
     if not rows:
-        return pd.DataFrame(columns=columns)
-    return (
-        pd.DataFrame(rows, columns=columns)
-        .drop_duplicates(subset=["ISIN", "Ticker", "Index code"])
-        .sort_values(["Index code", "Ticker"])
-        .reset_index(drop=True)
-    )
+        result = pd.DataFrame(columns=columns)
+    else:
+        result = (
+            pd.DataFrame(rows, columns=columns)
+            .drop_duplicates(subset=["ISIN", "Ticker", "Index code"])
+            .sort_values(["Index code", "Ticker"])
+            .reset_index(drop=True)
+        )
+    result.attrs["failed_indices"] = failed_indices
+    return result
 
 def load_asset_universe(index_codes: Iterable[str] = ("IMOEX", "RTS")) -> pd.DataFrame:
     """Build share universe from live MOEX index composition (no local placeholder)."""
