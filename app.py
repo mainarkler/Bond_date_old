@@ -17,6 +17,7 @@ from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 import yfinance as yf
 from scipy.stats import norm
