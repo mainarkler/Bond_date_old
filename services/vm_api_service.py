@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from functools import lru_cache
 from typing import Any
 
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 
 MOEX_SECURITIES_URL = "https://iss.moex.com/iss/engines/futures/markets/forts/securities.xml"

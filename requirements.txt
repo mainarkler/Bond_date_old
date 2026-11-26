@@ -3,6 +3,7 @@ fastapi
 uvicorn
 pandas
 requests
+certifi>=2024.2.2
 openpyxl
 httpx
 matplotlib

@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Iterable
 
 import pandas as pd
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 
 INDEX_CODE_MAP = {

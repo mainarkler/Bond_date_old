@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 
 ISS_BASE = "https://iss.moex.com/iss"

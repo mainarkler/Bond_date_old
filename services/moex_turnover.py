@@ -6,6 +6,7 @@ import json
 from typing import Dict, List, Tuple
 
 import pandas as pd
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 
 BASE_URL = "https://iss.moex.com/iss"

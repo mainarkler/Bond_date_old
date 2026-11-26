@@ -11,6 +11,7 @@ from typing import Any, Protocol, Sequence
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
+import sitecustomize  # noqa: F401 - configure verified Requests CA bundle
 import requests
 
 MOEX_SITENEWS_URL = "https://iss.moex.com/iss/sitenews.json"
