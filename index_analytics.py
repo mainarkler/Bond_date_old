@@ -185,7 +185,7 @@ def _parse_manual_dates(raw_dates: str) -> List[pd.Timestamp]:
         value = token.strip()
         if not value:
             continue
-        parsed = pd.to_datetime(value, errors="coerce")
+        parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
         if pd.isna(parsed):
             invalid_tokens.append(value)
             continue
@@ -203,6 +203,43 @@ def _parse_manual_dates(raw_dates: str) -> List[pd.Timestamp]:
     return unique_dates
 
 
+def _fetch_snapshot_on_or_before(
+    request_get,
+    index_name: str,
+    requested_dt: pd.Timestamp,
+    lookback_days: int = 14,
+) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+    """Return the nearest available index snapshot on/before a requested date."""
+    requested_dt = pd.Timestamp(requested_dt).normalize()
+    for offset in range(lookback_days + 1):
+        candidate_dt = requested_dt - pd.Timedelta(days=offset)
+        snapshot_df, _ = _fetch_index_snapshot(
+            index_name=index_name,
+            date_str=candidate_dt.strftime("%Y-%m-%d"),
+            _request_get_func=request_get,
+        )
+        if snapshot_df.empty:
+            continue
+
+        snapshot_df = snapshot_df.copy()
+        snapshot_df["Date"] = pd.to_datetime(snapshot_df["Date"], errors="coerce")
+        snapshot_df = snapshot_df.dropna(subset=["Date"])
+        if snapshot_df.empty:
+            continue
+
+        # Never accept a future snapshot for a historical request.
+        eligible = snapshot_df[snapshot_df["Date"].dt.normalize() <= requested_dt]
+        if eligible.empty:
+            continue
+
+        effective_dt = eligible["Date"].max().normalize()
+        day_df = eligible[eligible["Date"].dt.normalize() == effective_dt]
+        if not day_df.empty:
+            return day_df, effective_dt
+
+    return _empty_index_weights_df(), None
+
+
 def _collect_index_snapshots(
     request_get,
     index_name: str,
@@ -211,21 +248,13 @@ def _collect_index_snapshots(
     collected: List[pd.DataFrame] = []
     seen_dates: Set[pd.Timestamp] = set()
 
-    for requested_dt in sorted(set(requested_dates)):
-        snapshot_df, _ = _fetch_index_snapshot(
+    for requested_dt in sorted(set(pd.Timestamp(value).normalize() for value in requested_dates)):
+        day_df, effective_dt = _fetch_snapshot_on_or_before(
+            request_get=request_get,
             index_name=index_name,
-            date_str=requested_dt.strftime("%Y-%m-%d"),
-            _request_get_func=request_get,
+            requested_dt=requested_dt,
         )
-        if snapshot_df.empty:
-            continue
-
-        effective_dt = snapshot_df["Date"].max().normalize()
-        if effective_dt in seen_dates:
-            continue
-
-        day_df = snapshot_df[snapshot_df["Date"].dt.normalize() == effective_dt]
-        if day_df.empty:
+        if day_df.empty or effective_dt is None or effective_dt in seen_dates:
             continue
 
         collected.append(day_df)
@@ -234,7 +263,9 @@ def _collect_index_snapshots(
     if not collected:
         return _empty_index_weights_df()
 
-    return pd.concat(collected, ignore_index=True)
+    return pd.concat(collected, ignore_index=True).sort_values(
+        ["Date", "Tiker"]
+    ).reset_index(drop=True)
 
 def fetch_index_weights(
     request_get,
